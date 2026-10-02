@@ -1,0 +1,26 @@
+---
+import BaseLayout from "../layouts/BaseLayout.astro";
+---
+
+<BaseLayout title="Residue Annotation Platform">
+  <main>
+    <h1>Residue Annotation Platform</h1>
+    <p>Backend status: <span id="backend-status">checking…</span></p>
+  </main>
+</BaseLayout>
+
+<script>
+  import { getHealth } from "../shared/api/client";
+
+  const status = document.getElementById("backend-status");
+
+  if (status) {
+    getHealth()
+      .then((body) => {
+        status.textContent = body.status === "ok" ? "OK" : body.status;
+      })
+      .catch(() => {
+        status.textContent = "unreachable";
+      });
+  }
+</script>
