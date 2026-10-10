@@ -1,0 +1,14 @@
+---
+import AppLayout from '../../../layouts/AppLayout.astro';
+import ProteinViewer from '@features/annotations/components/viewer/ProteinViewer.jsx';
+import { MOCK_PROTEINS, getProtein } from '@features/proteins/data/protein.js';
+
+export function getStaticPaths() {
+  return MOCK_PROTEINS.map((protein) => ({ params: { id: protein.id } }));
+}
+
+const protein = getProtein(Astro.params.id);
+---
+<AppLayout title={`${protein.accession} · Visor`} active="viewer" proteinId={protein.id}>
+  <ProteinViewer client:only="preact" protein={protein} />
+</AppLayout>

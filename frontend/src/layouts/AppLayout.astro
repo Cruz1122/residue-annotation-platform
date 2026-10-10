@@ -1,0 +1,25 @@
+---
+import BaseLayout from './BaseLayout.astro';
+import Sidebar from '@shared/components/navigation/Sidebar.astro';
+
+const {
+  title,
+  description,
+  active = 'progress',
+  sidebarMode = 'pipeline',
+  proteinId = 'P01130',
+  flush = false,
+} = Astro.props;
+---
+<BaseLayout title={title} description={description}>
+  <div class="app-page" transition:name="app-screen">
+    <Sidebar active={active} mode={sidebarMode} proteinId={proteinId} />
+    <main class:list={['page-with-sidebar', { flush }]}>
+      <slot />
+    </main>
+  </div>
+</BaseLayout>
+
+<style>
+  main.flush { padding-top: 0; padding-right: 0; padding-bottom: 0; }
+</style>

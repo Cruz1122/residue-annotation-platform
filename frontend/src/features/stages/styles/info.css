@@ -1,0 +1,70 @@
+.info-view {
+  height: calc(100svh - 28px);
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  border-radius: var(--radius);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.info-head {
+  min-height: 58px;
+  flex: 0 0 58px;
+  padding: 0 20px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  border-bottom: 1px solid var(--line);
+  background: rgba(252,252,251,.94);
+}
+.info-head h1 { margin: 0; font-size: 13px; font-weight: 700; letter-spacing: -.01em; }
+.info-head-meta { color: var(--muted); font-size: 11px; font-weight: 600; white-space: nowrap; }
+.info-body { flex: 1; min-height: 0; overflow: auto; padding: 18px 20px 26px; scroll-behavior: smooth; }
+.info-stages { width: min(1180px, 100%); margin: 0 auto; display: flex; flex-direction: column; gap: 12px; }
+.info-stage {
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  background: #fff;
+  overflow: hidden;
+  scroll-margin-top: 12px;
+  transition: border-color 180ms ease, box-shadow 180ms ease, transform 180ms ease;
+}
+.info-stage:target { border-color: var(--green); box-shadow: 0 0 0 2px rgba(81,171,117,.16), 0 10px 30px rgba(17,19,24,.06); }
+.info-stage-head { min-height: 58px; padding: 10px 14px; display: grid; grid-template-columns: 34px minmax(0,1fr) auto; align-items: center; gap: 11px; border-bottom: 1px solid var(--line); }
+.info-stage-icon { width: 34px; height: 34px; border: 1px solid rgba(81,171,117,.34); background: rgba(81,171,117,.09); color: var(--green-dark); border-radius: 2px; display: grid; place-items: center; }
+.info-stage-icon .icon-slot { width: 17px; height: 17px; }
+.info-stage-title { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.info-stage-title strong { font-size: 11px; font-weight: 700; }
+.info-stage-title span { color: var(--muted); font-size: 8.5px; font-weight: 600; overflow-wrap: anywhere; }
+.info-stage-status { display: inline-flex; align-items: center; gap: 5px; color: var(--green-dark); font-size: 9px; font-weight: 700; white-space: nowrap; }
+.info-stage-status.optional { color: #858b93; }
+.info-stage-status .icon-slot { width: 14px; height: 14px; }
+.info-stage-grid, .variant-ddg-grid { display: grid; grid-template-columns: 1.25fr .9fr; }
+.info-pane { min-width: 0; padding: 14px; }
+.info-pane + .info-pane { border-left: 1px solid var(--line); }
+.info-pane-title { margin: 0 0 10px; font-size: 9px; letter-spacing: .07em; text-transform: uppercase; font-weight: 700; }
+.info-annotation-list { margin: 0; padding: 0; }
+.info-annotation { min-height: 42px; padding: 8px 0; display: grid; grid-template-columns: minmax(0,1fr) minmax(90px, .65fr); gap: 14px; align-items: center; border-top: 1px solid var(--line); }
+.info-annotation:first-child { border-top: 0; }
+.info-annotation dt, .info-annotation dd { margin: 0; }
+.info-annotation dt { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.info-annotation-label { font-size: 10px; font-weight: 600; }
+.info-annotation-key { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 8px; overflow-wrap: anywhere; }
+.info-annotation dd { text-align: right; font-size: 10px; font-weight: 650; overflow-wrap: anywhere; }
+.info-empty-note, .artifact-none { color: var(--muted); font-size: 10px; line-height: 1.5; padding: 8px 0; }
+.artifact-list { display: flex; flex-direction: column; gap: 7px; }
+.artifact-link { min-height: 38px; border: 1px solid var(--line); border-radius: 2px; padding: 0 10px; display: grid; grid-template-columns: 16px minmax(0,1fr) 15px; align-items: center; gap: 8px; color: var(--ink); text-decoration: none; background: #fff; font-size: 9px; font-weight: 600; }
+.artifact-link:hover { border-color: var(--green); background: var(--green-soft); }
+.artifact-link .icon-slot { width: 14px; height: 14px; }
+.artifact-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.variant-ddg-state { position: relative; }
+.variant-ddg-state > .info-stage-status { position: absolute; right: 14px; top: -45px; }
+
+@media (max-width: 820px) {
+  .info-view { height: calc(100svh - 20px); }
+  .info-stage-grid, .variant-ddg-grid { grid-template-columns: 1fr; }
+  .info-pane + .info-pane { border-left: 0; border-top: 1px solid var(--line); }
+  .info-head { padding-inline: 14px; }
+  .info-body { padding: 12px; }
+}

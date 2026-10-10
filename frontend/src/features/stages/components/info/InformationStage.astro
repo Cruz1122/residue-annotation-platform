@@ -1,0 +1,63 @@
+---
+import Icon from '@shared/components/icons/Icon.astro';
+import ArtifactLink from '@features/artifacts/components/ArtifactLink.astro';
+import VariantDdgState from './VariantDdgState.jsx';
+
+interface PipelineStage {
+  id: string;
+  legacy: string;
+  title: string;
+  icon: string;
+  optional?: boolean;
+  note?: string;
+  annotations: Array<[label: string, key: string, value: string]>;
+  artifacts: string[];
+}
+
+interface Props {
+  stage: PipelineStage;
+  index: number;
+}
+
+const { stage, index } = Astro.props as Props;
+const isVariant = stage.id === 'variant_ddg';
+---
+<article class="info-stage" id={`stage-${stage.id}`} data-info-stage={stage.id}>
+  <header class="info-stage-head">
+    <span class="info-stage-icon"><Icon name={stage.icon} /></span>
+    <div class="info-stage-title">
+      <strong>{index + 1}. {stage.title}</strong>
+      <span>{stage.id} · {stage.legacy}{stage.optional ? ' · opcional' : ''}</span>
+    </div>
+    {!isVariant && <span class="info-stage-status"><Icon name="circle-check" />Completado</span>}
+  </header>
+
+  {isVariant ? (
+    <VariantDdgState client:load />
+  ) : (
+    <div class="info-stage-grid">
+      <section class="info-pane">
+        <h2 class="info-pane-title">Anotaciones</h2>
+        {stage.annotations.length ? (
+          <dl class="info-annotation-list">
+            {stage.annotations.map(([label, key, value]) => (
+              <div class="info-annotation">
+                <dt><span class="info-annotation-label">{label}</span><span class="info-annotation-key">{key}</span></dt>
+                <dd>{value}</dd>
+              </div>
+            ))}
+          </dl>
+        ) : <div class="info-empty-note">{stage.note ?? 'Sin anotaciones publicadas en esta etapa.'}</div>}
+      </section>
+
+      <section class="info-pane">
+        <h2 class="info-pane-title">Artefactos</h2>
+        {stage.artifacts.length ? (
+          <div class="artifact-list">
+            {stage.artifacts.map((filename) => <ArtifactLink stageId={stage.id} filename={filename} />)}
+          </div>
+        ) : <div class="artifact-none">Sin artefactos para esta corrida.</div>}
+      </section>
+    </div>
+  )}
+</article>

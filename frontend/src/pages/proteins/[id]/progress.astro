@@ -1,0 +1,14 @@
+---
+import AppLayout from '../../../layouts/AppLayout.astro';
+import PipelineProgress from '@features/runs/components/progress/PipelineProgress.jsx';
+import { MOCK_PROTEINS, getProtein } from '@features/proteins/data/protein.js';
+
+export function getStaticPaths() {
+  return MOCK_PROTEINS.map((protein) => ({ params: { id: protein.id } }));
+}
+
+const protein = getProtein(Astro.params.id);
+---
+<AppLayout title={`${protein.accession} · Progreso`} active="progress" proteinId={protein.id}>
+  <PipelineProgress client:load proteinId={protein.id} />
+</AppLayout>

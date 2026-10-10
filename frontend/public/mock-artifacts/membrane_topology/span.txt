@@ -1,0 +1,1 @@
+P01130	membrane_topology	span.txt	mock

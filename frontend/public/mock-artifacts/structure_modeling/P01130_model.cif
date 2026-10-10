@@ -1,0 +1,4 @@
+data_P01130_mock
+_entry.id P01130
+_audit_conform.dict_name mmcif_pdbx.dic
+#

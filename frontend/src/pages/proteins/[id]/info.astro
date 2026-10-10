@@ -1,0 +1,26 @@
+---
+import AppLayout from '../../../layouts/AppLayout.astro';
+import InformationStage from '@features/stages/components/info/InformationStage.astro';
+import { PIPELINE_STAGES } from '@features/stages/data/pipeline.js';
+import { MOCK_PROTEINS, getProtein } from '@features/proteins/data/protein.js';
+import '@features/stages/styles/info.css';
+
+export function getStaticPaths() {
+  return MOCK_PROTEINS.map((protein) => ({ params: { id: protein.id } }));
+}
+
+const protein = getProtein(Astro.params.id);
+---
+<AppLayout title={`${protein.accession} · Información`} active="info" proteinId={protein.id}>
+  <section class="info-view" aria-label="Información y artefactos del pipeline">
+    <header class="info-head">
+      <h1>Información</h1>
+      <div class="info-head-meta">{protein.accession} · {protein.gene}</div>
+    </header>
+    <div class="info-body">
+      <div class="info-stages">
+        {PIPELINE_STAGES.map((stage, index) => <InformationStage stage={stage} index={index} />)}
+      </div>
+    </div>
+  </section>
+</AppLayout>
