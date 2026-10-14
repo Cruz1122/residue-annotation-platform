@@ -39,7 +39,7 @@ from app.features.proteins.models import Protein
 from app.features.runs import models as _runs  # noqa: F401
 from app.features.runs.models import ActiveRunSlot, Run, RunStage
 from app.features.runs.schemas import RunCreate
-from app.features.runs.service import create_run, request_cancel, transition_stage
+from app.features.runs.service import create_run, get_owned_run, request_cancel, transition_stage
 from app.features.runs.state import RunStageStatus
 from app.features.runs.worker_service import (
     _claim_statement,
@@ -129,6 +129,19 @@ def test_concurrent_run_creation_keeps_one_slot():
     with TestSession() as session:
         assert session.scalar(select(func.count()).select_from(Run)) == 1
         assert session.scalar(select(func.count()).select_from(ActiveRunSlot)) == 1
+
+
+def test_postgres_run_ownership_blocks_a_foreign_principal():
+    with TestSession() as session:
+        protein_id = _protein(session).id
+        run = create_run(session, RunCreate(protein_id=protein_id), Principal("u1", "p1"))
+        run_id = run.id
+
+    with TestSession() as session:
+        with pytest.raises(HTTPException) as error:
+            get_owned_run(session, run_id, Principal("u2", "p2"))
+
+    assert error.value.status_code == 404
 
 
 def test_concurrent_claim_has_single_winner(tmp_path: Path):
