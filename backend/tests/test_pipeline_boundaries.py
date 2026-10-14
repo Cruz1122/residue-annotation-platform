@@ -18,6 +18,7 @@ from app.features.runs.manifest import (
 )
 from app.infrastructure.hpc.readonly import (
     AUTHORIZED_MN5_ROOT,
+    InMemoryReadOnlyInspector,
     InspectionError,
     LocalReadOnlyInspector,
     SFTPReadOnlyInspector,
@@ -136,6 +137,32 @@ def test_read_only_inspector_rejects_escape_and_symlink(tmp_path: Path):
         validate_relative_path("../secret")
     with pytest.raises(InspectionError):
         inspector.stat("link.txt")
+
+
+def test_local_read_only_inspector_applies_listing_and_preview_limits(tmp_path: Path):
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "one.txt").write_text("one", encoding="utf-8")
+    (root / "two.txt").write_text("two", encoding="utf-8")
+    inspector = LocalReadOnlyInspector(root, max_entries=1, max_preview_bytes=2)
+
+    with pytest.raises(InspectionError, match="listing exceeds"):
+        inspector.list()
+    with pytest.raises(InspectionError, match="preview exceeds"):
+        inspector.read_preview("one.txt", 3)
+
+
+def test_in_memory_read_only_inspector_applies_same_bounds():
+    inspector = InMemoryReadOnlyInspector(
+        {"one.txt": b"one", "two.txt": b"two"},
+        max_entries=1,
+        max_preview_bytes=2,
+    )
+
+    with pytest.raises(InspectionError, match="listing exceeds"):
+        inspector.list()
+    with pytest.raises(InspectionError, match="preview exceeds"):
+        inspector.read_preview("one.txt", 3)
 
 
 @pytest.mark.parametrize("relative_path", ["payload.bin", "private-key.txt", "password.txt"])

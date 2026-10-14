@@ -427,3 +427,84 @@ def test_stale_cache_entry_is_purged_and_republished(client, session, tmp_path: 
     )
     assert len(remaining) == 1
     assert remaining[0].id == new_id
+
+
+def test_failed_republish_restores_stale_cache_row_and_files(
+    client, session, tmp_path: Path, monkeypatch
+):
+    stage = _stage_for_consumer(session, client, "physicochemical_context")
+    result = session.get(StageResult, stage.stage_result_id)
+    assert result is not None
+    old_id = result.id
+    settings = Settings(
+        app_env="test",
+        database_url="sqlite://",
+        artifact_root=tmp_path / "artifacts",
+        hpc_remote_root="/gpfs/root",
+    )
+    stale_path = settings.artifact_root / "remote/stale/model.cif"
+    stale_path.parent.mkdir(parents=True, exist_ok=True)
+    stale_path.write_bytes(b"old")
+    session.add(
+        Artifact(
+            stage_result_id=result.id,
+            artifact_type="model",
+            storage_backend="filesystem",
+            storage_key="remote/stale/model.cif",
+            sha256="a" * 64,
+            size=3,
+        )
+    )
+    session.commit()
+
+    class _FakeClient:
+        def read_text(self, remote_path: str, max_bytes: int) -> str:
+            if remote_path.endswith(".result"):
+                return "/gpfs/root/runs/run-1"
+            if remote_path.endswith("run_context.json"):
+                return json.dumps({"stage_results": {}})
+            if remote_path.endswith("DONE"):
+                return "OK\n"
+            if remote_path.endswith("result_manifest.json"):
+                return json.dumps(
+                    {
+                        "schema": "stage-result-v1",
+                        "stage_id": "physicochemical_context",
+                        "status": "success",
+                        "cache_key": result.cache_key,
+                        "annotations": "rows.tsv",
+                        "artifacts": {
+                            "model": {
+                                "path": "model.cif",
+                                "sha256": "b" * 64,
+                                "size": 4,
+                            }
+                        },
+                        "file_integrity": {
+                            "annotations": {"sha256": "c" * 64, "size": 4},
+                            "provenance.json": {
+                                "sha256": hashlib.sha256(b"{}").hexdigest(),
+                                "size": 2,
+                            },
+                        },
+                    }
+                )
+            if remote_path.endswith("provenance.json"):
+                return "{}"
+            raise RuntimeError(f"unexpected read: {remote_path}")
+
+    executor = SSHStageExecutor.__new__(SSHStageExecutor)
+    executor.settings = settings
+    executor.client = _FakeClient()
+
+    def fail_download(*_args, **_kwargs):
+        raise RemoteStageExecutionError("simulated publication failure")
+
+    monkeypatch.setattr(executor, "_download_remote_file", fail_download)
+    with pytest.raises(RemoteStageExecutionError, match="simulated publication failure"):
+        executor._ingest_result(session, stage)
+
+    session.expire_all()
+    restored = session.get(StageResult, old_id)
+    assert restored is not None
+    assert stale_path.read_bytes() == b"old"

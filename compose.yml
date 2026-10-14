@@ -50,7 +50,10 @@ services:
       HPC_SSH_PORT: ${HPC_SSH_PORT:-22}
     volumes:
       - type: bind
-        source: ${HPC_VPN_CONFIG_FILE:-/etc/openfortivpn/config}
+        # /dev/null keeps the config mount optional when credentials come
+        # from HPC_VPN_PASSWORD_FILE. Set HPC_VPN_CONFIG_FILE explicitly to
+        # use a protected openfortivpn config containing a cookie/password.
+        source: ${HPC_VPN_CONFIG_FILE:-/dev/null}
         target: /etc/openfortivpn/config
         read_only: true
     secrets:

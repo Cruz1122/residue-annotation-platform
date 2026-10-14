@@ -40,6 +40,9 @@ class RemoteStageExecutionError(RuntimeError):
     pass
 
 
+_DEFERRED_ARTIFACT_CLEANUP_KEY = "remote_executor.deferred_artifact_cleanup"
+
+
 class SSHStageExecutor:
     """Submit one pipeline stage through the configured SSH/Slurm boundary.
 
@@ -225,7 +228,7 @@ class SSHStageExecutor:
             if persisted not in {RunStageStatus.QUEUED, RunStageStatus.RUNNING}:
                 # A concurrent cancel won: keep the verified result as a cache
                 # entry and leave the terminal stage untouched.
-                session.commit()
+                self._commit_and_cleanup(session)
                 return True
             if persisted == RunStageStatus.QUEUED:
                 transition_stage(session, stage, RunStageStatus.RUNNING)
@@ -235,7 +238,7 @@ class SSHStageExecutor:
                 RunStageStatus.REUSED if reused else RunStageStatus.SUCCESS,
             )
             stage.stage_result_id = result_id
-            session.commit()
+            self._commit_and_cleanup(session)
             return True
         if status.state == JobState.CANCELLED:
             persisted = session.scalar(select(RunStage.status).where(RunStage.id == stage.id))
@@ -342,24 +345,55 @@ class SSHStageExecutor:
         session: Session,
         stage: RunStage,
         cache_key: str,
-        store: ArtifactStore,
     ) -> None:
         """Remove cache rows whose artifacts are gone so a fresh publish can
         reuse the same (protein, stage, cache_key) without violating the unique
-        constraint."""
+        constraint.
+
+        Files are deliberately deleted only after the replacement transaction
+        commits. Deleting them before ``flush`` would leave a rolled-back
+        database row pointing at missing artifacts if a later download or
+        annotation validation failed.
+        """
 
         annotation_table = ANNOTATION_TABLES[stage.stage_id]
+        stale_storage_keys: set[str] = set()
         for result in self._candidate_results(session, stage, cache_key):
             for artifact in result.artifacts:
-                try:
-                    store.resolve(artifact.storage_key).unlink(missing_ok=True)
-                except (ArtifactPathError, OSError):
-                    pass
+                stale_storage_keys.add(artifact.storage_key)
             session.execute(
                 annotation_table.delete().where(annotation_table.c.stage_result_id == result.id)
             )
             session.delete(result)
         session.flush()
+        if stale_storage_keys:
+            pending = session.info.setdefault(_DEFERRED_ARTIFACT_CLEANUP_KEY, set())
+            pending.update(stale_storage_keys)
+
+    def _commit_and_cleanup(self, session: Session) -> None:
+        """Commit a publication, then remove artifacts superseded by it."""
+
+        pending = set(session.info.get(_DEFERRED_ARTIFACT_CLEANUP_KEY, set()))
+        try:
+            session.commit()
+        except Exception:
+            # The transaction did not become the new source of truth. Keep
+            # stale files and discard the deferred cleanup so a rollback can
+            # restore the previous cache entry intact.
+            session.info.pop(_DEFERRED_ARTIFACT_CLEANUP_KEY, None)
+            raise
+        session.info.pop(_DEFERRED_ARTIFACT_CLEANUP_KEY, None)
+        if not pending:
+            return
+        store = ArtifactStore(self.settings)
+        for storage_key in pending:
+            try:
+                store.resolve(storage_key).unlink(missing_ok=True)
+            except (ArtifactPathError, OSError):
+                # Database publication is already durable; an orphan can be
+                # reclaimed by a later storage maintenance pass without
+                # corrupting the cache index.
+                continue
 
     def _artifact_available(self, store: ArtifactStore, artifact: Artifact) -> bool:
         try:
@@ -403,7 +437,7 @@ class SSHStageExecutor:
         reusable = self._find_reusable_result(session, stage, cache_key, store)
         if reusable is not None:
             return reusable.id, True
-        self._purge_stale_results(session, stage, cache_key, store)
+        self._purge_stale_results(session, stage, cache_key)
 
         annotations_relative = str(manifest["annotations"])
         annotations_path = self._remote_child(result_dir, annotations_relative)
@@ -508,6 +542,7 @@ class SSHStageExecutor:
             session.flush()
             return result.id, False
         except Exception:
+            session.info.pop(_DEFERRED_ARTIFACT_CLEANUP_KEY, None)
             session.rollback()
             for storage_key in stored_keys:
                 try:

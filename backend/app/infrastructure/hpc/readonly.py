@@ -89,8 +89,20 @@ class ReadOnlyMN5Inspector(Protocol):
 
 
 class LocalReadOnlyInspector:
-    def __init__(self, root: Path):
+    def __init__(
+        self,
+        root: Path,
+        *,
+        max_entries: int = 100,
+        max_preview_bytes: int = 64_000,
+    ):
+        if max_entries < 1:
+            raise ValueError("max_entries must be positive")
+        if max_preview_bytes < 1:
+            raise ValueError("max_preview_bytes must be positive")
         self.root = root.resolve()
+        self.max_entries = max_entries
+        self.max_preview_bytes = max_preview_bytes
 
     def _resolve(self, relative_path: str) -> Path:
         relative = validate_relative_path(relative_path) if relative_path else PurePosixPath()
@@ -109,7 +121,9 @@ class LocalReadOnlyInspector:
         if not directory.is_dir():
             raise InspectionError("not a directory")
         entries = []
-        for child in sorted(directory.iterdir(), key=lambda item: item.name):
+        for index, child in enumerate(sorted(directory.iterdir(), key=lambda item: item.name)):
+            if index >= self.max_entries:
+                raise InspectionError("directory listing exceeds configured limit")
             if child.is_symlink() or child.name.startswith("."):
                 continue
             is_directory = child.is_dir()
@@ -130,8 +144,8 @@ class LocalReadOnlyInspector:
         return InspectionEntry(str(path.relative_to(self.root)), item.st_size, path.is_dir())
 
     def read_preview(self, relative_path: str, limit: int) -> bytes:
-        if limit < 1:
-            raise InspectionError("preview limit must be positive")
+        if limit < 1 or limit > self.max_preview_bytes:
+            raise InspectionError("preview exceeds configured limit")
         path = self._resolve(str(_validate_preview_path(relative_path)))
         if not path.is_file():
             raise InspectionError("not a regular file")
@@ -286,16 +300,33 @@ class SFTPReadOnlyInspector:
 class InMemoryReadOnlyInspector:
     """Test-only fixture adapter; it has no product endpoint or write method."""
 
-    def __init__(self, files: dict[str, bytes]):
+    def __init__(
+        self,
+        files: dict[str, bytes],
+        *,
+        max_entries: int = 100,
+        max_preview_bytes: int = 64_000,
+    ):
+        if max_entries < 1:
+            raise ValueError("max_entries must be positive")
+        if max_preview_bytes < 1:
+            raise ValueError("max_preview_bytes must be positive")
         self.files = {str(validate_relative_path(path)): value for path, value in files.items()}
+        self.max_entries = max_entries
+        self.max_preview_bytes = max_preview_bytes
 
     def list(self, relative_dir: str = "") -> list[InspectionEntry]:
+        if relative_dir:
+            validate_relative_path(relative_dir)
         prefix = f"{relative_dir.rstrip('/')}/" if relative_dir else ""
-        return [
+        entries = [
             InspectionEntry(path, len(value), False)
             for path, value in self.files.items()
             if path.startswith(prefix)
         ]
+        if len(entries) > self.max_entries:
+            raise InspectionError("directory listing exceeds configured limit")
+        return entries
 
     def stat(self, relative_path: str) -> InspectionEntry:
         validate_relative_path(relative_path)
@@ -306,8 +337,8 @@ class InMemoryReadOnlyInspector:
         return InspectionEntry(relative_path, len(value), False)
 
     def read_preview(self, relative_path: str, limit: int) -> bytes:
-        if limit < 1:
-            raise InspectionError("preview limit must be positive")
+        if limit < 1 or limit > self.max_preview_bytes:
+            raise InspectionError("preview exceeds configured limit")
         _validate_preview_path(relative_path)
         self.stat(relative_path)
         return self.files[relative_path][:limit]
