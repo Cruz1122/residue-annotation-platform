@@ -92,6 +92,13 @@ class FakeCompletedRemote:
         return len(payload), hashlib.sha256(payload).hexdigest()
 
 
+class FakeTruncatedManifestRemote(FakeCompletedRemote):
+    def read_text(self, remote_path: str, max_bytes: int) -> str:
+        if remote_path.endswith("result_manifest.json"):
+            return '{"schema":"stage-result-v1"'
+        return super().read_text(remote_path, max_bytes)
+
+
 def test_submit_poll_and_ingest_persist_a_linked_stage_result(client, session, tmp_path: Path):
     protein = client.post(
         "/api/v1/proteins",
@@ -159,3 +166,42 @@ def test_submit_poll_and_ingest_persist_a_linked_stage_result(client, session, t
     assert annotations[0]["aa_position"] == 1
     assert annotations[0]["aa_ref"] == "A"
     assert annotations[0]["values"] == {"gene": "GENE1", "accession": "P00001"}
+
+
+def test_truncated_remote_manifest_fails_stage_without_publishing(client, session, tmp_path: Path):
+    protein = client.post(
+        "/api/v1/proteins",
+        json={
+            "sequence": SEQUENCE,
+            "aliases": [{"source": "uniprot", "identifier": "P00001"}],
+        },
+    )
+    assert protein.status_code == 201
+    created_run = client.post(
+        "/api/v1/runs",
+        json={"protein_id": protein.json()["id"]},
+    )
+    assert created_run.status_code == 201
+
+    settings = Settings(
+        app_env="test",
+        database_url="sqlite://",
+        artifact_root=tmp_path / "artifacts",
+        hpc_remote_root="/gpfs/test",
+    )
+    stage = claim_ready_stage(session, settings)
+    assert stage is not None
+    remote = FakeTruncatedManifestRemote(created_run.json()["id"])
+    executor = SSHStageExecutor.__new__(SSHStageExecutor)
+    executor.settings = settings
+    executor.client = remote
+
+    executor.submit_stage(session, stage)
+    assert executor.poll_stage(session, stage) is True
+    session.expire_all()
+
+    persisted_stage = session.get(RunStage, stage.id)
+    assert persisted_stage is not None
+    assert persisted_stage.status == "failed"
+    assert persisted_stage.error_code == "remote_result_invalid"
+    assert persisted_stage.stage_result_id is None

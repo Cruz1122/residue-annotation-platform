@@ -82,3 +82,15 @@ def test_artifact_download_serves_matching_content(client, session, tmp_path):
 
     assert response.status_code == 200
     assert response.content == b"data"
+
+
+def test_artifact_metadata_never_exposes_storage_or_gpfs_paths(client, session):
+    artifact_id = _artifact_with_recorded_size(client, session, size=4)
+
+    response = client.get(f"/api/v1/artifacts/{artifact_id}", headers=HEADERS)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert "storage_key" not in payload
+    assert "/gpfs/" not in str(payload)
+    assert payload["download_url"] == f"/api/v1/artifacts/{artifact_id}/content"
