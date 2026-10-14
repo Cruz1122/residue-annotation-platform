@@ -181,21 +181,21 @@ class _FakeSSHInspectorTransport:
 def _sftp_inspector_settings(tmp_path: Path, **overrides):
     from app.core.config import Settings
 
-    password = tmp_path / "hpc-password"
-    password.write_text("test-password\n", encoding="utf-8")
-    password.chmod(0o600)
+    password_path = tmp_path / "hpc-password"
+    password_path.write_text("test-password\n", encoding="utf-8")
+    password_path.chmod(0o600)
     values = {
         "app_env": "test",
         "database_url": "sqlite://",
         "hpc_ssh_host": "glogin4.bsc.es",
         "hpc_ssh_username": "bsc001997",
-        "hpc_ssh_password_file": password,
+        "hpc_ssh_password_file": password_path,
         "hpc_known_hosts_file": tmp_path / "known_hosts",
         "mn5_root": AUTHORIZED_MN5_ROOT,
         "mn5_max_preview_bytes": 64,
     }
     values.update(overrides)
-    return Settings(**values), password
+    return Settings(**values), password_path
 
 
 def test_sftp_read_only_inspector_uses_only_bounded_sftp_reads(tmp_path: Path, monkeypatch):
@@ -265,21 +265,21 @@ def test_sftp_read_only_inspector_sanitizes_remote_io_errors(tmp_path: Path, mon
 def test_sftp_read_only_inspector_rejects_unsafe_profiles(
     tmp_path: Path, overrides, password_mode: int, password_contents: str
 ):
-    settings, password = _sftp_inspector_settings(tmp_path, **overrides)
-    password.write_text(password_contents, encoding="utf-8")
-    password.chmod(password_mode)
+    settings, password_path = _sftp_inspector_settings(tmp_path, **overrides)
+    password_path.write_text(password_contents, encoding="utf-8")
+    password_path.chmod(password_mode)
 
     with pytest.raises(InspectionError):
         SFTPReadOnlyInspector(settings)
 
 
 def test_sftp_read_only_inspector_rejects_symlinked_password_file(tmp_path: Path):
-    settings, password = _sftp_inspector_settings(tmp_path)
+    settings, password_path = _sftp_inspector_settings(tmp_path)
     target = tmp_path / "real-password"
     target.write_text("secret", encoding="utf-8")
     target.chmod(0o600)
-    password.unlink()
-    password.symlink_to(target)
+    password_path.unlink()
+    password_path.symlink_to(target)
 
     with pytest.raises(InspectionError, match="regular file"):
         SFTPReadOnlyInspector(settings)
