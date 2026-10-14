@@ -389,6 +389,57 @@ def test_prepare_run_inputs_rejects_remote_mmcif_before_opening_ssh(session, tmp
     assert persisted.transfer_status == "failed"
 
 
+def test_prepare_run_inputs_rejects_tampered_storage_before_transfer(client, session, monkeypatch):
+    from app.core.config import get_settings
+    from app.features.runs.worker_service import prepare_run_inputs
+    from app.main import app
+
+    upload = client.post(
+        "/api/v1/uploads",
+        files={"file": ("query.fasta", b">query\nACDE", "text/plain")},
+        data={"input_type": "fasta"},
+    )
+    assert upload.status_code == 201
+    protein = client.post(
+        "/api/v1/proteins",
+        json={
+            "sequence": "ACDE",
+            "aliases": [{"source": "uniprot", "identifier": "P00001"}],
+        },
+    )
+    assert protein.status_code == 201
+    protein_id = protein.json()["id"]
+    created_run = client.post(
+        "/api/v1/runs",
+        json={"protein_id": protein_id, "upload_ids": [upload.json()["id"]]},
+    )
+    assert created_run.status_code == 201
+
+    persisted_upload = session.get(Upload, upload.json()["id"])
+    run = session.get(Run, created_run.json()["id"])
+    assert persisted_upload is not None
+    assert run is not None
+    settings = app.dependency_overrides[get_settings]()
+    (settings.artifact_root / persisted_upload.storage_key).write_bytes(b">query\nTAMPERED")
+
+    def fail_if_transfer_opens(_settings):
+        raise AssertionError("tampered input must fail before opening SCP")
+
+    monkeypatch.setattr("app.features.runs.worker_service.SCPInputTransfer", fail_if_transfer_opens)
+    settings = settings.model_copy(
+        update={"hpc_execution_mode": "ssh", "hpc_input_transfer_enabled": True}
+    )
+
+    with pytest.raises(InputTransferError, match="integrity"):
+        prepare_run_inputs(session, run, settings)
+
+    session.expire_all()
+    persisted_upload = session.get(Upload, persisted_upload.id)
+    assert persisted_upload is not None
+    assert persisted_upload.transfer_status == "failed"
+    assert persisted_upload.transfer_error == "stored input integrity check failed"
+
+
 def test_native_input_transfer_confines_and_does_not_overwrite(tmp_path):
     from app.core.config import Settings
     from app.infrastructure.hpc.transfer import InputTransferError, NativeInputTransfer

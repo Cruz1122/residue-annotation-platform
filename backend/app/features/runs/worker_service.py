@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.core.config import Settings, get_settings
 from app.core.observability import log_worker_event
 from app.core.security import sanitize_error_message
-from app.features.artifacts.storage import ArtifactStore
+from app.features.artifacts.storage import ArtifactPathError, ArtifactStore
 from app.features.runs.models import ActiveRunSlot, Run, RunStage, Upload
 from app.features.runs.service import transition_stage
 from app.features.runs.state import RunStageStatus, RunStatus
@@ -83,14 +83,26 @@ def prepare_run_inputs(session: Session, run: Run, settings: Settings) -> None:
                 suffix,
                 input_type=upload.input_type,
             )
-            if upload.transfer_status == "uploaded" and upload.remote_path == remote_path:
-                continue
-            pending.append((upload, local_path, remote_path))
         except InputTransferError as exc:
             upload.transfer_status = "failed"
             upload.transfer_error = str(exc)[:1000]
             session.commit()
             raise
+        try:
+            stored_size, stored_sha256 = store.metadata(upload.storage_key)
+        except (ArtifactPathError, OSError) as exc:
+            upload.transfer_status = "failed"
+            upload.transfer_error = "stored input is unavailable"
+            session.commit()
+            raise InputTransferError("stored input is unavailable") from exc
+        if stored_size != upload.size or stored_sha256 != upload.sha256:
+            upload.transfer_status = "failed"
+            upload.transfer_error = "stored input integrity check failed"
+            session.commit()
+            raise InputTransferError("stored input integrity check failed")
+        if upload.transfer_status == "uploaded" and upload.remote_path == remote_path:
+            continue
+        pending.append((upload, local_path, remote_path))
 
     if not pending:
         return

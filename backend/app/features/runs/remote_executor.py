@@ -88,6 +88,9 @@ class SSHStageExecutor:
     def _marker_path(self, run_id: str, stage_id: str) -> str:
         return self._remote_child(self._job_directory(run_id), f"{stage_id}.result")
 
+    def _submission_receipt_path(self, run_id: str, stage_id: str) -> str:
+        return self._remote_child(self._job_directory(run_id), f"{stage_id}.submitted")
+
     def _script(self, run: Run, stage: RunStage, accession: str, marker_path: str) -> str:
         python = shlex.quote(self.settings.hpc_pipeline_python)
         main = shlex.quote(self.settings.hpc_pipeline_main)
@@ -182,6 +185,7 @@ class SSHStageExecutor:
         job_directory = self._job_directory(run.id)
         self.client.ensure_directory(job_directory)
         marker_path = self._marker_path(run.id, stage.stage_id)
+        submission_receipt_path = self._submission_receipt_path(run.id, stage.stage_id)
         output_path = self._remote_child(job_directory, f"{stage.stage_id}.out")
         error_path = self._remote_child(job_directory, f"{stage.stage_id}.err")
         request = JobRequest(
@@ -197,6 +201,7 @@ class SSHStageExecutor:
             job_name=f"rap-{stage.stage_id}-{run.id[:8]}",
             stdout_path=output_path,
             stderr_path=error_path,
+            submission_receipt_path=submission_receipt_path,
         )
         handle = self.client.submit(request)
         stage.slurm_job_id = handle.job_id

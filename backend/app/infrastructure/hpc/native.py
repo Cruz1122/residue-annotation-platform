@@ -8,6 +8,7 @@ import shlex
 import stat
 import subprocess
 from pathlib import Path, PurePosixPath
+from uuid import uuid4
 
 from app.core.config import Settings
 from app.infrastructure.hpc.archive import ArchiveError, BoundedTarWriter
@@ -379,6 +380,61 @@ class NativeSlurmClient:
             raise
         return completed.stdout.strip()
 
+    def _run_shell(self, script: str) -> str:
+        try:
+            completed = subprocess.run(
+                ["/bin/sh", "-c", script],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        except subprocess.CalledProcessError as exc:
+            if exc.returncode == 127:
+                raise HPCConfigurationError("native Slurm command is unavailable") from exc
+            raise
+        except subprocess.TimeoutExpired as exc:
+            raise HPCTransportError("native Slurm transport is unavailable") from exc
+        except OSError as exc:
+            _rethrow_native_slurm_transport_error(exc)
+            raise
+        return completed.stdout.strip()
+
+    def _read_submission_receipt(self, receipt_path: str) -> str | None:
+        try:
+            value = self.read_text(receipt_path, 256).strip()
+        except FileNotFoundError:
+            return None
+        if not value:
+            raise RuntimeError("Slurm submission receipt is empty")
+        job_id = value.splitlines()[0].split(";", 1)[0].strip()
+        self._validate_job_id(job_id)
+        return job_id
+
+    def _submit_with_receipt(self, args: list[str], receipt_path: str) -> str:
+        """Submit and persist the job id before the local caller gets a reply."""
+
+        receipt = self._confined_path(receipt_path)
+        temporary = self._confined_path(f"{receipt_path}.tmp-{uuid4().hex}")
+        script = "\n".join(
+            [
+                "set -eu",
+                f"temporary={shlex.quote(str(temporary))}",
+                f"receipt={shlex.quote(str(receipt))}",
+                "trap 'rm -f -- \"$temporary\"' EXIT",
+                f"job_output=$({shlex.join(args)})",
+                'job_id="${job_output%%;*}"',
+                'case "$job_id" in',
+                "  ''|*[!A-Za-z0-9_-]*) exit 78 ;;",
+                "esac",
+                "umask 077",
+                'printf "%s\\n" "$job_id" > "$temporary"',
+                'mv -f -- "$temporary" "$receipt"',
+                'printf "%s\\n" "$job_id"',
+            ]
+        )
+        return self._run_shell(script)
+
     def submit(self, request: JobRequest) -> JobHandle:
         if not request.command:
             raise ValueError("job command cannot be empty")
@@ -431,10 +487,17 @@ class NativeSlurmClient:
         if stderr_path is not None:
             args.append(f"--error={stderr_path}")
         args.extend(["--wrap", script])
-        output = self._run(args)
-        job_id = output.split(";", 1)[0].strip()
-        if not job_id:
-            raise RuntimeError("Slurm did not return a job id")
+        receipt_path = None
+        if request.submission_receipt_path:
+            receipt_path = str(self._confined_path(request.submission_receipt_path))
+            existing_job_id = self._read_submission_receipt(receipt_path)
+            if existing_job_id is not None:
+                return JobHandle(job_id=existing_job_id, state=JobState.QUEUED)
+            output = self._submit_with_receipt(args, receipt_path)
+        else:
+            output = self._run(args)
+        job_id = output.splitlines()[0].split(";", 1)[0].strip() if output else ""
+        self._validate_job_id(job_id)
         return JobHandle(job_id=job_id, state=JobState.QUEUED)
 
     def status(self, job_id: str) -> JobStatus:

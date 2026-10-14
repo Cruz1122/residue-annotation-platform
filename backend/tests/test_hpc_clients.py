@@ -74,6 +74,93 @@ def test_native_slurm_submit_propagates_resources_environment_and_paths(tmp_path
     assert "exec python main.py --stage protein_identity" in args[-1]
 
 
+def test_native_slurm_submission_receipt_recovers_without_resubmit(tmp_path, monkeypatch):
+    root = tmp_path / "hpc-root"
+    receipt = root / ".platform_jobs" / "run-1" / "protein_identity.submitted"
+    receipt.parent.mkdir(parents=True)
+    root.mkdir(exist_ok=True)
+    receipt.write_text("12345\n", encoding="utf-8")
+    client = NativeSlurmClient(_settings(root))
+
+    def unexpected_submit(_args):
+        raise AssertionError("an existing Slurm submission must be reused")
+
+    monkeypatch.setattr(client, "_run", unexpected_submit)
+
+    handle = client.submit(
+        JobRequest(
+            stage_id="protein_identity",
+            command=("python", "main.py"),
+            working_directory=str(root),
+            submission_receipt_path=str(receipt),
+        )
+    )
+
+    assert handle.job_id == "12345"
+    assert handle.state == JobState.QUEUED
+
+
+def test_native_slurm_submission_receipt_is_written_by_submit_wrapper(tmp_path, monkeypatch):
+    root = tmp_path / "hpc-root"
+    root.mkdir()
+    receipt = root / ".platform_jobs" / "run-1" / "protein_identity.submitted"
+    receipt.parent.mkdir(parents=True)
+    client = NativeSlurmClient(_settings(root))
+    captured: list[str] = []
+
+    monkeypatch.setattr(client, "_run_shell", lambda script: captured.append(script) or "54321")
+
+    handle = client.submit(
+        JobRequest(
+            stage_id="protein_identity",
+            command=("python", "main.py"),
+            working_directory=str(root),
+            submission_receipt_path=str(receipt),
+        )
+    )
+
+    assert handle.job_id == "54321"
+    assert len(captured) == 1
+    assert "sbatch --parsable" in captured[0]
+    assert "mv -f --" in captured[0]
+    assert ".sbatch" not in captured[0]
+
+
+def test_ssh_slurm_submission_receipt_recovers_without_resubmit(tmp_path, monkeypatch):
+    password_path = tmp_path / "password"
+    password_path.write_text("secret\n", encoding="utf-8")
+    password_path.chmod(0o600)
+    client = SSHSlurmClient(
+        Settings(
+            app_env="test",
+            database_url="sqlite://",
+            hpc_ssh_host="mn5.example",
+            hpc_ssh_username="runner",
+            hpc_ssh_password_file=password_path,
+            hpc_remote_root="/gpfs/project/root",
+        )
+    )
+
+    monkeypatch.setattr(client, "_read_submission_receipt", lambda _path: "98765")
+    monkeypatch.setattr(
+        client,
+        "_submit_with_receipt",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("duplicate submit")),
+    )
+
+    handle = client.submit(
+        JobRequest(
+            stage_id="protein_identity",
+            command=("python", "main.py"),
+            working_directory="/gpfs/project/root",
+            submission_receipt_path="/gpfs/project/root/.platform_jobs/run-1/protein_identity.submitted",
+        )
+    )
+
+    assert handle.job_id == "98765"
+    assert handle.state == JobState.QUEUED
+
+
 def test_ssh_slurm_submit_uses_wrap_without_script_file(tmp_path):
     password_path = tmp_path / "password"
     password_path.write_text("secret\n", encoding="utf-8")

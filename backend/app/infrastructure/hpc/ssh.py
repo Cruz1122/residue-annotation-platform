@@ -7,6 +7,7 @@ import shlex
 import socket
 import stat
 from pathlib import Path, PurePosixPath
+from uuid import uuid4
 
 import paramiko
 from paramiko.ssh_exception import (
@@ -470,6 +471,50 @@ class SSHSlurmClient:
     def read_text(self, remote_path: str, max_bytes: int) -> str:
         return self.read_bytes(remote_path, max_bytes).decode("utf-8")
 
+    def _read_submission_receipt(self, receipt_path: str) -> str | None:
+        try:
+            value = self.read_text(receipt_path, 256).strip()
+        except FileNotFoundError:
+            return None
+        if not value:
+            raise RuntimeError("Slurm submission receipt is empty")
+        job_id = value.splitlines()[0].split(";", 1)[0].strip()
+        self._validate_job_id(job_id)
+        return job_id
+
+    def _submit_with_receipt(self, args: list[str], receipt_path: str) -> str:
+        """Submit and persist the job id on the remote host before replying.
+
+        The receipt closes the network-response crash window: if the SSH
+        response is lost after ``sbatch`` returns, the next worker can recover
+        the same job instead of submitting a duplicate. It is a tiny metadata
+        file and never a generated Slurm script.
+        """
+
+        receipt = _remote_path_under(self.settings.hpc_remote_root, receipt_path)
+        temporary = _remote_path_under(
+            self.settings.hpc_remote_root,
+            f"{receipt}.tmp-{uuid4().hex}",
+        )
+        script = "\n".join(
+            [
+                "set -eu",
+                f"temporary={shlex.quote(temporary)}",
+                f"receipt={shlex.quote(receipt)}",
+                "trap 'rm -f -- \"$temporary\"' EXIT",
+                f"job_output=$({shlex.join(args)})",
+                'job_id="${job_output%%;*}"',
+                'case "$job_id" in',
+                "  ''|*[!A-Za-z0-9_-]*) exit 78 ;;",
+                "esac",
+                "umask 077",
+                'printf "%s\\n" "$job_id" > "$temporary"',
+                'mv -f -- "$temporary" "$receipt"',
+                'printf "%s\\n" "$job_id"',
+            ]
+        )
+        return self._command(script)
+
     def submit(self, request: JobRequest) -> JobHandle:
         workdir = _remote_path_under(self.settings.hpc_remote_root, request.working_directory)
         if not request.command:
@@ -510,15 +555,24 @@ class SSHSlurmClient:
             stderr_path = _remote_path_under(self.settings.hpc_remote_root, request.stderr_path)
             args.append(f"--error={stderr_path}")
         args.extend(["--wrap", script])
-        output = self._command(" ".join(shlex.quote(arg) for arg in args))
-        job_id = output.split(";", 1)[0].strip()
-        if not job_id:
-            raise RuntimeError("Slurm did not return a job id")
+        receipt_path = None
+        if request.submission_receipt_path:
+            receipt_path = _remote_path_under(
+                self.settings.hpc_remote_root,
+                request.submission_receipt_path,
+            )
+            existing_job_id = self._read_submission_receipt(receipt_path)
+            if existing_job_id is not None:
+                return JobHandle(job_id=existing_job_id, state=JobState.QUEUED)
+            output = self._submit_with_receipt(args, receipt_path)
+        else:
+            output = self._command(shlex.join(args))
+        job_id = output.splitlines()[0].split(";", 1)[0].strip() if output else ""
+        self._validate_job_id(job_id)
         return JobHandle(job_id=job_id, state=JobState.QUEUED)
 
     def status(self, job_id: str) -> JobStatus:
-        if not job_id.replace("_", "").replace("-", "").isalnum():
-            raise ValueError("invalid Slurm job id")
+        self._validate_job_id(job_id)
         output = self._command(f"squeue --noheader --format=%T --jobs {shlex.quote(job_id)}")
         if output:
             return JobStatus(job_id=job_id, state=_map_slurm_state(output), message=output)
@@ -536,10 +590,14 @@ class SSHSlurmClient:
         return JobStatus(job_id=job_id, state=_map_slurm_state(state), message=rows[-1])
 
     def cancel(self, job_id: str) -> JobStatus:
-        if not job_id.replace("_", "").replace("-", "").isalnum():
-            raise ValueError("invalid Slurm job id")
+        self._validate_job_id(job_id)
         self._command(f"scancel -- {shlex.quote(job_id)}")
         return JobStatus(job_id=job_id, state=JobState.CANCELLED)
+
+    @staticmethod
+    def _validate_job_id(job_id: str) -> None:
+        if not job_id or not job_id.replace("_", "").replace("-", "").isalnum():
+            raise ValueError("invalid Slurm job id")
 
 
 def _map_slurm_state(value: str) -> JobState:

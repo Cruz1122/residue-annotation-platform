@@ -540,6 +540,9 @@ def test_submit_poll_and_ingest_persist_a_linked_stage_result(client, session, t
     assert stage.slurm_job_id == remote.job_id
     assert len(remote.requests) == 1
     assert remote.requests[0].stage_id == "protein_identity"
+    assert remote.requests[0].submission_receipt_path == (
+        f"/gpfs/test/.platform_jobs/{created_run.json()['id']}/protein_identity.submitted"
+    )
     remote_script = remote.requests[0].command[2]
     assert "python main.py P00001 --accession P00001" in remote_script
     pipeline_line = next(line for line in remote_script.splitlines() if line.startswith("python"))

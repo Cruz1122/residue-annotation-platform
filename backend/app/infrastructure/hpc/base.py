@@ -36,6 +36,10 @@ class JobRequest:
     job_name: str | None = None
     stdout_path: str | None = None
     stderr_path: str | None = None
+    # A deterministic, confined receipt lets a worker recover a submission
+    # when Slurm accepted it but the client lost the response before the
+    # database commit. This is metadata, not a generated .sbatch script.
+    submission_receipt_path: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
