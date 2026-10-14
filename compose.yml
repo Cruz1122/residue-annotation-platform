@@ -16,6 +16,37 @@ x-worker-common: &worker-common
     - residue-artifacts:/app/data/artifacts
   command: ["python", "-m", "app.worker"]
 
+x-platform-environment: &platform-environment
+  APP_NAME: ${APP_NAME:-residue-annotation-platform}
+  APP_ENV: ${APP_ENV:-development}
+  CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:4742}
+  DATABASE_AUTO_CREATE: "false"
+  ARTIFACT_ROOT: ${ARTIFACT_ROOT:-./data/artifacts}
+  MAX_SEQUENCE_LENGTH: ${MAX_SEQUENCE_LENGTH:-100000}
+  MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-5242880}
+  DEV_USER_ID: ${DEV_USER_ID:-local-user}
+  DEV_PROJECT_ID: ${DEV_PROJECT_ID:-local-project}
+  AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:-development-only-change-this-secret-before-production}
+  AUTH_ACCESS_TOKEN_MINUTES: ${AUTH_ACCESS_TOKEN_MINUTES:-15}
+  AUTH_REFRESH_TOKEN_DAYS: ${AUTH_REFRESH_TOKEN_DAYS:-30}
+  AUTH_VERIFICATION_TOKEN_HOURS: ${AUTH_VERIFICATION_TOKEN_HOURS:-24}
+  AUTH_RESET_TOKEN_MINUTES: ${AUTH_RESET_TOKEN_MINUTES:-30}
+  AUTH_PASSWORD_MIN_LENGTH: ${AUTH_PASSWORD_MIN_LENGTH:-12}
+  AUTH_TRUSTED_HEADERS_ENABLED: ${AUTH_TRUSTED_HEADERS_ENABLED:-false}
+  AUTH_RATE_LIMIT_WINDOW_SECONDS: ${AUTH_RATE_LIMIT_WINDOW_SECONDS:-900}
+  AUTH_RATE_LIMIT_REGISTER: ${AUTH_RATE_LIMIT_REGISTER:-5}
+  AUTH_RATE_LIMIT_LOGIN: ${AUTH_RATE_LIMIT_LOGIN:-10}
+  AUTH_RATE_LIMIT_REFRESH: ${AUTH_RATE_LIMIT_REFRESH:-20}
+  AUTH_RATE_LIMIT_RESET: ${AUTH_RATE_LIMIT_RESET:-5}
+  AUTH_RATE_LIMIT_VERIFY: ${AUTH_RATE_LIMIT_VERIFY:-10}
+  AUTH_RATE_LIMIT_IP: ${AUTH_RATE_LIMIT_IP:-50}
+  FRONTEND_BASE_URL: ${FRONTEND_BASE_URL:-http://localhost:4742}
+  WORKER_POLL_INTERVAL_SECONDS: ${WORKER_POLL_INTERVAL_SECONDS:-2.0}
+  WORKER_ID: ${WORKER_ID:-compose-worker}
+  RUN_WORKER_LEASE_SECONDS: ${RUN_WORKER_LEASE_SECONDS:-900}
+  RUN_WORKER_MAX_ATTEMPTS: ${RUN_WORKER_MAX_ATTEMPTS:-3}
+  ANNOTATIONS_DEFAULT_LIMIT: ${ANNOTATIONS_DEFAULT_LIMIT:-20000}
+
 services:
   vpn:
     profiles: ["vpn"]
@@ -91,10 +122,8 @@ services:
     build:
       context: ./backend
     environment:
-      APP_ENV: ${APP_ENV:-development}
+      <<: *platform-environment
       DATABASE_URL: postgresql+psycopg://residue:${POSTGRES_PASSWORD:-residue-dev}@db:5432/residue_annotation
-      DATABASE_AUTO_CREATE: "false"
-      AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:-development-only-change-this-secret-before-production}
     depends_on:
       db:
         condition: service_healthy
@@ -107,21 +136,11 @@ services:
     ports:
       - "8742:8742"
     environment:
-      APP_NAME: ${APP_NAME:-residue-annotation-platform}
-      APP_ENV: ${APP_ENV:-development}
-      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:4742}
+      <<: *platform-environment
       DATABASE_URL: postgresql+psycopg://residue:${POSTGRES_PASSWORD:-residue-dev}@db:5432/residue_annotation
-      DATABASE_AUTO_CREATE: "false"
-      ARTIFACT_ROOT: ${ARTIFACT_ROOT:-./data/artifacts}
-      MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-5242880}
-      DEV_USER_ID: ${DEV_USER_ID:-local-user}
-      DEV_PROJECT_ID: ${DEV_PROJECT_ID:-local-project}
-      AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:-development-only-change-this-secret-before-production}
-      AUTH_TRUSTED_HEADERS_ENABLED: ${AUTH_TRUSTED_HEADERS_ENABLED:-false}
       EMAIL_PROVIDER: ${EMAIL_PROVIDER:-disabled}
       RESEND_API_KEY: ${RESEND_API_KEY:-}
       EMAIL_FROM: ${EMAIL_FROM:-Residue Annotation <onboarding@resend.dev>}
-      FRONTEND_BASE_URL: ${FRONTEND_BASE_URL:-http://localhost:4742}
     volumes:
       - residue-artifacts:/app/data/artifacts
     depends_on:
@@ -145,14 +164,8 @@ services:
     group_add:
       - "${HPC_APP_GID:-999}"
     environment:
-      APP_ENV: ${APP_ENV:-development}
-      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:4742}
+      <<: *platform-environment
       DATABASE_URL: postgresql+psycopg://residue:${POSTGRES_PASSWORD:-residue-dev}@db:5432/residue_annotation
-      DATABASE_AUTO_CREATE: "false"
-      ARTIFACT_ROOT: ${ARTIFACT_ROOT:-./data/artifacts}
-      MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-5242880}
-      AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:-development-only-change-this-secret-before-production}
-      AUTH_TRUSTED_HEADERS_ENABLED: ${AUTH_TRUSTED_HEADERS_ENABLED:-false}
       HPC_EXECUTION_MODE: ssh
       HPC_SSH_HOST: ${HPC_SSH_HOST:-}
       HPC_SSH_PORT: ${HPC_SSH_PORT:-22}
@@ -160,6 +173,8 @@ services:
       HPC_SSH_PASSWORD_FILE: /run/secrets/hpc_ssh_password
       HPC_KNOWN_HOSTS_FILE: /run/secrets/hpc_known_hosts
       HPC_REMOTE_ROOT: ${HPC_REMOTE_ROOT:-/gpfs/projects/bsc08/bsc001997/vcfs_1000geno/hilo_integrado_anotacion}
+      HPC_REMOTE_WORKDIR: ${HPC_REMOTE_WORKDIR:-}
+      HPC_COMMAND_TIMEOUT_SECONDS: ${HPC_COMMAND_TIMEOUT_SECONDS:-30.0}
       HPC_SLURM_ACCOUNT: ${HPC_SLURM_ACCOUNT:-}
       HPC_SLURM_PARTITION: ${HPC_SLURM_PARTITION:-}
       HPC_SLURM_QOS: ${HPC_SLURM_QOS:-}
@@ -171,6 +186,7 @@ services:
       HPC_PIPELINE_GPU_BUDGET: ${HPC_PIPELINE_GPU_BUDGET:-1}
       HPC_MAX_RESULT_BYTES: ${HPC_MAX_RESULT_BYTES:-268435456}
       HPC_MAX_ARTIFACT_ENTRIES: ${HPC_MAX_ARTIFACT_ENTRIES:-10000}
+      HPC_MAX_INFLIGHT_STAGES: ${HPC_MAX_INFLIGHT_STAGES:-1}
       MN5_INSPECTION_ENABLED: ${MN5_INSPECTION_ENABLED:-false}
       MN5_INSPECTION_MODE: ${MN5_INSPECTION_MODE:-disabled}
       MN5_ROOT: ${MN5_ROOT:-/gpfs/projects/bsc08/bsc001997/vcfs_1000geno/hilo_integrado_anotacion}
@@ -204,18 +220,14 @@ services:
     # The selected image must contain the MN5 Slurm client and its auth setup.
     user: "${HPC_NATIVE_UID:-999}:${HPC_NATIVE_GID:-999}"
     environment:
-      APP_ENV: ${APP_ENV:-development}
-      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:4742}
+      <<: *platform-environment
       DATABASE_URL: postgresql+psycopg://residue:${POSTGRES_PASSWORD:-residue-dev}@db:5432/residue_annotation
-      DATABASE_AUTO_CREATE: "false"
-      ARTIFACT_ROOT: ${ARTIFACT_ROOT:-./data/artifacts}
-      MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-5242880}
-      AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:-development-only-change-this-secret-before-production}
-      AUTH_TRUSTED_HEADERS_ENABLED: ${AUTH_TRUSTED_HEADERS_ENABLED:-false}
       HPC_EXECUTION_MODE: native
       HPC_INPUT_TRANSFER_ENABLED: "true"
       HPC_INPUT_REMOTE_SUBDIR: ${HPC_INPUT_REMOTE_SUBDIR:-uploads}
       HPC_REMOTE_ROOT: ${HPC_REMOTE_ROOT:-/gpfs/projects/bsc08/bsc001997/vcfs_1000geno/hilo_integrado_anotacion}
+      HPC_REMOTE_WORKDIR: ${HPC_REMOTE_WORKDIR:-}
+      HPC_COMMAND_TIMEOUT_SECONDS: ${HPC_COMMAND_TIMEOUT_SECONDS:-30.0}
       HPC_SLURM_ACCOUNT: ${HPC_SLURM_ACCOUNT:-}
       HPC_SLURM_PARTITION: ${HPC_SLURM_PARTITION:-}
       HPC_SLURM_QOS: ${HPC_SLURM_QOS:-}
@@ -227,6 +239,7 @@ services:
       HPC_PIPELINE_GPU_BUDGET: ${HPC_PIPELINE_GPU_BUDGET:-1}
       HPC_MAX_RESULT_BYTES: ${HPC_MAX_RESULT_BYTES:-268435456}
       HPC_MAX_ARTIFACT_ENTRIES: ${HPC_MAX_ARTIFACT_ENTRIES:-10000}
+      HPC_MAX_INFLIGHT_STAGES: ${HPC_MAX_INFLIGHT_STAGES:-1}
       MN5_INSPECTION_ENABLED: ${MN5_INSPECTION_ENABLED:-false}
       MN5_INSPECTION_MODE: ${MN5_INSPECTION_MODE:-disabled}
       MN5_ROOT: ${MN5_ROOT:-/gpfs/projects/bsc08/bsc001997/vcfs_1000geno/hilo_integrado_anotacion}
