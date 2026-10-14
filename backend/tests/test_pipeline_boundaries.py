@@ -1,3 +1,4 @@
+import errno
 import hashlib
 import io
 import stat
@@ -21,7 +22,11 @@ from app.infrastructure.hpc.readonly import (
     SFTPReadOnlyInspector,
     validate_relative_path,
 )
-from app.infrastructure.hpc.ssh import assert_no_symlink_components
+from app.infrastructure.hpc.ssh import (
+    SSHConfigurationError,
+    SSHSlurmClient,
+    assert_no_symlink_components,
+)
 
 
 def test_cache_key_changes_with_scientific_inputs_but_not_log_level():
@@ -207,6 +212,45 @@ class _FakeSSHInspectorTransport:
         self.closed = True
 
 
+class _FakeSSHDirectorySFTP:
+    def __init__(self, root: str, symlinks: set[str] | None = None):
+        self.root = root
+        self.entries = {root: stat.S_IFDIR | 0o700}
+        self.symlinks = symlinks or set()
+        self.created: list[str] = []
+        self.closed = False
+
+    def lstat(self, path: str):
+        if path in self.symlinks:
+            return SimpleNamespace(st_mode=stat.S_IFLNK | 0o777)
+        try:
+            mode = self.entries[path]
+        except KeyError as exc:
+            error = OSError(errno.ENOENT, "missing")
+            raise error from exc
+        return SimpleNamespace(st_mode=mode)
+
+    def mkdir(self, path: str, mode: int):
+        assert mode == 0o700
+        self.entries[path] = stat.S_IFDIR | mode
+        self.created.append(path)
+
+    def close(self):
+        self.closed = True
+
+
+class _FakeSSHDirectoryTransport:
+    def __init__(self, sftp: _FakeSSHDirectorySFTP):
+        self.sftp = sftp
+        self.closed = False
+
+    def open_sftp(self):
+        return self.sftp
+
+    def close(self):
+        self.closed = True
+
+
 def _sftp_inspector_settings(tmp_path: Path, **overrides):
     from app.core.config import Settings
 
@@ -244,6 +288,56 @@ def test_sftp_read_only_inspector_uses_only_bounded_sftp_reads(tmp_path: Path, m
     assert ssh.connect_kwargs["allow_agent"] is False
     assert ssh.connect_kwargs["look_for_keys"] is False
     assert transport.closed is True
+    assert ssh.closed is True
+
+
+def test_ssh_slurm_client_creates_confined_directories_without_shell(tmp_path: Path):
+    from app.core.config import Settings
+
+    root = AUTHORIZED_MN5_ROOT
+    sftp = _FakeSSHDirectorySFTP(root)
+    ssh = _FakeSSHDirectoryTransport(sftp)
+    client = SSHSlurmClient.__new__(SSHSlurmClient)
+    client.settings = Settings(
+        app_env="test",
+        database_url="sqlite://",
+        hpc_ssh_host="glogin4.bsc.es",
+        hpc_ssh_username="bsc001997",
+        hpc_ssh_password_file=tmp_path / "password",
+        hpc_remote_root=root,
+    )
+    client._connect = lambda: ssh
+
+    client.ensure_directory(f"{root}/.platform_jobs/run-1")
+
+    assert sftp.created == [f"{root}/.platform_jobs", f"{root}/.platform_jobs/run-1"]
+    assert sftp.closed is True
+    assert ssh.closed is True
+
+
+def test_ssh_slurm_client_rejects_symlinked_directory_component(tmp_path: Path):
+    from app.core.config import Settings
+
+    root = AUTHORIZED_MN5_ROOT
+    symlinked = f"{root}/.platform_jobs"
+    sftp = _FakeSSHDirectorySFTP(root, symlinks={symlinked})
+    ssh = _FakeSSHDirectoryTransport(sftp)
+    client = SSHSlurmClient.__new__(SSHSlurmClient)
+    client.settings = Settings(
+        app_env="test",
+        database_url="sqlite://",
+        hpc_ssh_host="glogin4.bsc.es",
+        hpc_ssh_username="bsc001997",
+        hpc_ssh_password_file=tmp_path / "password",
+        hpc_remote_root=root,
+    )
+    client._connect = lambda: ssh
+
+    with pytest.raises(SSHConfigurationError, match="symlinked component"):
+        client.ensure_directory(f"{root}/.platform_jobs/run-1")
+
+    assert sftp.created == []
+    assert sftp.closed is True
     assert ssh.closed is True
 
 

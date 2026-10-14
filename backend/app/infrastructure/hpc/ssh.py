@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import re
 import shlex
@@ -73,6 +74,52 @@ def assert_no_symlink_components(
             raise RuntimeError("remote path uses a symlinked component")
 
 
+def _ensure_remote_directory(
+    sftp: paramiko.SFTPClient,
+    root: PurePosixPath,
+    target: PurePosixPath,
+) -> None:
+    """Create a confined remote directory one verified component at a time."""
+
+    try:
+        root_attributes = sftp.lstat(str(root))
+    except OSError as exc:
+        raise SSHConfigurationError("configured remote root is unavailable") from exc
+    if stat.S_ISLNK(root_attributes.st_mode or 0) or not stat.S_ISDIR(root_attributes.st_mode or 0):
+        raise SSHConfigurationError("configured remote root is not a real directory")
+    try:
+        relative = target.relative_to(root)
+    except ValueError as exc:
+        raise SSHConfigurationError("remote directory is outside configured root") from exc
+
+    current = root
+    for part in relative.parts:
+        current /= part
+        current_string = str(current)
+        try:
+            attributes = sftp.lstat(current_string)
+        except OSError as exc:
+            if getattr(exc, "errno", None) != errno.ENOENT:
+                raise SSHConfigurationError("remote directory is unavailable") from exc
+            try:
+                sftp.mkdir(current_string, mode=0o700)
+            except OSError as mkdir_error:
+                if getattr(mkdir_error, "errno", None) != errno.EEXIST:
+                    raise SSHConfigurationError("remote directory could not be created") from (
+                        mkdir_error
+                    )
+            try:
+                attributes = sftp.lstat(current_string)
+            except OSError as verify_error:
+                raise SSHConfigurationError("remote directory could not be verified") from (
+                    verify_error
+                )
+        if stat.S_ISLNK(attributes.st_mode or 0):
+            raise SSHConfigurationError("remote directory uses a symlinked component")
+        if not stat.S_ISDIR(attributes.st_mode or 0):
+            raise SSHConfigurationError("remote path component is not a directory")
+
+
 class SSHSlurmClient:
     def __init__(self, settings: Settings):
         if (
@@ -120,7 +167,19 @@ class SSHSlurmClient:
 
     def ensure_directory(self, remote_path: str) -> None:
         path = _remote_path_under(self.settings.hpc_remote_root, remote_path)
-        self._command(f"mkdir -p -- {shlex.quote(path)}")
+        client = self._connect()
+        try:
+            sftp = client.open_sftp()
+            try:
+                _ensure_remote_directory(
+                    sftp,
+                    PurePosixPath(self.settings.hpc_remote_root),
+                    PurePosixPath(path),
+                )
+            finally:
+                sftp.close()
+        finally:
+            client.close()
 
     def read_bytes(self, remote_path: str, max_bytes: int) -> bytes:
         path = _remote_path_under(self.settings.hpc_remote_root, remote_path)
