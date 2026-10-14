@@ -387,6 +387,26 @@ def test_ssh_slurm_client_rejects_symlinked_directory_component(tmp_path: Path):
     assert ssh.closed is True
 
 
+@pytest.mark.parametrize(
+    ("root_state", "error_message"),
+    [
+        ("symlink", "remote root is not a real directory"),
+        ("missing", "remote root is unavailable"),
+        ("regular_file", "remote root is not a real directory"),
+    ],
+)
+def test_remote_path_guard_rejects_invalid_root(root_state: str, error_message: str):
+    root = AUTHORIZED_MN5_ROOT
+    sftp = _FakeSSHDirectorySFTP(root, symlinks={root} if root_state == "symlink" else None)
+    if root_state == "missing":
+        sftp.entries.pop(root)
+    elif root_state == "regular_file":
+        sftp.entries[root] = stat.S_IFREG | 0o600
+
+    with pytest.raises(RuntimeError, match=error_message):
+        assert_no_symlink_components(sftp, root, f"{root}/results/manifest.json")
+
+
 def test_sftp_read_only_inspector_rejects_symlink_and_preview_over_limit(
     tmp_path: Path, monkeypatch
 ):

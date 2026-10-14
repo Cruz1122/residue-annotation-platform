@@ -60,6 +60,12 @@ def assert_no_symlink_components(
     root_path = PurePosixPath(root)
     candidate = PurePosixPath(path)
     try:
+        root_attributes = sftp.lstat(str(root_path))
+    except OSError as exc:
+        raise RuntimeError("remote root is unavailable") from exc
+    if stat.S_ISLNK(root_attributes.st_mode or 0) or not stat.S_ISDIR(root_attributes.st_mode or 0):
+        raise RuntimeError("remote root is not a real directory")
+    try:
         relative = candidate.relative_to(root_path)
     except ValueError as exc:
         raise RuntimeError("remote path is outside the configured root") from exc
