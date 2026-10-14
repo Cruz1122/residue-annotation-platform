@@ -174,7 +174,9 @@ def create_run(
     uploads: list[Upload] = []
     if payload.upload_ids:
         uploads = list(
-            session.scalars(select(Upload).where(Upload.id.in_(payload.upload_ids))).all()
+            session.scalars(
+                select(Upload).where(Upload.id.in_(payload.upload_ids)).with_for_update()
+            ).all()
         )
         if len(uploads) != len(payload.upload_ids):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Upload not found")

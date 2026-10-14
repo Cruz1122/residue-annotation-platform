@@ -44,6 +44,36 @@ def test_small_fasta_upload_can_be_attached_to_a_run(client):
     assert run.json()["uploads"][0]["transfer_status"] == "pending"
 
 
+def test_upload_cannot_be_attached_to_a_second_run_after_terminal_release(client, session):
+    upload = client.post(
+        "/api/v1/uploads",
+        files={"file": ("query.fasta", b">query\nACDE", "text/plain")},
+        data={"input_type": "fasta"},
+    )
+    assert upload.status_code == 201
+    protein_id = _create_protein(client, "ACDE")
+
+    first_run = client.post(
+        "/api/v1/runs",
+        json={"protein_id": protein_id, "upload_ids": [upload.json()["id"]]},
+    )
+    assert first_run.status_code == 201
+    persisted_run = session.get(Run, first_run.json()["id"])
+    assert persisted_run is not None
+    persisted_run.status = RunStatus.FAILED
+    session.commit()
+    finalize_run(session, persisted_run)
+
+    second_protein_id = _create_protein(client, "ACDF")
+    second_run = client.post(
+        "/api/v1/runs",
+        json={"protein_id": second_protein_id, "upload_ids": [upload.json()["id"]]},
+    )
+
+    assert second_run.status_code == 409
+    assert second_run.json()["detail"] == "Upload already attached"
+
+
 def test_upload_creation_is_audited_without_content_or_path(client, session):
     upload = client.post(
         "/api/v1/uploads",
