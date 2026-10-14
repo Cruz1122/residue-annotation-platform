@@ -26,7 +26,7 @@ residue-annotation-platform/
 │   └── src/shared/api/           # cliente tipado de FastAPI
 ├── compose.yml                   # Perfiles VPN/MN5, Postgres, API, workers y frontend
 ├── infra/mn5-vpn/                # cliente VPN aislado y pinentry sin logs
-├── scripts/validate_specs.py     # validación documental estática
+├── scripts/secret_scan.py        # escaneo local de secretos
 └── specs/
 ```
 
@@ -194,12 +194,6 @@ Frontend:
 cd frontend
 corepack pnpm check
 corepack pnpm build
-```
-
-Validación documental:
-
-```bash
-python scripts/validate_specs.py
 ```
 
 Estos checks no requieren VPN, GPU, secretos, `SLURM_JOB_ID` ni acceso a MN5. Los checks técnicos offline no sustituyen el smoke autorizado de Slurm/GPFS ni la regresión científica.
