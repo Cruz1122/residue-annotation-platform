@@ -9,8 +9,16 @@ from app.features.annotations.models import ANNOTATION_TABLES
 from app.features.runs.models import Artifact, Run, RunStage, StageResult
 from app.features.runs.remote_executor import RemoteStageExecutionError, SSHStageExecutor
 from app.features.runs.worker_service import claim_ready_stage
-from app.infrastructure.hpc.base import JobHandle, JobRequest, JobState, JobStatus
+from app.infrastructure.hpc.base import (
+    HPCConfigurationError,
+    HPCTransportError,
+    JobHandle,
+    JobRequest,
+    JobState,
+    JobStatus,
+)
 from app.infrastructure.hpc.transfer import remote_pipeline_input_path
+from paramiko.ssh_exception import AuthenticationException, BadHostKeyException
 from sqlalchemy import select
 
 SEQUENCE = "ACDEFGHIKLMNPQRSTVWY"
@@ -140,6 +148,46 @@ class FakeUnavailableRemote:
         raise RuntimeError("remote path /gpfs/private/secret is unavailable")
 
 
+class FakeTransportUnavailableRemote(FakeCompletedRemote):
+    def status(self, job_id: str) -> JobStatus:
+        raise HPCTransportError("SSH transport is unavailable")
+
+
+class FakeTransportUnavailableDuringIngest(FakeCompletedRemote):
+    def read_text(self, _remote_path: str, _max_bytes: int) -> str:
+        raise HPCTransportError("SSH transport is unavailable")
+
+
+class FakeAuthenticationStatusRemote(FakeCompletedRemote):
+    def status(self, _job_id: str) -> JobStatus:
+        raise AuthenticationException("authentication failed")
+
+
+class FakeBadHostStatusRemote(FakeCompletedRemote):
+    def status(self, _job_id: str) -> JobStatus:
+        raise BadHostKeyException("mn5.example", None, None)
+
+
+class FakeConfigurationStatusRemote(FakeCompletedRemote):
+    def status(self, _job_id: str) -> JobStatus:
+        raise HPCConfigurationError("squeue is not configured")
+
+
+class FakeAuthenticationDuringIngestRemote(FakeCompletedRemote):
+    def read_text(self, _remote_path: str, _max_bytes: int) -> str:
+        raise AuthenticationException("authentication failed")
+
+
+class FakeBadHostDuringIngestRemote(FakeCompletedRemote):
+    def read_text(self, _remote_path: str, _max_bytes: int) -> str:
+        raise BadHostKeyException("mn5.example", None, None)
+
+
+class FakeConfigurationDuringIngestRemote(FakeCompletedRemote):
+    def read_text(self, _remote_path: str, _max_bytes: int) -> str:
+        raise HPCConfigurationError("result path is not configured")
+
+
 def test_remote_failure_message_redacts_untrusted_paths(tmp_path: Path):
     settings = Settings(
         app_env="test",
@@ -160,6 +208,148 @@ def test_remote_failure_message_redacts_untrusted_paths(tmp_path: Path):
     assert "/gpfs/" not in message
     assert "/scratch/" not in message
     assert "secret-value" not in message
+
+
+@pytest.mark.parametrize(
+    "remote_type",
+    [FakeTransportUnavailableRemote, FakeTransportUnavailableDuringIngest],
+)
+def test_remote_transport_outage_keeps_accepted_stage_retryable(
+    client, session, tmp_path: Path, remote_type
+):
+    protein = client.post(
+        "/api/v1/proteins",
+        json={
+            "sequence": SEQUENCE,
+            "aliases": [{"source": "uniprot", "identifier": "P00001"}],
+        },
+    )
+    assert protein.status_code == 201
+    created_run = client.post("/api/v1/runs", json={"protein_id": protein.json()["id"]})
+    assert created_run.status_code == 201
+
+    settings = Settings(
+        app_env="test",
+        database_url="sqlite://",
+        artifact_root=tmp_path / "artifacts",
+        hpc_remote_root="/gpfs/test",
+    )
+    stage = claim_ready_stage(session, settings)
+    assert stage is not None
+    remote = remote_type(created_run.json()["id"])
+    executor = SSHStageExecutor.__new__(SSHStageExecutor)
+    executor.settings = settings
+    executor.client = remote
+
+    executor.submit_stage(session, stage)
+    assert executor.poll_stage(session, stage) is True
+
+    session.expire_all()
+    persisted_stage = session.get(RunStage, stage.id)
+    assert persisted_stage is not None
+    assert persisted_stage.status == "queued"
+    assert persisted_stage.error_code is None
+    assert session.scalar(select(StageResult)) is None
+
+
+@pytest.mark.parametrize(
+    ("remote_type", "error_code"),
+    [
+        (FakeAuthenticationStatusRemote, "hpc_authentication_failed"),
+        (FakeBadHostStatusRemote, "hpc_host_key_rejected"),
+        (FakeConfigurationStatusRemote, "hpc_configuration_error"),
+    ],
+)
+def test_non_retryable_hpc_status_errors_are_audited(
+    client, session, tmp_path: Path, remote_type, error_code: str
+):
+    protein = client.post(
+        "/api/v1/proteins",
+        json={
+            "sequence": SEQUENCE,
+            "aliases": [{"source": "uniprot", "identifier": "P00001"}],
+        },
+    )
+    assert protein.status_code == 201
+    created_run = client.post("/api/v1/runs", json={"protein_id": protein.json()["id"]})
+    assert created_run.status_code == 201
+
+    settings = Settings(
+        app_env="test",
+        database_url="sqlite://",
+        artifact_root=tmp_path / "artifacts",
+        hpc_remote_root="/gpfs/test",
+    )
+    stage = claim_ready_stage(session, settings)
+    assert stage is not None
+    executor = SSHStageExecutor.__new__(SSHStageExecutor)
+    executor.settings = settings
+    executor.client = remote_type(created_run.json()["id"])
+
+    executor.submit_stage(session, stage)
+    assert executor.poll_stage(session, stage) is True
+
+    session.expire_all()
+    persisted_stage = session.get(RunStage, stage.id)
+    assert persisted_stage is not None
+    assert persisted_stage.status == "failed"
+    assert persisted_stage.error_code == error_code
+    assert persisted_stage.error_message in {
+        "HPC authentication failed",
+        "HPC host key was rejected",
+        "HPC configuration is invalid",
+    }
+    assert session.scalar(select(StageResult)) is None
+
+
+@pytest.mark.parametrize(
+    ("remote_type", "error_code"),
+    [
+        (FakeAuthenticationDuringIngestRemote, "hpc_authentication_failed"),
+        (FakeBadHostDuringIngestRemote, "hpc_host_key_rejected"),
+        (FakeConfigurationDuringIngestRemote, "hpc_configuration_error"),
+    ],
+)
+def test_non_retryable_hpc_result_errors_are_audited(
+    client, session, tmp_path: Path, remote_type, error_code: str
+):
+    protein = client.post(
+        "/api/v1/proteins",
+        json={
+            "sequence": SEQUENCE,
+            "aliases": [{"source": "uniprot", "identifier": "P00001"}],
+        },
+    )
+    assert protein.status_code == 201
+    created_run = client.post("/api/v1/runs", json={"protein_id": protein.json()["id"]})
+    assert created_run.status_code == 201
+
+    settings = Settings(
+        app_env="test",
+        database_url="sqlite://",
+        artifact_root=tmp_path / "artifacts",
+        hpc_remote_root="/gpfs/test",
+    )
+    stage = claim_ready_stage(session, settings)
+    assert stage is not None
+    executor = SSHStageExecutor.__new__(SSHStageExecutor)
+    executor.settings = settings
+    executor.client = remote_type(created_run.json()["id"])
+
+    executor.submit_stage(session, stage)
+    assert executor.poll_stage(session, stage) is True
+
+    session.expire_all()
+    persisted_stage = session.get(RunStage, stage.id)
+    assert persisted_stage is not None
+    assert persisted_stage.status == "failed"
+    assert persisted_stage.error_code == error_code
+    assert persisted_stage.error_message in {
+        "HPC authentication failed",
+        "HPC host key was rejected",
+        "HPC configuration is invalid",
+    }
+    assert session.scalar(select(StageResult)) is None
 
 
 @pytest.mark.parametrize(

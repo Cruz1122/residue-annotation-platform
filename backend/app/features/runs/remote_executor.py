@@ -12,6 +12,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, TextIO
 from uuid import uuid4
 
+from paramiko.ssh_exception import AuthenticationException, BadHostKeyException
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
@@ -29,7 +30,12 @@ from app.features.runs.models import Artifact, Run, RunStage, StageResult
 from app.features.runs.service import now_utc, transition_stage
 from app.features.runs.state import RunStageStatus
 from app.features.stages.registry import STAGE_BY_ID
-from app.infrastructure.hpc.base import JobRequest, JobState
+from app.infrastructure.hpc.base import (
+    HPCConfigurationError,
+    HPCTransportError,
+    JobRequest,
+    JobState,
+)
 from app.infrastructure.hpc.factory import build_hpc_client
 from app.infrastructure.hpc.native import NativeSlurmClient
 from app.infrastructure.hpc.ssh import SSHConfigurationError, SSHSlurmClient, _remote_path_under
@@ -201,9 +207,19 @@ class SSHStageExecutor:
             raise RemoteStageExecutionError("queued stage has no Slurm job id")
         try:
             status = self.client.status(stage.slurm_job_id)
-        except Exception:
+        except HPCTransportError:
             # A lost SSH/VPN connection must not turn an accepted job into a
             # false failure. The next worker tick reconciles it again.
+            return True
+        except (
+            AuthenticationException,
+            BadHostKeyException,
+            HPCConfigurationError,
+        ) as exc:
+            self._mark_non_retryable_hpc_error(session, stage, exc, operation="status")
+            return True
+        except Exception as exc:
+            self._mark_non_retryable_hpc_error(session, stage, exc, operation="status")
             return True
 
         if status.state == JobState.UNKNOWN:
@@ -219,6 +235,21 @@ class SSHStageExecutor:
         if status.state == JobState.SUCCESS:
             try:
                 result_id, reused = self._ingest_result(session, stage)
+            except HPCTransportError:
+                # The Slurm job already reached SUCCESS, but the result
+                # transport is temporarily unavailable. Keep the accepted job
+                # active and retry ingestion on the next worker tick instead
+                # of publishing a false scientific failure.
+                return True
+            except (
+                AuthenticationException,
+                BadHostKeyException,
+                HPCConfigurationError,
+            ) as exc:
+                failed = session.get(RunStage, stage.id)
+                if failed is not None:
+                    self._mark_non_retryable_hpc_error(session, failed, exc, operation="result")
+                return True
             except Exception as exc:
                 failed = session.get(RunStage, stage.id)
                 if failed is not None:
@@ -301,6 +332,30 @@ class SSHStageExecutor:
         stage.error_code = error_code
         stage.error_message = sanitize_error_message(message, roots=(self.root,))
         session.commit()
+
+    def _mark_non_retryable_hpc_error(
+        self,
+        session: Session,
+        stage: RunStage,
+        error: Exception,
+        *,
+        operation: str,
+    ) -> None:
+        """Persist an operational HPC error that must not be retried forever."""
+
+        if isinstance(error, AuthenticationException):
+            error_code = "hpc_authentication_failed"
+            message = "HPC authentication failed"
+        elif isinstance(error, BadHostKeyException):
+            error_code = "hpc_host_key_rejected"
+            message = "HPC host key was rejected"
+        elif isinstance(error, HPCConfigurationError):
+            error_code = "hpc_configuration_error"
+            message = "HPC configuration is invalid"
+        else:
+            error_code = f"hpc_{operation}_failed"
+            message = f"HPC {operation} failed"
+        self._mark_failed(session, stage, error_code, message)
 
     def _find_reusable_result(
         self,
@@ -411,6 +466,10 @@ class SSHStageExecutor:
                 run_dir = _remote_path_under(self.root, str(marker_candidate))
             else:
                 run_dir = self._remote_child(self.root, *marker_candidate.parts)
+        except HPCTransportError:
+            raise
+        except HPCConfigurationError:
+            raise
         except (OSError, UnicodeError, RuntimeError, SSHConfigurationError) as exc:
             raise RemoteStageExecutionError(
                 "remote pipeline did not publish a result directory"
@@ -422,6 +481,10 @@ class SSHStageExecutor:
             manifest = json.loads(
                 self.client.read_text(manifest_path, self.settings.hpc_max_result_bytes)
             )
+        except HPCTransportError:
+            raise
+        except HPCConfigurationError:
+            raise
         except (json.JSONDecodeError, UnicodeError, RuntimeError) as exc:
             raise RemoteStageExecutionError("remote result manifest is unreadable") from exc
         if not isinstance(manifest, dict):
@@ -455,6 +518,10 @@ class SSHStageExecutor:
                     self.settings.hpc_max_result_bytes,
                 )
                 provenance_bytes = provenance_text.encode("utf-8")
+            except HPCTransportError:
+                raise
+            except HPCConfigurationError:
+                raise
             except (KeyError, TypeError, UnicodeError, RuntimeError) as exc:
                 raise RemoteStageExecutionError("remote provenance is unreadable") from exc
             if (
@@ -622,6 +689,10 @@ class SSHStageExecutor:
             context = json.loads(
                 self.client.read_text(context_path, self.settings.hpc_max_result_bytes)
             )
+        except HPCTransportError:
+            raise
+        except HPCConfigurationError:
+            raise
         except (json.JSONDecodeError, UnicodeError, RuntimeError) as exc:
             raise RemoteStageExecutionError("remote run context is unreadable") from exc
         stage_context = context.get("stage_results", {}).get(stage_id, {})
@@ -646,6 +717,10 @@ class SSHStageExecutor:
                 self._remote_child(result_dir, "DONE"),
                 64,
             ).strip()
+        except HPCTransportError:
+            raise
+        except HPCConfigurationError:
+            raise
         except Exception as exc:
             raise RemoteStageExecutionError("remote result is missing its DONE marker") from exc
         if marker != "OK":

@@ -5,6 +5,14 @@ from enum import StrEnum
 from typing import Protocol
 
 
+class HPCTransportError(Exception):
+    """A temporary HPC transport failure with no scientific state decision."""
+
+
+class HPCConfigurationError(RuntimeError):
+    """A permanent HPC configuration failure requiring operator action."""
+
+
 class JobState(StrEnum):
     QUEUED = "queued"
     RUNNING = "running"

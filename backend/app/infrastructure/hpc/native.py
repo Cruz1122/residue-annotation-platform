@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import re
 import shlex
@@ -8,7 +9,60 @@ import subprocess
 from pathlib import Path, PurePosixPath
 
 from app.core.config import Settings
-from app.infrastructure.hpc.base import JobHandle, JobRequest, JobState, JobStatus
+from app.infrastructure.hpc.base import (
+    HPCConfigurationError,
+    HPCTransportError,
+    JobHandle,
+    JobRequest,
+    JobState,
+    JobStatus,
+)
+
+_TRANSIENT_FILESYSTEM_ERRNOS = frozenset(
+    {
+        errno.EIO,
+        errno.ESTALE,
+        errno.ENODEV,
+        errno.ENOTCONN,
+        errno.ECONNRESET,
+        errno.EHOSTDOWN,
+        errno.EHOSTUNREACH,
+        errno.ENETDOWN,
+        errno.ENETUNREACH,
+        errno.EPIPE,
+        errno.ETIMEDOUT,
+    }
+)
+
+
+_TRANSIENT_SLURM_ERRNOS = frozenset(
+    {
+        errno.ECONNABORTED,
+        errno.ECONNREFUSED,
+        errno.ECONNRESET,
+        errno.ENOTCONN,
+        errno.EPIPE,
+        errno.ETIMEDOUT,
+    }
+)
+
+
+def _rethrow_native_transport_error(error: Exception) -> None:
+    if isinstance(error, HPCTransportError):
+        raise error
+    if isinstance(error, (ConnectionError, EOFError, TimeoutError)):
+        raise HPCTransportError("native HPC transport is unavailable") from error
+    if isinstance(error, OSError) and error.errno in _TRANSIENT_FILESYSTEM_ERRNOS:
+        raise HPCTransportError("native HPC transport is unavailable") from error
+
+
+def _rethrow_native_slurm_transport_error(error: Exception) -> None:
+    if isinstance(error, HPCTransportError):
+        raise error
+    if isinstance(error, (ConnectionError, EOFError, TimeoutError)):
+        raise HPCTransportError("native Slurm transport is unavailable") from error
+    if isinstance(error, OSError) and error.errno in _TRANSIENT_SLURM_ERRNOS:
+        raise HPCTransportError("native Slurm transport is unavailable") from error
 
 
 class NativeSlurmClient:
@@ -42,34 +96,42 @@ class NativeSlurmClient:
     def ensure_directory(self, remote_path: str) -> None:
         """Create a job directory below the approved local GPFS root."""
 
-        root = self._root_path()
-        target = self._confined_path(remote_path)
-        relative = target.relative_to(root)
-        current = root
-        for part in relative.parts:
-            current /= part
-            if current.exists():
-                if current.is_symlink() or not current.is_dir():
-                    raise RuntimeError("native HPC directory component is unsafe")
-                continue
-            current.mkdir(mode=0o700)
+        try:
+            root = self._root_path()
+            target = self._confined_path(remote_path)
+            relative = target.relative_to(root)
+            current = root
+            for part in relative.parts:
+                current /= part
+                if current.exists():
+                    if current.is_symlink() or not current.is_dir():
+                        raise RuntimeError("native HPC directory component is unsafe")
+                    continue
+                current.mkdir(mode=0o700)
+        except Exception as exc:
+            _rethrow_native_transport_error(exc)
+            raise
 
     def read_bytes(self, remote_path: str, max_bytes: int) -> bytes:
         if max_bytes < 1:
             raise ValueError("max_bytes must be positive")
-        path = self._confined_path(remote_path)
-        attributes = path.stat()
-        if not stat.S_ISREG(attributes.st_mode) or path.is_symlink():
-            raise RuntimeError("native HPC result is not a regular file")
-        if attributes.st_size > max_bytes:
-            raise RuntimeError("native HPC result exceeds the configured size limit")
-        with path.open("rb") as stream:
-            data = stream.read(max_bytes + 1)
-        if len(data) > max_bytes:
-            raise RuntimeError("native HPC result exceeds the configured size limit")
-        if path.stat().st_size != attributes.st_size:
-            raise RuntimeError("native HPC result changed while it was being read")
-        return data
+        try:
+            path = self._confined_path(remote_path)
+            attributes = path.stat()
+            if not stat.S_ISREG(attributes.st_mode) or path.is_symlink():
+                raise RuntimeError("native HPC result is not a regular file")
+            if attributes.st_size > max_bytes:
+                raise RuntimeError("native HPC result exceeds the configured size limit")
+            with path.open("rb") as stream:
+                data = stream.read(max_bytes + 1)
+            if len(data) > max_bytes:
+                raise RuntimeError("native HPC result exceeds the configured size limit")
+            if path.stat().st_size != attributes.st_size:
+                raise RuntimeError("native HPC result changed while it was being read")
+            return data
+        except Exception as exc:
+            _rethrow_native_transport_error(exc)
+            raise
 
     def read_text(self, remote_path: str, max_bytes: int) -> str:
         return self.read_bytes(remote_path, max_bytes).decode("utf-8")
@@ -79,34 +141,46 @@ class NativeSlurmClient:
 
         if max_bytes < 1:
             raise ValueError("max_bytes must be positive")
-        source = self._confined_path(remote_path)
-        attributes = source.stat()
-        if not stat.S_ISREG(attributes.st_mode) or source.is_symlink():
-            raise RuntimeError("native HPC result is not a regular file")
-        if attributes.st_size > max_bytes:
-            raise RuntimeError("native HPC result exceeds the configured size limit")
-        digest = hashlib.sha256()
-        total = 0
-        local_path.parent.mkdir(parents=True, exist_ok=True)
-        with source.open("rb") as source_stream, local_path.open("wb") as target_stream:
-            while chunk := source_stream.read(min(1024 * 1024, max_bytes + 1 - total)):
-                total += len(chunk)
-                if total > max_bytes:
-                    raise RuntimeError("native HPC result exceeds the configured size limit")
-                digest.update(chunk)
-                target_stream.write(chunk)
-        if total != attributes.st_size or source.stat().st_size != attributes.st_size:
-            raise RuntimeError("native HPC result changed while it was being read")
-        return total, digest.hexdigest()
+        try:
+            source = self._confined_path(remote_path)
+            attributes = source.stat()
+            if not stat.S_ISREG(attributes.st_mode) or source.is_symlink():
+                raise RuntimeError("native HPC result is not a regular file")
+            if attributes.st_size > max_bytes:
+                raise RuntimeError("native HPC result exceeds the configured size limit")
+            digest = hashlib.sha256()
+            total = 0
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+            with source.open("rb") as source_stream, local_path.open("wb") as target_stream:
+                while chunk := source_stream.read(min(1024 * 1024, max_bytes + 1 - total)):
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise RuntimeError("native HPC result exceeds the configured size limit")
+                    digest.update(chunk)
+                    target_stream.write(chunk)
+            if total != attributes.st_size or source.stat().st_size != attributes.st_size:
+                raise RuntimeError("native HPC result changed while it was being read")
+            return total, digest.hexdigest()
+        except Exception as exc:
+            _rethrow_native_transport_error(exc)
+            raise
 
     def _run(self, args: list[str]) -> str:
-        completed = subprocess.run(
-            args,
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
+        try:
+            completed = subprocess.run(
+                args,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        except FileNotFoundError as exc:
+            raise HPCConfigurationError("native Slurm command is unavailable") from exc
+        except subprocess.TimeoutExpired as exc:
+            raise HPCTransportError("native Slurm transport is unavailable") from exc
+        except OSError as exc:
+            _rethrow_native_slurm_transport_error(exc)
+            raise
         return completed.stdout.strip()
 
     def submit(self, request: JobRequest) -> JobHandle:

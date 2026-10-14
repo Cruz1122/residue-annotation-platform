@@ -25,6 +25,14 @@ A VPN or SFTP outage is a remote-availability event. It must not be converted
 into a Slurm job failure or trigger an automatic resubmission. The next worker
 poll reconciles the accepted job after connectivity returns.
 
+The executor preserves that boundary explicitly: transport failures while
+polling an accepted job or ingesting its result leave the stage retryable and
+do not create `remote_result_invalid` or a `StageResult`. A malformed marker,
+manifest, provenance record, hash, size, or annotation table remains a
+deterministic result-validation failure and is recorded as such. This does not
+replace a real VPN/Slurm outage drill; the local regression tests cover the
+state-preservation contract only.
+
 ## Backup and restore
 
 `scripts/backup_restore.py` creates a custom-format PostgreSQL dump and an

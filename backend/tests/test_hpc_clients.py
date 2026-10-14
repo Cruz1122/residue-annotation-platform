@@ -1,10 +1,22 @@
+import errno
 import subprocess
 from pathlib import Path
 
 import pytest
 from app.core.config import Settings
-from app.infrastructure.hpc.base import JobRequest, JobState
+from app.infrastructure.hpc.base import (
+    HPCConfigurationError,
+    HPCTransportError,
+    JobRequest,
+    JobState,
+)
 from app.infrastructure.hpc.native import NativeSlurmClient
+from app.infrastructure.hpc.ssh import SSHSlurmClient
+from paramiko.ssh_exception import (
+    AuthenticationException,
+    BadHostKeyException,
+    NoValidConnectionsError,
+)
 
 
 def _settings(root: Path | None = None) -> Settings:
@@ -101,6 +113,210 @@ def test_native_slurm_status_sanitizes_accounting_command_failure():
     assert status.state == JobState.UNKNOWN
     assert status.message == "accounting unavailable"
     assert "/gpfs/" not in status.message
+
+
+def test_native_slurm_missing_client_is_reported_as_configuration_error(tmp_path, monkeypatch):
+    root = tmp_path / "hpc-root"
+    root.mkdir()
+    client = NativeSlurmClient(_settings(root))
+
+    def unavailable(*_args, **_kwargs):
+        raise FileNotFoundError("sbatch")
+
+    monkeypatch.setattr(subprocess, "run", unavailable)
+
+    with pytest.raises(HPCConfigurationError, match="command is unavailable"):
+        client.submit(
+            JobRequest(
+                stage_id="protein_identity",
+                command=("python", "main.py"),
+                working_directory=str(root),
+            )
+        )
+
+
+def test_ssh_command_connection_loss_is_reported_as_transport_unavailable(tmp_path):
+    password_path = tmp_path / "password"
+    password_path.write_text("secret\n", encoding="utf-8")
+    password_path.chmod(0o600)
+    client = SSHSlurmClient(
+        Settings(
+            app_env="test",
+            database_url="sqlite://",
+            hpc_ssh_host="mn5.example",
+            hpc_ssh_username="runner",
+            hpc_ssh_password_file=password_path,
+            hpc_remote_root="/gpfs/project/root",
+        )
+    )
+
+    class BrokenSSH:
+        def exec_command(self, _command: str, timeout: float):
+            raise OSError(errno.ECONNRESET, "connection reset")
+
+        def close(self) -> None:
+            return None
+
+    client._connect = lambda: BrokenSSH()
+
+    with pytest.raises(HPCTransportError, match="transport is unavailable"):
+        client._command("squeue --jobs 12345")
+
+
+def test_ssh_no_valid_connections_is_reported_as_transport_unavailable(tmp_path, monkeypatch):
+    password_path = tmp_path / "password"
+    password_path.write_text("secret\n", encoding="utf-8")
+    password_path.chmod(0o600)
+    client = SSHSlurmClient(
+        Settings(
+            app_env="test",
+            database_url="sqlite://",
+            hpc_ssh_host="mn5.example",
+            hpc_ssh_username="runner",
+            hpc_ssh_password_file=password_path,
+            hpc_remote_root="/gpfs/project/root",
+        )
+    )
+
+    class BrokenConnectSSH:
+        def load_system_host_keys(self) -> None:
+            return None
+
+        def set_missing_host_key_policy(self, _policy) -> None:
+            return None
+
+        def connect(self, **_kwargs) -> None:
+            raise NoValidConnectionsError(
+                {("mn5.example", 22): ConnectionRefusedError(errno.ECONNREFUSED, "refused")}
+            )
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr("app.infrastructure.hpc.ssh.paramiko.SSHClient", lambda: BrokenConnectSSH())
+
+    with pytest.raises(HPCTransportError, match="transport is unavailable"):
+        client._connect()
+
+
+@pytest.mark.parametrize(
+    "ssh_error",
+    [
+        AuthenticationException("authentication failed"),
+        BadHostKeyException("mn5.example", None, None),
+    ],
+)
+def test_ssh_authentication_and_host_key_errors_are_not_retryable(tmp_path, ssh_error):
+    password_path = tmp_path / "password"
+    password_path.write_text("secret\n", encoding="utf-8")
+    password_path.chmod(0o600)
+    client = SSHSlurmClient(
+        Settings(
+            app_env="test",
+            database_url="sqlite://",
+            hpc_ssh_host="mn5.example",
+            hpc_ssh_username="runner",
+            hpc_ssh_password_file=password_path,
+            hpc_remote_root="/gpfs/project/root",
+        )
+    )
+
+    class BrokenSSH:
+        def exec_command(self, _command: str, timeout: float):
+            raise ssh_error
+
+        def close(self) -> None:
+            return None
+
+    client._connect = lambda: BrokenSSH()
+
+    with pytest.raises(type(ssh_error)) as raised:
+        client._command("squeue --jobs 12345")
+    assert not isinstance(raised.value, HPCTransportError)
+
+
+def test_native_gpfs_io_error_is_reported_as_transport_unavailable(tmp_path):
+    root = tmp_path / "hpc-root"
+    root.mkdir()
+    client = NativeSlurmClient(_settings(root))
+
+    class BrokenPath:
+        def stat(self):
+            raise OSError(errno.EIO, "stale GPFS handle")
+
+    client._confined_path = lambda _remote_path: BrokenPath()
+
+    with pytest.raises(HPCTransportError, match="transport is unavailable"):
+        client.read_text(str(root / "result.json"), 1_000)
+
+
+@pytest.mark.parametrize("filesystem_errno", [errno.EIO, errno.ESTALE])
+def test_native_gpfs_directory_errors_are_reported_as_transport_unavailable(
+    tmp_path, monkeypatch, filesystem_errno
+):
+    root = tmp_path / "hpc-root"
+    root.mkdir()
+    client = NativeSlurmClient(_settings(root))
+    original_exists = Path.exists
+
+    def broken_exists(path: Path) -> bool:
+        if path == root / "jobs":
+            raise OSError(filesystem_errno, "stale GPFS handle")
+        return original_exists(path)
+
+    monkeypatch.setattr(Path, "exists", broken_exists)
+
+    with pytest.raises(HPCTransportError, match="transport is unavailable"):
+        client.ensure_directory(str(root / "jobs"))
+
+
+@pytest.mark.parametrize(
+    "local_error",
+    [PermissionError(errno.EACCES, "permission denied"), OSError(errno.EINVAL, "invalid")],
+)
+def test_native_local_slurm_invocation_errors_are_not_retryable(tmp_path, monkeypatch, local_error):
+    root = tmp_path / "hpc-root"
+    root.mkdir()
+    client = NativeSlurmClient(_settings(root))
+
+    def unavailable(*_args, **_kwargs):
+        raise local_error
+
+    monkeypatch.setattr(subprocess, "run", unavailable)
+
+    with pytest.raises(type(local_error)) as raised:
+        client.submit(
+            JobRequest(
+                stage_id="protein_identity",
+                command=("python", "main.py"),
+                working_directory=str(root),
+            )
+        )
+    assert not isinstance(raised.value, HPCTransportError)
+
+
+@pytest.mark.parametrize("filesystem_errno", [errno.EIO, errno.ESTALE])
+def test_native_slurm_command_filesystem_errors_are_not_retryable(
+    tmp_path, monkeypatch, filesystem_errno
+):
+    root = tmp_path / "hpc-root"
+    root.mkdir()
+    client = NativeSlurmClient(_settings(root))
+
+    def unavailable(*_args, **_kwargs):
+        raise OSError(filesystem_errno, "local subprocess failure")
+
+    monkeypatch.setattr(subprocess, "run", unavailable)
+
+    with pytest.raises(OSError) as raised:
+        client.submit(
+            JobRequest(
+                stage_id="protein_identity",
+                command=("python", "main.py"),
+                working_directory=str(root),
+            )
+        )
+    assert not isinstance(raised.value, HPCTransportError)
 
 
 def test_native_slurm_reads_and_downloads_only_confined_regular_files(tmp_path):

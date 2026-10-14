@@ -4,16 +4,29 @@ import errno
 import hashlib
 import re
 import shlex
+import socket
 import stat
 from pathlib import Path, PurePosixPath
 
 import paramiko
+from paramiko.ssh_exception import (
+    AuthenticationException,
+    BadHostKeyException,
+    NoValidConnectionsError,
+)
 
 from app.core.config import Settings
-from app.infrastructure.hpc.base import JobHandle, JobRequest, JobState, JobStatus
+from app.infrastructure.hpc.base import (
+    HPCConfigurationError,
+    HPCTransportError,
+    JobHandle,
+    JobRequest,
+    JobState,
+    JobStatus,
+)
 
 
-class SSHConfigurationError(RuntimeError):
+class SSHConfigurationError(HPCConfigurationError):
     pass
 
 
@@ -45,6 +58,42 @@ def _remote_path_under(root: str, candidate: str) -> str:
     return str(candidate_path)
 
 
+_TRANSPORT_ERRNOS = frozenset(
+    {
+        errno.ECONNABORTED,
+        errno.ECONNREFUSED,
+        errno.ECONNRESET,
+        errno.EHOSTDOWN,
+        errno.EHOSTUNREACH,
+        errno.ENETDOWN,
+        errno.ENETUNREACH,
+        errno.ENOTCONN,
+        errno.EPIPE,
+        errno.ETIMEDOUT,
+    }
+)
+
+
+def _rethrow_transport_error(error: Exception) -> None:
+    if isinstance(error, HPCTransportError):
+        raise error
+    if isinstance(error, (AuthenticationException, BadHostKeyException)):
+        return
+    if isinstance(error, (NoValidConnectionsError, ConnectionError, EOFError, TimeoutError)):
+        raise HPCTransportError("SSH transport is unavailable") from error
+    if isinstance(error, socket.gaierror) and error.errno == getattr(socket, "EAI_AGAIN", None):
+        raise HPCTransportError("SSH transport is unavailable") from error
+    if isinstance(error, OSError) and error.errno in _TRANSPORT_ERRNOS:
+        raise HPCTransportError("SSH transport is unavailable") from error
+    if isinstance(error, paramiko.SSHException):
+        message = str(error).lower()
+        if any(
+            marker in message
+            for marker in ("connection", "socket is closed", "session not active", "timed out")
+        ):
+            raise HPCTransportError("SSH transport is unavailable") from error
+
+
 def assert_no_symlink_components(
     sftp: paramiko.SFTPClient,
     root: str,
@@ -62,6 +111,7 @@ def assert_no_symlink_components(
     try:
         root_attributes = sftp.lstat(str(root_path))
     except OSError as exc:
+        _rethrow_transport_error(exc)
         raise RuntimeError("remote root is unavailable") from exc
     if stat.S_ISLNK(root_attributes.st_mode or 0) or not stat.S_ISDIR(root_attributes.st_mode or 0):
         raise RuntimeError("remote root is not a real directory")
@@ -75,6 +125,7 @@ def assert_no_symlink_components(
         try:
             attributes = sftp.lstat(str(current))
         except OSError as exc:
+            _rethrow_transport_error(exc)
             raise RuntimeError("remote path component is unavailable") from exc
         if stat.S_ISLNK(attributes.st_mode or 0):
             raise RuntimeError("remote path uses a symlinked component")
@@ -90,6 +141,7 @@ def _ensure_remote_directory(
     try:
         root_attributes = sftp.lstat(str(root))
     except OSError as exc:
+        _rethrow_transport_error(exc)
         raise SSHConfigurationError("configured remote root is unavailable") from exc
     if stat.S_ISLNK(root_attributes.st_mode or 0) or not stat.S_ISDIR(root_attributes.st_mode or 0):
         raise SSHConfigurationError("configured remote root is not a real directory")
@@ -106,17 +158,20 @@ def _ensure_remote_directory(
             attributes = sftp.lstat(current_string)
         except OSError as exc:
             if getattr(exc, "errno", None) != errno.ENOENT:
+                _rethrow_transport_error(exc)
                 raise SSHConfigurationError("remote directory is unavailable") from exc
             try:
                 sftp.mkdir(current_string, mode=0o700)
             except OSError as mkdir_error:
                 if getattr(mkdir_error, "errno", None) != errno.EEXIST:
+                    _rethrow_transport_error(mkdir_error)
                     raise SSHConfigurationError("remote directory could not be created") from (
                         mkdir_error
                     )
             try:
                 attributes = sftp.lstat(current_string)
             except OSError as verify_error:
+                _rethrow_transport_error(verify_error)
                 raise SSHConfigurationError("remote directory could not be verified") from (
                     verify_error
                 )
@@ -144,30 +199,39 @@ class SSHSlurmClient:
         else:
             client.load_system_host_keys()
         client.set_missing_host_key_policy(paramiko.RejectPolicy())
-        client.connect(
-            hostname=self.settings.hpc_ssh_host,
-            port=self.settings.hpc_ssh_port,
-            username=self.settings.hpc_ssh_username,
-            password=self.password,
-            timeout=self.settings.hpc_command_timeout_seconds,
-            allow_agent=False,
-            look_for_keys=False,
-        )
+        try:
+            client.connect(
+                hostname=self.settings.hpc_ssh_host,
+                port=self.settings.hpc_ssh_port,
+                username=self.settings.hpc_ssh_username,
+                password=self.password,
+                timeout=self.settings.hpc_command_timeout_seconds,
+                allow_agent=False,
+                look_for_keys=False,
+            )
+        except Exception as exc:
+            client.close()
+            _rethrow_transport_error(exc)
+            raise
         return client
 
     def _command(self, command: str) -> str:
         client = self._connect()
         try:
-            _, stdout, stderr = client.exec_command(
-                command, timeout=self.settings.hpc_command_timeout_seconds
-            )
-            exit_status = stdout.channel.recv_exit_status()
-            output = stdout.read().decode("utf-8", errors="replace").strip()
-            error = stderr.read().decode("utf-8", errors="replace").strip()
-            if exit_status != 0:
-                message = error or output or f"remote command exited with status {exit_status}"
-                raise RuntimeError(message[:1000])
-            return output
+            try:
+                _, stdout, stderr = client.exec_command(
+                    command, timeout=self.settings.hpc_command_timeout_seconds
+                )
+                exit_status = stdout.channel.recv_exit_status()
+                output = stdout.read().decode("utf-8", errors="replace").strip()
+                error = stderr.read().decode("utf-8", errors="replace").strip()
+                if exit_status != 0:
+                    message = error or output or f"remote command exited with status {exit_status}"
+                    raise RuntimeError(message[:1000])
+                return output
+            except Exception as exc:
+                _rethrow_transport_error(exc)
+                raise
         finally:
             client.close()
 
@@ -175,15 +239,19 @@ class SSHSlurmClient:
         path = _remote_path_under(self.settings.hpc_remote_root, remote_path)
         client = self._connect()
         try:
-            sftp = client.open_sftp()
             try:
-                _ensure_remote_directory(
-                    sftp,
-                    PurePosixPath(self.settings.hpc_remote_root),
-                    PurePosixPath(path),
-                )
-            finally:
-                sftp.close()
+                sftp = client.open_sftp()
+                try:
+                    _ensure_remote_directory(
+                        sftp,
+                        PurePosixPath(self.settings.hpc_remote_root),
+                        PurePosixPath(path),
+                    )
+                finally:
+                    sftp.close()
+            except Exception as exc:
+                _rethrow_transport_error(exc)
+                raise
         finally:
             client.close()
 
@@ -193,23 +261,27 @@ class SSHSlurmClient:
             raise ValueError("max_bytes must be positive")
         client = self._connect()
         try:
-            sftp = client.open_sftp()
             try:
-                assert_no_symlink_components(sftp, self.settings.hpc_remote_root, path)
-                attributes = sftp.lstat(path)
-                if stat.S_ISLNK(attributes.st_mode or 0) or not stat.S_ISREG(
-                    attributes.st_mode or 0
-                ):
-                    raise RuntimeError("remote result is not a regular file")
-                if attributes.st_size is None or attributes.st_size > max_bytes:
-                    raise RuntimeError("remote result exceeds the configured size limit")
-                with sftp.open(path, "rb") as stream:
-                    data = stream.read(max_bytes + 1)
-                if len(data) > max_bytes:
-                    raise RuntimeError("remote result exceeds the configured size limit")
-                return data
-            finally:
-                sftp.close()
+                sftp = client.open_sftp()
+                try:
+                    assert_no_symlink_components(sftp, self.settings.hpc_remote_root, path)
+                    attributes = sftp.lstat(path)
+                    if stat.S_ISLNK(attributes.st_mode or 0) or not stat.S_ISREG(
+                        attributes.st_mode or 0
+                    ):
+                        raise RuntimeError("remote result is not a regular file")
+                    if attributes.st_size is None or attributes.st_size > max_bytes:
+                        raise RuntimeError("remote result exceeds the configured size limit")
+                    with sftp.open(path, "rb") as stream:
+                        data = stream.read(max_bytes + 1)
+                    if len(data) > max_bytes:
+                        raise RuntimeError("remote result exceeds the configured size limit")
+                    return data
+                finally:
+                    sftp.close()
+            except Exception as exc:
+                _rethrow_transport_error(exc)
+                raise
         finally:
             client.close()
 
@@ -221,36 +293,42 @@ class SSHSlurmClient:
             raise ValueError("max_bytes must be positive")
         client = self._connect()
         try:
-            sftp = client.open_sftp()
             try:
-                assert_no_symlink_components(sftp, self.settings.hpc_remote_root, path)
-                attributes = sftp.lstat(path)
-                if stat.S_ISLNK(attributes.st_mode or 0) or not stat.S_ISREG(
-                    attributes.st_mode or 0
-                ):
-                    raise RuntimeError("remote result is not a regular file")
-                if attributes.st_size is None or attributes.st_size > max_bytes:
-                    raise RuntimeError("remote result exceeds the configured size limit")
-                digest = hashlib.sha256()
-                total = 0
-                remaining = max_bytes + 1
-                local_path.parent.mkdir(parents=True, exist_ok=True)
-                with sftp.open(path, "rb") as source, local_path.open("wb") as sink:
-                    while remaining > 0:
-                        chunk = source.read(min(1024 * 1024, remaining))
-                        if not chunk:
-                            break
-                        total += len(chunk)
-                        if total > max_bytes:
-                            raise RuntimeError("remote result exceeds the configured size limit")
-                        digest.update(chunk)
-                        sink.write(chunk)
-                        remaining = max_bytes + 1 - total
-                if total != attributes.st_size:
-                    raise RuntimeError("remote result changed while it was being read")
-                return total, digest.hexdigest()
-            finally:
-                sftp.close()
+                sftp = client.open_sftp()
+                try:
+                    assert_no_symlink_components(sftp, self.settings.hpc_remote_root, path)
+                    attributes = sftp.lstat(path)
+                    if stat.S_ISLNK(attributes.st_mode or 0) or not stat.S_ISREG(
+                        attributes.st_mode or 0
+                    ):
+                        raise RuntimeError("remote result is not a regular file")
+                    if attributes.st_size is None or attributes.st_size > max_bytes:
+                        raise RuntimeError("remote result exceeds the configured size limit")
+                    digest = hashlib.sha256()
+                    total = 0
+                    remaining = max_bytes + 1
+                    local_path.parent.mkdir(parents=True, exist_ok=True)
+                    with sftp.open(path, "rb") as source, local_path.open("wb") as sink:
+                        while remaining > 0:
+                            chunk = source.read(min(1024 * 1024, remaining))
+                            if not chunk:
+                                break
+                            total += len(chunk)
+                            if total > max_bytes:
+                                raise RuntimeError(
+                                    "remote result exceeds the configured size limit"
+                                )
+                            digest.update(chunk)
+                            sink.write(chunk)
+                            remaining = max_bytes + 1 - total
+                    if total != attributes.st_size:
+                        raise RuntimeError("remote result changed while it was being read")
+                    return total, digest.hexdigest()
+                finally:
+                    sftp.close()
+            except Exception as exc:
+                _rethrow_transport_error(exc)
+                raise
         finally:
             client.close()
 
