@@ -65,7 +65,8 @@ class FakeCompletedRemote:
                     },
                     "artifacts": {
                         "summary": {
-                            "path": "summary.json",
+                            "path": "/gpfs/test/cache/summary.json",
+                            "external": True,
                             "sha256": hashlib.sha256(self.summary).hexdigest(),
                             "size": len(self.summary),
                         }
@@ -82,6 +83,8 @@ class FakeCompletedRemote:
         local_path: Path,
         max_bytes: int,
     ) -> tuple[int, str]:
+        if remote_path.endswith("summary.json"):
+            assert remote_path == "/gpfs/test/cache/summary.json"
         payload = self.annotations if remote_path.endswith("annotations.tsv") else self.summary
         assert len(payload) <= max_bytes
         local_path.parent.mkdir(parents=True, exist_ok=True)
