@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.core.config import Settings, get_settings
 from app.core.observability import log_worker_event
 from app.features.artifacts.storage import ArtifactStore
-from app.features.runs.models import ActiveRunSlot, Run, RunStage
+from app.features.runs.models import ActiveRunSlot, Run, RunStage, Upload
 from app.features.runs.service import transition_stage
 from app.features.runs.state import RunStageStatus, RunStatus
 from app.features.stages.registry import STAGE_BY_ID
@@ -67,21 +67,34 @@ def prepare_run_inputs(session: Session, run: Run, settings: Settings) -> None:
         raise InputTransferError("the protein needs a UniProt accession before input transfer")
 
     store = ArtifactStore(settings)
+    pending: list[tuple[Upload, Path, str]] = []
+    for upload in run.uploads:
+        local_path = store.resolve(upload.storage_key)
+        suffix = Path(upload.original_filename).suffix.lower()
+        try:
+            remote_path = remote_pipeline_input_path(
+                settings,
+                accession,
+                run.id,
+                upload.id,
+                suffix,
+                input_type=upload.input_type,
+            )
+            if upload.transfer_status == "uploaded" and upload.remote_path == remote_path:
+                continue
+            pending.append((upload, local_path, remote_path))
+        except InputTransferError as exc:
+            upload.transfer_status = "failed"
+            upload.transfer_error = str(exc)[:1000]
+            session.commit()
+            raise
+
+    if not pending:
+        return
+
     with SCPInputTransfer(settings) as transfer:
-        for upload in run.uploads:
-            local_path = store.resolve(upload.storage_key)
-            suffix = Path(upload.original_filename).suffix.lower()
+        for upload, local_path, remote_path in pending:
             try:
-                remote_path = remote_pipeline_input_path(
-                    settings,
-                    accession,
-                    run.id,
-                    upload.id,
-                    suffix,
-                    input_type=upload.input_type,
-                )
-                if upload.transfer_status == "uploaded" and upload.remote_path == remote_path:
-                    continue
                 transfer.upload(local_path, remote_path)
             except InputTransferError as exc:
                 upload.transfer_status = "failed"

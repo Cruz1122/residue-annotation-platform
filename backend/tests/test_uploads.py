@@ -252,6 +252,61 @@ def test_remote_pipeline_input_path_matches_remote_upload_contract():
         raise AssertionError("remote mmCIF input unexpectedly accepted")
 
 
+def test_prepare_run_inputs_rejects_remote_mmcif_before_opening_ssh(session, tmp_path, monkeypatch):
+    from app.core.config import Settings
+    from app.features.proteins.models import Protein, ProteinIdentifier
+    from app.features.runs.models import Upload
+    from app.features.runs.worker_service import prepare_run_inputs
+
+    artifact_root = tmp_path / "artifacts"
+    stored = artifact_root / "uploads" / "structure.mmcif"
+    stored.parent.mkdir(parents=True)
+    stored.write_text("data_test\n", encoding="utf-8")
+
+    protein = Protein(
+        sequence="ACDE",
+        length=4,
+        sequence_sha256="a" * 64,
+        owner_id="u1",
+        project_id="p1",
+        identifiers=[ProteinIdentifier(source="uniprot", identifier="P00001")],
+    )
+    run = Run(protein=protein, owner_id="u1", project_id="p1", status="pending")
+    run.uploads.append(
+        Upload(
+            owner_id="u1",
+            project_id="p1",
+            input_type="structure",
+            original_filename="model.mmcif",
+            storage_key="uploads/structure.mmcif",
+            sha256="b" * 64,
+            size=10,
+            media_type="chemical/mmcif",
+        )
+    )
+    session.add(run)
+    session.flush()
+    settings = Settings(
+        app_env="test",
+        database_url="sqlite://",
+        artifact_root=artifact_root,
+        hpc_execution_mode="ssh",
+        hpc_input_transfer_enabled=True,
+        hpc_remote_root="/gpfs/project/root",
+    )
+
+    def fail_if_ssh_is_open(_settings):
+        raise AssertionError("incompatible input opened an SSH transfer")
+
+    monkeypatch.setattr("app.features.runs.worker_service.SCPInputTransfer", fail_if_ssh_is_open)
+    with pytest.raises(InputTransferError, match=r"only as \.pdb"):
+        prepare_run_inputs(session, run, settings)
+
+    persisted = session.get(Upload, run.uploads[0].id)
+    assert persisted is not None
+    assert persisted.transfer_status == "failed"
+
+
 def test_upload_service_bounds_files():
     from app.core.config import Settings
 
