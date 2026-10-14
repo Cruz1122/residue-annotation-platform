@@ -1,9 +1,87 @@
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+DEVELOPMENT_AUTH_JWT_SECRET = "development-only-change-this-secret-before-production"
+PRODUCTION_AUTH_JWT_SECRET_MIN_LENGTH = 32
+
+
+def validate_auth_jwt_secret(secret: str, app_env: str) -> str:
+    """Reject development or trivially malformed JWT secrets outside local mode."""
+
+    if app_env not in {"staging", "production"}:
+        return secret
+    if not secret.strip():
+        raise ValueError("AUTH_JWT_SECRET cannot be blank in production")
+    if secret != secret.strip():
+        raise ValueError("AUTH_JWT_SECRET must not have leading or trailing whitespace")
+    if secret.startswith("development-only"):
+        raise ValueError(
+            "AUTH_JWT_SECRET must be explicitly configured in production; "
+            "development-only values are not allowed"
+        )
+    if len(secret) < PRODUCTION_AUTH_JWT_SECRET_MIN_LENGTH:
+        raise ValueError("AUTH_JWT_SECRET must contain at least 32 characters in production")
+    return secret
+
+
+def _validate_production_cors_origins(origins: list[str]) -> None:
+    if not origins:
+        raise ValueError("CORS_ORIGINS must include an HTTPS origin in production")
+    for origin in origins:
+        if "*" in origin:
+            raise ValueError("CORS_ORIGINS cannot contain a wildcard in production")
+        try:
+            parsed = urlsplit(origin)
+            hostname = parsed.hostname
+            if parsed.port == 0:
+                raise ValueError("port must be positive")
+        except ValueError as exc:
+            raise ValueError("CORS_ORIGINS contains an invalid URL in production") from exc
+        if (
+            parsed.scheme.lower() != "https"
+            or not hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError("CORS_ORIGINS must contain only concrete HTTPS origins in production")
+
+
+def _canonicalize_cors_origin(origin: str) -> str:
+    """Normalize valid HTTP(S) origins to the spelling used by browsers."""
+
+    parsed = urlsplit(origin)
+    if parsed.scheme.lower() not in {"http", "https"}:
+        return origin
+    try:
+        port = parsed.port
+    except ValueError:
+        return origin
+    if (
+        not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+    ):
+        return origin
+    scheme = parsed.scheme.lower()
+    hostname = parsed.hostname.lower()
+    if ":" in hostname and not hostname.startswith("["):
+        hostname = f"[{hostname}]"
+    if port is None or (scheme == "https" and port == 443) or (scheme == "http" and port == 80):
+        netloc = hostname
+    else:
+        netloc = f"{hostname}:{port}"
+    return urlunsplit((scheme, netloc, "", "", ""))
 
 
 class Settings(BaseSettings):
@@ -26,7 +104,7 @@ class Settings(BaseSettings):
     max_upload_bytes: int = Field(default=5 * 1024 * 1024, ge=1)
     dev_user_id: str = "local-user"
     dev_project_id: str = "local-project"
-    auth_jwt_secret: str = "development-only-change-this-secret-before-production"
+    auth_jwt_secret: str = DEVELOPMENT_AUTH_JWT_SECRET
     auth_access_token_minutes: int = Field(default=15, ge=5, le=60)
     auth_refresh_token_days: int = Field(default=30, ge=1, le=90)
     auth_verification_token_hours: int = Field(default=24, ge=1, le=168)
@@ -84,7 +162,11 @@ class Settings(BaseSettings):
 
     @property
     def cors_origin_list(self) -> list[str]:
-        return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+        return [
+            _canonicalize_cors_origin(origin.strip())
+            for origin in self.cors_origins.split(",")
+            if origin.strip()
+        ]
 
     @property
     def is_production(self) -> bool:
@@ -92,6 +174,10 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_email_delivery(self) -> "Settings":
+        if self.app_env in {"staging", "production"}:
+            validate_auth_jwt_secret(self.auth_jwt_secret, self.app_env)
+        if self.is_production:
+            _validate_production_cors_origins(self.cors_origin_list)
         if self.is_production and self.email_provider != "resend":
             raise ValueError("EMAIL_PROVIDER=resend is required in production")
         if self.email_provider == "resend" and not self.resend_api_key:

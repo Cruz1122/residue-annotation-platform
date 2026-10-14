@@ -12,7 +12,7 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.core.config import Settings
+from app.core.config import Settings, validate_auth_jwt_secret
 from app.features.auth.models import (
     AuditEvent,
     AuthToken,
@@ -101,12 +101,12 @@ def verify_password(password: str, encoded: str) -> bool:
 
 
 def _jwt_secret(settings: Settings) -> str:
-    if settings.app_env in {"staging", "production"} and (
-        len(settings.auth_jwt_secret) < 32
-        or settings.auth_jwt_secret.startswith("development-only")
-    ):
-        raise RuntimeError("AUTH_JWT_SECRET must be configured outside development and test")
-    return settings.auth_jwt_secret
+    try:
+        return validate_auth_jwt_secret(settings.auth_jwt_secret, settings.app_env)
+    except ValueError as exc:
+        raise RuntimeError(
+            "AUTH_JWT_SECRET must be configured outside development and test"
+        ) from exc
 
 
 def issue_access_token(user: User, settings: Settings) -> str:

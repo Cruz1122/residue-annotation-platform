@@ -73,6 +73,7 @@ def test_production_requires_operational_email_and_https(tmp_path):
         "database_url": "sqlite://",
         "artifact_root": tmp_path / "artifacts",
         "auth_jwt_secret": "production-test-secret-that-is-long-enough",
+        "cors_origins": "https://app.example.org",
     }
 
     with pytest.raises(ValidationError, match="EMAIL_PROVIDER=resend"):
@@ -85,6 +86,54 @@ def test_production_requires_operational_email_and_https(tmp_path):
             email_from="Residue Annotation <accounts@example.org>",
             frontend_base_url="http://app.example.org",
         )
+
+
+def test_production_rejects_default_or_unsafe_jwt_and_cors_configuration(tmp_path):
+    common = {
+        "app_env": "production",
+        "database_url": "sqlite://",
+        "artifact_root": tmp_path / "artifacts",
+        "email_provider": "resend",
+        "resend_api_key": "re_test_only",
+        "email_from": "Residue Annotation <accounts@example.org>",
+        "frontend_base_url": "https://app.example.org",
+        "cors_origins": "https://app.example.org",
+    }
+
+    with pytest.raises(ValidationError, match="AUTH_JWT_SECRET must be explicitly configured"):
+        Settings(**common)
+    with pytest.raises(ValidationError, match="development-only values"):
+        Settings(**common | {"auth_jwt_secret": "development-only-" + "x" * 40})
+    with pytest.raises(ValidationError, match="cannot be blank"):
+        Settings(**common | {"auth_jwt_secret": " " * 32})
+    with pytest.raises(ValidationError, match="leading or trailing whitespace"):
+        Settings(**common | {"auth_jwt_secret": " " + "x" * 32})
+    with pytest.raises(ValidationError, match="at least 32 characters"):
+        Settings(**common, auth_jwt_secret="too-short")
+    canonical = Settings(
+        **common
+        | {
+            "auth_jwt_secret": "production-test-secret-that-is-long-enough",
+            "cors_origins": "HTTPS://APP.EXAMPLE.ORG:443",
+        }
+    )
+    assert canonical.cors_origin_list == ["https://app.example.org"]
+    for origin, error in (
+        ("http://app.example.org", "only concrete HTTPS origins"),
+        ("ftp://app.example.org", "only concrete HTTPS origins"),
+        ("app.example.org", "only concrete HTTPS origins"),
+        ("null", "only concrete HTTPS origins"),
+        ("https://user:password@app.example.org", "only concrete HTTPS origins"),
+        ("*", "wildcard"),
+    ):
+        with pytest.raises(ValidationError, match=error):
+            Settings(
+                **common
+                | {
+                    "auth_jwt_secret": "production-test-secret-that-is-long-enough",
+                    "cors_origins": origin,
+                }
+            )
 
 
 def test_registration_dispatches_verification_email(monkeypatch, client, tmp_path):

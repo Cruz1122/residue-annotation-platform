@@ -5,11 +5,12 @@ import pytest
 from app.core.config import Settings, get_settings
 from app.features.auth import router as auth_router
 from app.features.auth.models import AuditEvent, User, UserRole
-from app.features.auth.service import AdminBootstrapError, bootstrap_first_admin, issue_access_token
+from app.features.auth.service import AdminBootstrapError, bootstrap_first_admin
 from app.features.runs.models import Artifact, Run, StageResult
 from app.features.runs.state import RunStageStatus
 from app.main import app
 from fastapi import HTTPException
+from pydantic import ValidationError
 from sqlalchemy.orm import Session as SqlAlchemySession
 from starlette.requests import Request
 
@@ -243,6 +244,7 @@ def test_production_principal_rejects_untrusted_headers(client, tmp_path: Path):
         resend_api_key="re_test_only",
         email_from="Residue Annotation <accounts@example.org>",
         frontend_base_url="https://app.example.org",
+        cors_origins="https://app.example.org",
     )
 
     response = client.get(
@@ -704,6 +706,7 @@ def test_production_trusted_headers_require_both_headers(client, tmp_path: Path)
         resend_api_key="re_test_only",
         email_from="Residue Annotation <accounts@example.org>",
         frontend_base_url="https://app.example.org",
+        cors_origins="https://app.example.org",
     )
 
     assert client.get("/api/v1/proteins").status_code == 401
@@ -715,12 +718,9 @@ def test_production_trusted_headers_require_both_headers(client, tmp_path: Path)
 
 
 def test_staging_rejects_default_jwt_secret(tmp_path: Path):
-    settings = Settings(
-        app_env="staging",
-        database_url="sqlite://",
-        artifact_root=tmp_path / "artifacts",
-    )
-    user = User(id="u-1", email="x@example.com", project_id="p-1", password_hash="x")
-
-    with pytest.raises(RuntimeError):
-        issue_access_token(user, settings)
+    with pytest.raises(ValidationError, match="development-only values"):
+        Settings(
+            app_env="staging",
+            database_url="sqlite://",
+            artifact_root=tmp_path / "artifacts",
+        )
