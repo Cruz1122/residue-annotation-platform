@@ -74,6 +74,8 @@ volumen nuevo.
 Para el arranque automático, configura una sola vez en `.env` los paths host de los secretos y del `known_hosts` verificado. No pongas passwords en `.env`, en argumentos de proceso ni en el repositorio:
 
 ```bash
+COMPOSE_PROFILES=vpn \
+HPC_EXECUTION_MODE=ssh \
 HPC_VPN_HOST=gw.bsc.es \
 HPC_VPN_PORT=443 \
 HPC_VPN_USERNAME=<vpn-user> \

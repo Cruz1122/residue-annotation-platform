@@ -40,13 +40,13 @@ services:
       - /run:mode=0755
       - /tmp:mode=1777
     environment:
-      HPC_VPN_HOST: ${HPC_VPN_HOST:?Set HPC_VPN_HOST for the MN5 VPN}
+      HPC_VPN_HOST: ${HPC_VPN_HOST:-}
       HPC_VPN_PORT: ${HPC_VPN_PORT:-443}
-      HPC_VPN_USERNAME: ${HPC_VPN_USERNAME:?Set HPC_VPN_USERNAME for the MN5 VPN}
+      HPC_VPN_USERNAME: ${HPC_VPN_USERNAME:-}
       HPC_VPN_CONFIG_FILE: /etc/openfortivpn/config
       HPC_VPN_PASSWORD_FILE: /run/secrets/hpc_vpn_password
       HPC_VPN_RECONNECT_SECONDS: ${HPC_VPN_RECONNECT_SECONDS:-60}
-      HPC_SSH_HOST: ${HPC_SSH_HOST:?Set HPC_SSH_HOST for the MN5 VPN healthcheck}
+      HPC_SSH_HOST: ${HPC_SSH_HOST:-}
       HPC_SSH_PORT: ${HPC_SSH_PORT:-22}
     volumes:
       - type: bind
@@ -154,9 +154,9 @@ services:
       AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:-development-only-change-this-secret-before-production}
       AUTH_TRUSTED_HEADERS_ENABLED: ${AUTH_TRUSTED_HEADERS_ENABLED:-false}
       HPC_EXECUTION_MODE: ssh
-      HPC_SSH_HOST: ${HPC_SSH_HOST:?Set HPC_SSH_HOST for the MN5 worker}
+      HPC_SSH_HOST: ${HPC_SSH_HOST:-}
       HPC_SSH_PORT: ${HPC_SSH_PORT:-22}
-      HPC_SSH_USERNAME: ${HPC_SSH_USERNAME:?Set HPC_SSH_USERNAME for the MN5 worker}
+      HPC_SSH_USERNAME: ${HPC_SSH_USERNAME:-}
       HPC_SSH_PASSWORD_FILE: /run/secrets/hpc_ssh_password
       HPC_KNOWN_HOSTS_FILE: /run/secrets/hpc_known_hosts
       HPC_REMOTE_ROOT: ${HPC_REMOTE_ROOT:-/gpfs/projects/bsc08/bsc001997/vcfs_1000geno/hilo_integrado_anotacion}

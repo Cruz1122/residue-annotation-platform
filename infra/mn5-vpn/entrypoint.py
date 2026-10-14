@@ -66,11 +66,16 @@ def main() -> int:
     host = os.environ.get("HPC_VPN_HOST")
     port = os.environ.get("HPC_VPN_PORT", "443")
     username = os.environ.get("HPC_VPN_USERNAME")
+    if not host or not username:
+        print(
+            "VPN configuration is incomplete: HPC_VPN_HOST and "
+            "HPC_VPN_USERNAME are required",
+            file=sys.stderr,
+        )
+        return 78
     command = [binary, "--config", str(config)]
-    if host:
-        command.append(f"{host}:{port}")
-    if username:
-        command.extend(["--username", username])
+    command.append(f"{host}:{port}")
+    command.extend(["--username", username])
     if password_available:
         command.extend(["--pinentry", "/usr/local/libexec/rap-vpn-pinentry"])
     try:

@@ -79,3 +79,18 @@ def test_vpn_password_file_builds_non_interactive_command(tmp_path: Path, monkey
     assert "--pinentry" in command
     assert str(password) not in command
     assert all("secret" not in argument for argument in command)
+
+
+def test_vpn_missing_endpoint_fails_before_exec(tmp_path: Path, monkeypatch):
+    entrypoint = _load_entrypoint()
+    password = tmp_path / "vpn-password"
+    password.write_text("secret\n", encoding="utf-8")
+    password.chmod(0o600)
+    monkeypatch.setattr(entrypoint.shutil, "which", lambda _name: "/usr/bin/openfortivpn")
+    monkeypatch.setattr(os, "execv", lambda *_args: pytest.fail("VPN must not start"))
+    monkeypatch.setenv("HPC_VPN_CONFIG_FILE", "/dev/null")
+    monkeypatch.setenv("HPC_VPN_PASSWORD_FILE", str(password))
+    monkeypatch.delenv("HPC_VPN_HOST", raising=False)
+    monkeypatch.setenv("HPC_VPN_USERNAME", "mmenaca")
+
+    assert entrypoint.main() == 78
