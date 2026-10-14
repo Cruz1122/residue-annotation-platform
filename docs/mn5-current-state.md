@@ -154,15 +154,26 @@ manifest remoto declara `schema=stage-result-v1`,
 `stage_id=protein_identity`, `status=success`, `partial=false`, 12 artefactos
 locales y una clave de cache válida; el hash y tamaño de `provenance.json`
 coinciden con `file_integrity`. El validador local
-`validate_remote_manifest` aceptó esa metadata. No se descargaron las tablas,
-FASTA ni otros artefactos científicos, de modo que esta evidencia confirma la
-forma e integridad del resultado de un stage, pero no la ejecución completa ni
-la equivalencia científica del benchmark.
+`validate_remote_manifest` aceptó esa metadata. En una segunda lectura
+explícita y acotada se descargaron sólo `annotations.tsv` (15,407 bytes,
+SHA-256 `a5c4dcfa102171bde737bedd8a6c9ba31d76c927c88e97c3458d7c5cb3d32c3c`),
+`artifacts/protein_identity.tsv` (667 bytes, SHA-256
+`8d11de561549d7af3cf362c6ff314e9a3c9b64347023daf90b740ce63de2b13a`) y
+`artifacts/canonical_protein.fasta` (913 bytes, SHA-256
+`7ba8cbf94ad91aef9999cc88ef289afcf9747acb78da3a6c37aa20fbec4bdefb`). La
+tabla contiene 860 filas de `P01130` con cobertura exacta `1..860`; el
+`aa_ref` coincide con la secuencia canónica de longitud 860 y la identidad
+reporta el mismo SHA-256 de secuencia
+`36a68c5510827c435b046def3dd5413c4715085cfdc1fdcb4b05a83e805ef3a2`. El
+parser local de anotaciones aceptó las 860 filas. Esta evidencia prueba un
+stage real y su forma de ingesta, pero no la ejecución completa ni la
+equivalencia científica del benchmark.
 
 Como control, `benchmarks/all_stages_47069621/config.json` declara otra corrida
 finalizada, pero su `stages.tsv` de 51 bytes contiene sólo el encabezado; se
 clasifica como evidencia incompleta, no como resultado científico. No se
-descargaron logs de fallo, tablas de anotación ni datasets.
+descargaron datasets masivos ni outputs de etapas distintas de
+`protein_identity`.
 
 Para diagnosticar la corrida fallida se descargó únicamente el log de consola
 `benchmarks/all_stages_47143345/profile_01/pipeline17.console.log` (21,826
