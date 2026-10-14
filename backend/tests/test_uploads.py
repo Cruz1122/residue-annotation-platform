@@ -474,6 +474,37 @@ def test_native_input_transfer_confines_and_does_not_overwrite(tmp_path):
     assert remote.stat().st_mode & 0o077 == 0
 
 
+def test_native_input_transfer_cleans_partial_temporary_file(tmp_path, monkeypatch):
+    from app.core.config import Settings
+    from app.infrastructure.hpc.transfer import InputTransferError, NativeInputTransfer
+
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir()
+    source = artifact_root / "sequence.fasta"
+    source.write_text(">P00001\nACDE\n", encoding="utf-8")
+    hpc_root = tmp_path / "hpc-root"
+    hpc_root.mkdir()
+    settings = Settings(
+        app_env="test",
+        database_url="sqlite://",
+        artifact_root=artifact_root,
+        hpc_execution_mode="native",
+        hpc_remote_root=str(hpc_root),
+    )
+    remote = hpc_root / "uploads" / "P00001" / "run-1" / "upload-1.fasta"
+
+    def fail_copy(*_args, **_kwargs):
+        raise OSError("simulated copy interruption")
+
+    monkeypatch.setattr("app.infrastructure.hpc.transfer.shutil.copyfileobj", fail_copy)
+    with NativeInputTransfer(settings) as transfer:
+        with pytest.raises(InputTransferError, match="native input transfer failed"):
+            transfer.upload(source, str(remote))
+
+    assert not remote.exists()
+    assert not list(remote.parent.glob(f".{remote.name}.tmp-*"))
+
+
 def test_upload_service_bounds_files():
     from app.core.config import Settings
 

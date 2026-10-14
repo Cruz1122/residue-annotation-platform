@@ -395,13 +395,17 @@ class NativeInputTransfer:
         if destination.exists() or destination.is_symlink():
             raise InputTransferError("remote input destination already exists")
 
+        temporary = destination.with_name(f".{destination.name}.tmp-{uuid4().hex}")
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
+        descriptor = -1
+        published = False
+        completed = False
         try:
-            descriptor = os.open(destination, flags, 0o600)
+            descriptor = os.open(temporary, flags, 0o600)
         except OSError as exc:
-            raise InputTransferError("remote input destination could not be created") from exc
+            raise InputTransferError("remote input temporary file could not be created") from exc
         try:
             with os.fdopen(descriptor, "wb") as target:
                 descriptor = -1
@@ -409,12 +413,37 @@ class NativeInputTransfer:
                     shutil.copyfileobj(source, target, length=1024 * 1024)
                 target.flush()
                 os.fsync(target.fileno())
+            # A hard link is the no-replace primitive available on the local
+            # filesystem: unlike rename(), it fails when another writer has
+            # already claimed the destination instead of overwriting it.
+            os.link(temporary, destination, follow_symlinks=False)
+            published = True
+            published_descriptor = os.open(
+                destination,
+                os.O_RDONLY | (os.O_NOFOLLOW if hasattr(os, "O_NOFOLLOW") else 0),
+            )
+            try:
+                published_attributes = os.fstat(published_descriptor)
+                if not stat.S_ISREG(published_attributes.st_mode):
+                    raise InputTransferError("published native input is not a regular file")
+                if published_attributes.st_size != source_attributes.st_size:
+                    raise InputTransferError("published native input has an unexpected size")
+            finally:
+                os.close(published_descriptor)
             os.chmod(destination, 0o600)
+            completed = True
+        except FileExistsError as exc:
+            raise InputTransferError("remote input destination already exists") from exc
+        except InputTransferError:
+            raise
         except Exception as exc:
+            raise InputTransferError("native input transfer failed") from exc
+        finally:
             if descriptor != -1:
                 os.close(descriptor)
-            destination.unlink(missing_ok=True)
-            raise InputTransferError("native input transfer failed") from exc
+            if published and not completed:
+                destination.unlink(missing_ok=True)
+            temporary.unlink(missing_ok=True)
 
     def __exit__(self, *_: object) -> None:
         return None
