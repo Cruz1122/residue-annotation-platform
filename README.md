@@ -11,7 +11,7 @@ Los puertos de desarrollo definidos para este proyecto son deliberadamente:
 - frontend: `4742`
 - backend: `8742`
 
-`docker compose up --build` levanta PostgreSQL, las migraciones Alembic, la API, el worker y el frontend. Sin el worker una corrida queda en `pending` y ocupa el cupo de una corrida activa. `compose.ssh.yml` es el único overlay extra: monta la contraseña SSH y `known_hosts` sólo cuando se pide un submit autorizado.
+`docker compose up --build -d` levanta PostgreSQL, las migraciones Alembic, la API, el frontend, la VPN y el worker. La VPN tiene un healthcheck contra el endpoint SSH de MareNostrum; el worker no arranca hasta que el túnel y la ruta remota están disponibles. Después, una run validada por la API se transfiere y se envía automáticamente a Slurm. Todos los servicios usan `restart: unless-stopped`, por lo que el stack vuelve a levantarse cuando el daemon de Docker arranca de nuevo.
 
 ```text
 residue-annotation-platform/
@@ -25,7 +25,7 @@ residue-annotation-platform/
 │   ├── src/features/             # superficies por dominio
 │   └── src/shared/api/           # cliente tipado de FastAPI
 ├── compose.yml                   # Postgres, migraciones, API, worker y frontend
-├── compose.ssh.yml               # overlay explícito para SCP autorizado
+├── infra/mn5-vpn/                # cliente VPN aislado y pinentry sin logs
 ├── scripts/validate_specs.py     # validación documental estática
 └── specs/
 ```
@@ -65,18 +65,22 @@ docker compose config --services
 
 Ese arranque usa `APP_ENV=development` salvo que el entorno lo cambie. La contraseña local de Postgres es `residue-dev` si `POSTGRES_PASSWORD` no está definida. No cambia los puertos públicos `4742/8742`. Para detener el stack usa `docker compose down`. No uses `down -v` si necesitas conservar PostgreSQL y los artefactos.
 
-Para habilitar únicamente la transferencia SCP de uploads pequeños en un entorno autorizado, prepara un archivo de password SSH y un `known_hosts` verificado fuera del repositorio y ejecuta el overlay explícito:
+Para el arranque automático, configura una sola vez en `.env` los paths host de los secretos y del `known_hosts` verificado. No pongas passwords en `.env`, en argumentos de proceso ni en el repositorio:
 
 ```bash
+HPC_VPN_HOST=gw.bsc.es \
+HPC_VPN_PORT=443 \
+HPC_VPN_USERNAME=<vpn-user> \
+HPC_VPN_CONFIG_FILE=/etc/openfortivpn/config \
+HPC_VPN_PASSWORD_FILE=/ruta/local/hpc_vpn_password \
 HPC_SSH_HOST=glogin4.bsc.es \
 HPC_SSH_USERNAME=bsc001997 \
-HPC_REMOTE_ROOT=/gpfs/projects/bsc08/bsc001997/vcfs_1000geno/hilo_integrado_anotacion \
 HPC_SSH_PASSWORD_FILE=/ruta/local/hpc_ssh_password \
 HPC_KNOWN_HOSTS_FILE=/ruta/local/known_hosts \
-docker compose -f compose.yml -f compose.ssh.yml up --build
+docker compose up --build -d
 ```
 
-El overlay sólo configura el worker; no habilita el inspector read-only ni autoriza jobs científicos por sí mismo.
+El password de VPN puede vivir en un archivo de una sola línea con permisos `0600`, o en un archivo de configuración `openfortivpn` protegido. El servicio `vpn` es el único que recibe `NET_ADMIN`; el backend, frontend y worker no reciben ese capability. El worker sólo monta, en modo lectura, el password SSH y `known_hosts`; no se monta `.env` ni el filesystem del host.
 
 ## Desarrollo sin Docker
 
@@ -108,7 +112,7 @@ La URL browser-side se configura mediante `PUBLIC_API_BASE_URL`; el valor de eje
 5. `/proteins/{id}/viewer/?run={run_id}` muestra la secuencia registrada y carga Mol* con un artefacto PDB/mmCIF publicado o, si todavía no existe, con el upload de estructura de esa corrida. Sin estructura se informa que no está disponible.
 6. `/proteins/` consulta el catálogo privado mediante `GET /api/v1/proteins`.
 
-Para una run también se pueden subir inputs pequeños mediante `POST /api/v1/uploads` con `input_type=fasta` o `input_type=structure` (`.pdb/.cif/.mmcif`). La run acepta los `upload_ids` resultantes; el worker sólo usa SCP cuando `HPC_INPUT_TRANSFER_ENABLED=true` y el perfil SSH está explícitamente configurado.
+Para una run también se pueden subir inputs pequeños mediante `POST /api/v1/uploads` con `input_type=fasta` o `input_type=structure` (`.pdb/.cif/.mmcif`). La run acepta los `upload_ids` resultantes; con el stack único, el worker transfiere los inputs por SCP y envía las etapas a Slurm sin un comando adicional del usuario.
 
 Endpoints principales:
 
@@ -181,15 +185,15 @@ Estos checks no requieren VPN, GPU, secretos, `SLURM_JOB_ID` ni acceso a MN5. Lo
 
 ## Configuración y seguridad
 
-`.env.example` sólo contiene valores de desarrollo y referencias a ficheros de secretos externos. `.env`, `run/secrets/`, bases SQLite, artefactos y salidas de build están ignorados por Git. La autenticación de desarrollo usa una identidad local configurable; en `APP_ENV=production` faltan `X-User-Id` y `X-Project-Id` y el backend falla cerrado. La autorización se comprueba al leer proteínas, runs y artefactos.
+`.env.example` sólo contiene valores no secretos y referencias a ficheros externos. `.env`, `run/secrets/`, bases SQLite, artefactos y salidas de build están ignorados por Git. Las credenciales no se pasan en argumentos ni se registran: Compose monta sólo los archivos necesarios como read-only. El contenedor VPN se limita a `NET_ADMIN`, el backend, frontend y worker no tienen capabilities Linux adicionales, el root filesystem de los servicios sensibles es read-only y la verificación SSH exige `known_hosts`; una clave ausente o cambiada hace fallar cerrado. La autenticación de desarrollo usa una identidad local configurable; en `APP_ENV=production` faltan `X-User-Id` y `X-Project-Id` y el backend falla cerrado. La autorización se comprueba al leer proteínas, runs y artefactos.
 
-La autenticación de cuenta usa Bearer tokens en producción; el fallback por headers sólo existe en development/test. Los refresh tokens y tokens de verificación/reset se almacenan únicamente como hashes, los passwords se derivan con scrypt y las acciones de auth generan auditoría sin secretos. La verificación y recuperación se entregan mediante Resend cuando `EMAIL_PROVIDER=resend`; la API key permanece en el entorno y `EMAIL_FROM` debe usar un dominio verificado en producción. La regla de dominio es máximo una run no terminal por usuario. La VPN se establece fuera de FastAPI. La inspección MN5, cuando esté autorizada, utiliza la interfaz separada `ReadOnlyMN5Inspector`, paths relativos y SFTP sin shell ni operaciones de escritura. Los uploads de run sólo se transfieren por SCP con perfil SSH explícito; consultar la spec 0016 y [`specs/contracts/mn5-readonly-inspection.md`](specs/contracts/mn5-readonly-inspection.md).
+La autenticación de cuenta usa Bearer tokens en producción; el fallback por headers sólo existe en development/test. Los refresh tokens y tokens de verificación/reset se almacenan únicamente como hashes, los passwords se derivan con scrypt y las acciones de auth generan auditoría sin secretos. La verificación y recuperación se entregan mediante Resend cuando `EMAIL_PROVIDER=resend`; la API key permanece en el entorno y `EMAIL_FROM` debe usar un dominio verificado en producción. La regla de dominio es máximo una run no terminal por usuario. La VPN se establece en un contenedor separado del backend y sólo ese contenedor recibe `NET_ADMIN`. La inspección MN5, cuando esté autorizada, utiliza la interfaz separada `ReadOnlyMN5Inspector`, paths relativos y SFTP sin shell ni operaciones de escritura. Los uploads de run se transfieren por SCP con host keys verificadas; consultar la spec 0016 y [`specs/contracts/mn5-readonly-inspection.md`](specs/contracts/mn5-readonly-inspection.md).
 
 ## Límites actuales
 
 - Los 18 stages están registrados con dependencias, recursos y columnas; no hay adapters científicos ejecutables aprobados en este checkout.
 - El worker falla de forma auditable cuando no existe un executor real; no crea anotaciones ni artefactos sintéticos.
-- La integración SSH/native y el inspector SFTP tienen fronteras de seguridad, pero el smoke autorizado de Slurm/MN5 y la regresión científica permanecen `NOT RUN`.
+- La integración SSH/native y el inspector SFTP tienen fronteras de seguridad; el stack ya tiene el camino automático de VPN → SSH/SCP → Slurm, pero la regresión científica y la comparación contra un baseline siguen requiriendo evidencia de resultados reales.
 - El visor no infiere `aa_position` canónica a partir de un número de residuo estructural; requiere mapping publicado por el pipeline.
 - El release final, backup/restore, cuotas completas, auditoría de producción y E2E científico están pendientes según las acceptance de cada change.
 - La suite de autenticación y el adaptador Resend están implementados localmente, pero la spec 0016 permanece `PENDING`: entrega real de email, SSO, IDOR independiente con dos principals PostgreSQL, threat model y SCP autorizado aún requieren evidencia externa. Los tests de concurrencia PostgreSQL están implementados y pasan contra PostgreSQL 16 aislado; el secret scan local pasa, pero su ejecución en el proveedor CI sigue pendiente.
