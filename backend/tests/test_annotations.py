@@ -306,6 +306,8 @@ def test_ingest_result_reuses_existing_cache_entry(client, session, tmp_path: Pa
                 return "/gpfs/root/runs/run-1"
             if remote_path.endswith("run_context.json"):
                 return json.dumps({"stage_results": {}})
+            if remote_path.endswith("DONE"):
+                return "OK\n"
             if remote_path.endswith("result_manifest.json"):
                 return json.dumps(manifest)
             if remote_path.endswith("provenance.json"):
@@ -344,7 +346,10 @@ def test_stale_cache_entry_is_purged_and_republished(client, session, tmp_path: 
         )
     )
     session.commit()
-    annotations = b"aa_position\taa_ref\tscore\n1\tA\t0.5\n2\tC\t0.7\n"
+    annotations = (
+        b"aa_position\taa_ref\tsecondary_structure\tburied_status\n"
+        b"1\tA\tH\tburied\n2\tC\tC\texposed\n"
+    )
     artifact_payload = b"data"
     manifest = {
         "schema": "stage-result-v1",
@@ -367,6 +372,8 @@ def test_stale_cache_entry_is_purged_and_republished(client, session, tmp_path: 
                 return "/gpfs/root/runs/run-1"
             if remote_path.endswith("run_context.json"):
                 return json.dumps({"stage_results": {}})
+            if remote_path.endswith("DONE"):
+                return "OK\n"
             if remote_path.endswith("result_manifest.json"):
                 return json.dumps(manifest)
             if remote_path.endswith("provenance.json"):

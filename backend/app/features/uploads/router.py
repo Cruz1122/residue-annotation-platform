@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -12,6 +12,7 @@ from app.core.auth import Principal, get_principal
 from app.core.config import Settings, get_settings
 from app.core.db import get_db
 from app.features.artifacts.storage import ArtifactPathError, ArtifactStore
+from app.features.auth.service import record_audit
 from app.features.runs.models import Upload
 from app.features.runs.schemas import UploadRead
 from app.features.uploads.service import UploadValidationError, write_upload
@@ -33,6 +34,7 @@ def _serialize(upload: Upload) -> UploadRead:
 
 @router.post("", response_model=UploadRead, status_code=status.HTTP_201_CREATED)
 async def create_upload(
+    request: Request,
     file: UploadFile = File(...),
     input_type: Literal["fasta", "structure"] = Form(...),
     session: Session = Depends(get_db),
@@ -70,6 +72,16 @@ async def create_upload(
     )
     session.add(upload)
     try:
+        session.flush()
+        record_audit(
+            session,
+            action="create_upload",
+            actor_user_id=principal.user_id,
+            resource_type="upload",
+            resource_id=upload.id,
+            client_ip=request.client.host if request.client else None,
+            details={"input_type": input_type, "size": size},
+        )
         session.commit()
     except Exception:
         session.rollback()

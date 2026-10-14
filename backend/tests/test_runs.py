@@ -1,4 +1,5 @@
 from app.features.annotations.service import insert_annotation_rows
+from app.features.auth.models import AuditEvent
 from app.features.runs.models import ActiveRunSlot, Run, RunStage, StageResult
 from app.features.runs.service import transition_stage
 from app.features.runs.state import RunStageStatus
@@ -135,3 +136,26 @@ def test_worker_finishes_failed_run_after_descendants_are_skipped(client, sessio
     assert run.status == "failed"
     assert all(stage.status in {"failed", "skipped"} for stage in run.stages)
     assert session.scalar(select(ActiveRunSlot).where(ActiveRunSlot.run_id == run_id)) is None
+
+
+def test_run_create_and_cancel_are_audited_without_scientific_payloads(client, session):
+    protein_id = _create_protein(client)
+    created = client.post(
+        "/api/v1/runs",
+        json={
+            "protein_id": protein_id,
+            "variants": [{"aa_position": 1, "aa_ref": "A", "aa_alt": "C"}],
+        },
+    )
+    assert created.status_code == 201
+    run_id = created.json()["id"]
+
+    cancelled = client.post(f"/api/v1/runs/{run_id}/cancel")
+    assert cancelled.status_code == 200
+
+    events = list(session.scalars(select(AuditEvent)))
+    assert {event.action for event in events} == {"create_run", "cancel_run"}
+    assert all(event.resource_id == run_id for event in events)
+    assert all("sequence" not in event.details for event in events)
+    create_event = next(event for event in events if event.action == "create_run")
+    assert create_event.details["requested_variant_count"] == 1

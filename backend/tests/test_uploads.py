@@ -1,10 +1,12 @@
 import pytest
+from app.features.auth.models import AuditEvent
 from app.features.runs.models import Run
 from app.features.runs.state import RunStatus
 from app.features.runs.worker_service import finalize_run
 from app.features.uploads.service import UploadValidationError, validate_upload_bytes
 from app.infrastructure.hpc.ssh import SSHConfigurationError, _remote_path_under
 from app.infrastructure.hpc.transfer import InputTransferError, remote_input_path
+from sqlalchemy import select
 
 
 def _create_protein(client, sequence: str) -> str:
@@ -30,6 +32,21 @@ def test_small_fasta_upload_can_be_attached_to_a_run(client):
     assert run.status_code == 201
     assert run.json()["uploads"][0]["input_type"] == "fasta"
     assert run.json()["uploads"][0]["transfer_status"] == "pending"
+
+
+def test_upload_creation_is_audited_without_content_or_path(client, session):
+    upload = client.post(
+        "/api/v1/uploads",
+        files={"file": ("query.fasta", b">query\nACDE", "text/plain")},
+        data={"input_type": "fasta"},
+    )
+    assert upload.status_code == 201
+
+    event = session.scalar(select(AuditEvent).where(AuditEvent.action == "create_upload"))
+    assert event is not None
+    assert event.resource_id == upload.json()["id"]
+    assert event.details == {"input_type": "fasta", "size": 11}
+    assert "storage_key" not in event.details
 
 
 def test_upload_validation_rejects_wrong_extension_and_binary_content(client):

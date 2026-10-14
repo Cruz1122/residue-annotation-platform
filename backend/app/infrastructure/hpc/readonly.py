@@ -8,10 +8,14 @@ from typing import Protocol
 import paramiko
 
 from app.core.config import Settings
+from app.infrastructure.hpc.ssh import assert_no_symlink_components
 
 
 class InspectionError(RuntimeError):
     pass
+
+
+AUTHORIZED_MN5_ROOT = "/gpfs/projects/bsc08/bsc001997/vcfs_1000geno/hilo_integrado_anotacion"
 
 
 def validate_relative_path(relative_path: str) -> PurePosixPath:
@@ -92,30 +96,62 @@ class SFTPReadOnlyInspector:
             or not settings.hpc_ssh_password_file
         ):
             raise InspectionError("SFTP inspection profile is incomplete")
+        password_path = settings.hpc_ssh_password_file
+        if password_path.is_symlink() or not password_path.is_file():
+            raise InspectionError("password file must be a regular file")
+        if password_path.stat().st_mode & 0o077:
+            raise InspectionError("password file must not be accessible by group or others")
+        if not password_path.read_text(encoding="utf-8").strip():
+            raise InspectionError("password file is empty")
+        if settings.mn5_root != AUTHORIZED_MN5_ROOT:
+            raise InspectionError("inspection root is not the authorized MN5 project root")
         self.settings = settings
         self.root = PurePosixPath(settings.mn5_root)
 
     def _connect(self) -> tuple[paramiko.SSHClient, paramiko.SFTPClient]:
         password_path = self.settings.hpc_ssh_password_file
-        if password_path.stat().st_mode & 0o077:
-            raise InspectionError("password file must not be accessible by group or others")
-        password = password_path.read_text(encoding="utf-8").strip()
+        try:
+            if password_path.is_symlink() or not password_path.is_file():
+                raise InspectionError("password file must be a regular file")
+            if password_path.stat().st_mode & 0o077:
+                raise InspectionError("password file must not be accessible by group or others")
+            password = password_path.read_text(encoding="utf-8").strip()
+        except InspectionError:
+            raise
+        except (OSError, UnicodeError) as exc:
+            raise InspectionError("could not read the password file") from exc
+        if not password:
+            raise InspectionError("password file is empty")
         client = paramiko.SSHClient()
-        if self.settings.hpc_known_hosts_file:
-            client.load_host_keys(str(self.settings.hpc_known_hosts_file))
-        else:
-            client.load_system_host_keys()
-        client.set_missing_host_key_policy(paramiko.RejectPolicy())
-        client.connect(
-            hostname=self.settings.hpc_ssh_host,
-            port=self.settings.hpc_ssh_port,
-            username=self.settings.hpc_ssh_username,
-            password=password,
-            timeout=self.settings.hpc_command_timeout_seconds,
-            allow_agent=False,
-            look_for_keys=False,
-        )
-        return client, client.open_sftp()
+        try:
+            if self.settings.hpc_known_hosts_file:
+                client.load_host_keys(str(self.settings.hpc_known_hosts_file))
+            else:
+                client.load_system_host_keys()
+            client.set_missing_host_key_policy(paramiko.RejectPolicy())
+            client.connect(
+                hostname=self.settings.hpc_ssh_host,
+                port=self.settings.hpc_ssh_port,
+                username=self.settings.hpc_ssh_username,
+                password=password,
+                timeout=self.settings.hpc_command_timeout_seconds,
+                allow_agent=False,
+                look_for_keys=False,
+            )
+            return client, client.open_sftp()
+        except InspectionError:
+            client.close()
+            raise
+        except Exception as exc:
+            client.close()
+            raise InspectionError("remote inspection is unavailable") from exc
+
+    @staticmethod
+    def _assert_safe(sftp: paramiko.SFTPClient, root: str, path: str) -> None:
+        try:
+            assert_no_symlink_components(sftp, root, path)
+        except RuntimeError as exc:
+            raise InspectionError("remote path is not safely readable") from exc
 
     def _remote(self, relative_path: str = "") -> str:
         relative = validate_relative_path(relative_path) if relative_path else PurePosixPath()
@@ -127,10 +163,10 @@ class SFTPReadOnlyInspector:
     def list(self, relative_dir: str = "") -> list[InspectionEntry]:
         client, sftp = self._connect()
         try:
+            remote_dir = self._remote(relative_dir)
+            self._assert_safe(sftp, str(self.root), remote_dir)
             entries = []
-            for attr in sorted(
-                sftp.listdir_attr(self._remote(relative_dir)), key=lambda item: item.filename
-            ):
+            for attr in sorted(sftp.listdir_attr(remote_dir), key=lambda item: item.filename):
                 if attr.filename.startswith("."):
                     continue
                 if stat.S_ISLNK(attr.st_mode):
@@ -150,7 +186,9 @@ class SFTPReadOnlyInspector:
     def stat(self, relative_path: str) -> InspectionEntry:
         client, sftp = self._connect()
         try:
-            attr = sftp.lstat(self._remote(relative_path))
+            remote_path = self._remote(relative_path)
+            self._assert_safe(sftp, str(self.root), remote_path)
+            attr = sftp.lstat(remote_path)
             if stat.S_ISLNK(attr.st_mode):
                 raise InspectionError("symlinks are not allowed")
             return InspectionEntry(relative_path, attr.st_size, stat.S_ISDIR(attr.st_mode))
@@ -163,10 +201,12 @@ class SFTPReadOnlyInspector:
             raise InspectionError("preview exceeds configured limit")
         client, sftp = self._connect()
         try:
-            attr = sftp.lstat(self._remote(relative_path))
+            remote_path = self._remote(relative_path)
+            self._assert_safe(sftp, str(self.root), remote_path)
+            attr = sftp.lstat(remote_path)
             if stat.S_ISLNK(attr.st_mode) or not stat.S_ISREG(attr.st_mode):
                 raise InspectionError("only regular files can be previewed")
-            with sftp.open(self._remote(relative_path), "rb") as stream:
+            with sftp.open(remote_path, "rb") as stream:
                 return stream.read(limit)
         finally:
             sftp.close()
@@ -196,5 +236,7 @@ class InMemoryReadOnlyInspector:
         return InspectionEntry(relative_path, len(value), False)
 
     def read_preview(self, relative_path: str, limit: int) -> bytes:
+        if limit < 1:
+            raise InspectionError("preview limit must be positive")
         self.stat(relative_path)
         return self.files[relative_path][:limit]

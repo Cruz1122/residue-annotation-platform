@@ -4,8 +4,10 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.orm import Session
+from starlette.responses import PlainTextResponse
 
 from app.core.db import get_db
+from app.core.observability import render_metrics
 
 router = APIRouter(tags=["health"])
 
@@ -30,3 +32,10 @@ def read_database_health(session: Session = Depends(get_db)) -> HealthResponse:
             detail="database unavailable",
         ) from exc
     return HealthResponse(status="ok")
+
+
+@router.get("/metrics", response_class=PlainTextResponse)
+def read_metrics() -> PlainTextResponse:
+    """Expose non-sensitive process counters for the deployment monitor."""
+
+    return PlainTextResponse(render_metrics(), media_type="text/plain; version=0.0.4")

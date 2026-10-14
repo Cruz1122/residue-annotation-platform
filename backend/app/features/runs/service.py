@@ -8,6 +8,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.auth import Principal
+from app.core.config import get_settings
+from app.features.auth.service import record_audit
 from app.features.proteins.models import Protein
 from app.features.runs.models import ActiveRunSlot, Run, RunStage, StageResult, Upload
 from app.features.runs.schemas import ArtifactRead, RunCreate, RunRead, StageRead, UploadRead
@@ -115,7 +117,21 @@ def get_active_run(session: Session, principal: Principal) -> Run:
     return run
 
 
-def create_run(session: Session, payload: RunCreate, principal: Principal) -> Run:
+def create_run(
+    session: Session,
+    payload: RunCreate,
+    principal: Principal,
+    *,
+    client_ip: str | None = None,
+) -> Run:
+    settings = get_settings()
+    max_cpu = max((stage.cpu or 1 for stage in STAGE_DEFINITIONS), default=1)
+    max_gpu = max((stage.gpu or 0 for stage in STAGE_DEFINITIONS), default=0)
+    if max_cpu > settings.hpc_pipeline_cpu_budget or max_gpu > settings.hpc_pipeline_gpu_budget:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="configured HPC budget cannot execute the registered pipeline",
+        )
     active_slot = session.scalar(
         select(ActiveRunSlot).where(ActiveRunSlot.owner_id == principal.user_id).with_for_update()
     )
@@ -184,7 +200,7 @@ def create_run(session: Session, payload: RunCreate, principal: Principal) -> Ru
     for definition in STAGE_DEFINITIONS:
         initial_status = (
             RunStageStatus.SKIPPED
-            if definition.optional and not requested_variants
+            if (definition.optional or definition.requires_variant) and not requested_variants
             else RunStageStatus.PENDING
         )
         if not definition.dependencies and initial_status == RunStageStatus.PENDING:
@@ -196,6 +212,19 @@ def create_run(session: Session, payload: RunCreate, principal: Principal) -> Ru
         for upload in uploads:
             upload.run_id = run.id
         session.add(ActiveRunSlot(owner_id=principal.user_id, run_id=run.id))
+        record_audit(
+            session,
+            action="create_run",
+            actor_user_id=principal.user_id,
+            resource_type="run",
+            resource_id=run.id,
+            client_ip=client_ip,
+            details={
+                "protein_id": protein.id,
+                "requested_variant_count": len(requested_variants),
+                "upload_count": len(uploads),
+            },
+        )
         session.commit()
     except IntegrityError as exc:
         session.rollback()
@@ -235,7 +264,13 @@ def transition_stage(session: Session, stage: RunStage, target: RunStageStatus) 
     session.flush()
 
 
-def request_cancel(session: Session, run: Run) -> Run:
+def request_cancel(
+    session: Session,
+    run: Run,
+    *,
+    actor_user_id: str | None = None,
+    client_ip: str | None = None,
+) -> Run:
     run_id = run.id
     # Lock stages before the run (same order as the worker claim) so a worker
     # holding a stage lock can never deadlock against cancellation.
@@ -267,5 +302,14 @@ def request_cancel(session: Session, run: Run) -> Run:
         slot = session.scalar(select(ActiveRunSlot).where(ActiveRunSlot.run_id == run.id))
         if slot is not None:
             session.delete(slot)
+    record_audit(
+        session,
+        action="cancel_run",
+        actor_user_id=actor_user_id or run.owner_id,
+        resource_type="run",
+        resource_id=run.id,
+        client_ip=client_ip,
+        details={"resulting_status": str(run.status)},
+    )
     session.commit()
     return get_owned_run(session, run.id, Principal(run.owner_id, run.project_id))

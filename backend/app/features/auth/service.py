@@ -394,6 +394,12 @@ def record_audit(
     client_ip: str | None,
     details: dict[str, object] | None = None,
 ) -> None:
+    # Development/test principals can be configured as headers without a
+    # corresponding account row. Keep those local actions auditable as
+    # system-scoped events instead of violating the PostgreSQL FK; persisted
+    # Bearer/admin users retain their actor identity.
+    if actor_user_id is not None and session.get(User, actor_user_id) is None:
+        actor_user_id = None
     session.add(
         AuditEvent(
             actor_user_id=actor_user_id,

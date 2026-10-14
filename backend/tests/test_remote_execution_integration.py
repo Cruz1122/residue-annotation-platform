@@ -19,9 +19,9 @@ class FakeCompletedRemote:
         self.job_id = "fake-slurm-101"
         self.requests: list[JobRequest] = []
         self.annotations = (
-            "aa_position\taa_ref\taccession\n"
+            "aa_position\taa_ref\tgene\taccession\n"
             + "".join(
-                f"{position}\t{amino_acid}\tP00001\n"
+                f"{position}\t{amino_acid}\tGENE1\tP00001\n"
                 for position, amino_acid in enumerate(SEQUENCE, start=1)
             )
         ).encode()
@@ -47,6 +47,8 @@ class FakeCompletedRemote:
             return json.dumps(
                 {"stage_results": {"protein_identity": {"result_dir": self.result_directory}}}
             )
+        if remote_path.endswith("DONE"):
+            return "OK\n"
         if remote_path.endswith("result_manifest.json"):
             return json.dumps(
                 {
@@ -153,4 +155,4 @@ def test_submit_poll_and_ingest_persist_a_linked_stage_result(client, session, t
     assert len(annotations) == len(SEQUENCE)
     assert annotations[0]["aa_position"] == 1
     assert annotations[0]["aa_ref"] == "A"
-    assert annotations[0]["values"] == {"accession": "P00001"}
+    assert annotations[0]["values"] == {"gene": "GENE1", "accession": "P00001"}

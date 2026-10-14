@@ -198,6 +198,8 @@ class SSHSlurmClient:
             raise ValueError("job command cannot be empty")
         if request.cpu < 1 or request.gpu < 0:
             raise ValueError("job resources are invalid")
+        if request.memory_gb is not None and request.memory_gb < 1:
+            raise ValueError("job memory is invalid")
         for key in request.environment:
             if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
                 raise ValueError("job environment contains an invalid variable name")
@@ -216,6 +218,8 @@ class SSHSlurmClient:
         args.extend(["--nodes=1", "--ntasks=1", f"--cpus-per-task={request.cpu}"])
         if request.gpu:
             args.append(f"--gres=gpu:{request.gpu}")
+        if request.memory_gb:
+            args.append(f"--mem={request.memory_gb}G")
         time_limit = request.time_limit or self.settings.hpc_slurm_time
         if time_limit:
             args.append(f"--time={time_limit}")

@@ -29,7 +29,29 @@ def test_cache_key_changes_with_scientific_inputs_but_not_log_level():
     }
     first = canonical_cache_key(**base)
     second = canonical_cache_key(**{**base, "parameters": {"threshold": 0.6}})
+    logging_only = canonical_cache_key(
+        **{**base, "parameters": {"threshold": 0.5, "log_level": "debug"}}
+    )
     assert first != second
+    assert first == logging_only
+
+
+def test_cache_key_includes_dependency_and_sequence_identity():
+    base = {
+        "protein_sha256": "a" * 64,
+        "stage_id": "structure_modeling",
+        "stage_version": "1",
+        "parameters": {"model": "af3"},
+        "resources": {"cpu": 8, "gpu": 1},
+        "code_sha256": "b" * 64,
+    }
+    first = canonical_cache_key(**base, dependency_cache_keys={"membrane_topology": "c" * 64})
+    dependency_change = canonical_cache_key(
+        **base, dependency_cache_keys={"membrane_topology": "d" * 64}
+    )
+    reference_change = canonical_cache_key(**base, reference_sequence_sha256="e" * 64)
+    assert first != dependency_change
+    assert first != reference_change
 
 
 def test_manifest_rejects_unsafe_storage_keys():
@@ -43,6 +65,23 @@ def test_manifest_rejects_unsafe_storage_keys():
 
     with pytest.raises(ManifestError):
         validate_manifest(manifest, "protein_identity")
+
+
+def test_manifest_requires_real_sha256_and_nonempty_remote_paths():
+    local = _local_manifest(1)
+    local["artifacts"][0]["sha256"] = "not-a-hash"
+    with pytest.raises(ManifestError):
+        validate_manifest(local, "protein_identity")
+
+    remote = _remote_manifest(1)
+    remote["artifacts"]["structure"]["path"] = ""
+    with pytest.raises(ManifestError):
+        validate_remote_manifest(remote, "protein_identity")
+
+    remote = _remote_manifest(1)
+    remote["partial"] = True
+    with pytest.raises(ManifestError):
+        validate_remote_manifest(remote, "protein_identity")
 
 
 def test_artifact_store_rejects_traversal_and_absolute_paths(tmp_path: Path):

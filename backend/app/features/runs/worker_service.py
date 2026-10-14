@@ -9,6 +9,7 @@ from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.config import Settings, get_settings
+from app.core.observability import log_worker_event
 from app.features.artifacts.storage import ArtifactStore
 from app.features.runs.models import ActiveRunSlot, Run, RunStage
 from app.features.runs.service import transition_stage
@@ -184,6 +185,12 @@ def claim_ready_stage(session: Session, settings: Settings) -> RunStage | None:
     stage.run.status = RunStatus.RUNNING
     stage.run.started_at = stage.run.started_at or _utcnow()
     session.commit()
+    log_worker_event(
+        "stage_claimed",
+        run_id=stage.run_id,
+        stage_id=stage.stage_id,
+        status=str(stage.status),
+    )
     return stage
 
 
@@ -246,6 +253,14 @@ def _fail_stage(session: Session, stage: RunStage, error_code: str, message: str
     stage.error_code = error_code
     stage.error_message = message[:1000]
     session.commit()
+    log_worker_event(
+        "stage_failed",
+        run_id=stage.run_id,
+        stage_id=stage.stage_id,
+        job_id=stage.slurm_job_id,
+        status=str(stage.status),
+        error_code=error_code,
+    )
 
 
 def renew_stage_lease(
@@ -414,6 +429,13 @@ def _process_remote(session: Session, settings: Settings) -> bool:
                 else:
                     executor.poll_stage(session, active_stage)
         finally:
+            log_worker_event(
+                "remote_stage_reconciled",
+                run_id=active_stage.run_id,
+                stage_id=active_stage.stage_id,
+                job_id=active_stage.slurm_job_id,
+                status=str(active_stage.status),
+            )
             release_remote_stage_claim(session, active_stage.id, claim_token)
         refresh_ready_states(session, {active_stage.run_id})
         _finalize_runs(session, {active_stage.run_id})
@@ -467,6 +489,12 @@ def process_one(session: Session, executor: ScientificStageExecutor | None = Non
         transition_stage(session, stage, RunStageStatus.RUNNING)
         stage.lease_expires_at = _lease_deadline(settings, _utcnow())
         session.commit()
+        log_worker_event(
+            "stage_started",
+            run_id=stage.run_id,
+            stage_id=stage.stage_id,
+            status=str(stage.status),
+        )
         with _LeaseHeartbeat(stage.id, settings):
             executor.execute(stage.stage_id, stage.run_id)
     except InputTransferError as exc:

@@ -33,15 +33,18 @@ def validate_manifest(manifest: dict[str, Any], expected_stage_id: str) -> None:
     for artifact in artifacts:
         if not isinstance(artifact, dict):
             raise ManifestError("invalid artifact entry")
+        storage_key = artifact.get("storage_key")
+        sha256 = artifact.get("sha256")
         if (
-            not artifact.get("storage_key")
-            or not artifact.get("sha256")
+            not isinstance(storage_key, str)
+            or not storage_key
+            or not isinstance(sha256, str)
+            or not _SHA256.fullmatch(sha256)
             or not _valid_size(artifact.get("size"))
         ):
             raise ManifestError("artifact provenance is incomplete")
-        if (
-            Path(str(artifact["storage_key"])).is_absolute()
-            or ".." in Path(str(artifact["storage_key"])).parts
+        if Path(storage_key).is_absolute() or any(
+            part in {"", ".", ".."} for part in Path(storage_key).parts
         ):
             raise ManifestError("manifest contains an unsafe storage key")
     provenance = manifest.get("provenance")
@@ -62,6 +65,8 @@ def validate_remote_manifest(manifest: dict[str, Any], expected_stage_id: str) -
         raise ManifestError("remote manifest stage does not match the requested stage")
     if manifest.get("status") != "success":
         raise ManifestError("only successful remote manifests can be published")
+    if manifest.get("partial") is True:
+        raise ManifestError("partial remote manifests cannot be published")
     cache_key = manifest.get("cache_key")
     if not isinstance(cache_key, str) or not _SHA256.fullmatch(cache_key):
         raise ManifestError("remote manifest cache key is invalid")
@@ -86,6 +91,7 @@ def validate_remote_manifest(manifest: dict[str, Any], expected_stage_id: str) -
         size = artifact.get("size")
         if (
             not isinstance(path, str)
+            or not path
             or Path(path).is_absolute()
             or any(part in {".", ".."} for part in Path(path).parts)
             or not isinstance(sha256, str)
@@ -93,6 +99,20 @@ def validate_remote_manifest(manifest: dict[str, Any], expected_stage_id: str) -
             or not _valid_size(size)
         ):
             raise ManifestError(f"remote manifest artifact {artifact_name!r} is invalid")
+
+    integrity = manifest.get("file_integrity")
+    if integrity is not None:
+        if not isinstance(integrity, dict):
+            raise ManifestError("remote manifest file integrity is invalid")
+        for name, record in integrity.items():
+            if not isinstance(name, str) or not isinstance(record, dict):
+                raise ManifestError("remote manifest file integrity entry is invalid")
+            if "size" in record and not _valid_size(record["size"]):
+                raise ManifestError(f"remote manifest file integrity size is invalid: {name}")
+            if "sha256" in record and not (
+                isinstance(record["sha256"], str) and _SHA256.fullmatch(record["sha256"])
+            ):
+                raise ManifestError(f"remote manifest file integrity hash is invalid: {name}")
 
 
 def sha256_file(path: Path) -> tuple[str, int]:

@@ -6,7 +6,7 @@ import json
 import os
 import re
 import shlex
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from pathlib import Path, PurePosixPath
 from typing import Any, TextIO
 from uuid import uuid4
@@ -116,6 +116,14 @@ class SSHStageExecutor:
 
     def submit_stage(self, session: Session, stage: RunStage) -> None:
         definition = STAGE_BY_ID[stage.stage_id]
+        if (definition.cpu or 1) > self.settings.hpc_pipeline_cpu_budget:
+            raise RemoteStageExecutionError(
+                f"configured CPU budget is below the {stage.stage_id} contract"
+            )
+        if (definition.gpu or 0) > self.settings.hpc_pipeline_gpu_budget:
+            raise RemoteStageExecutionError(
+                f"configured GPU budget is below the {stage.stage_id} contract"
+            )
         run = stage.run
         accession = self._accession(run)
         job_directory = self._job_directory(run.id)
@@ -130,6 +138,8 @@ class SSHStageExecutor:
             environment={"PYTHONUNBUFFERED": "1"},
             cpu=definition.cpu or 1,
             gpu=definition.gpu or 0,
+            network=definition.network,
+            memory_gb=definition.memory_gb,
             time_limit=self.settings.hpc_slurm_time,
             job_name=f"rap-{stage.stage_id}-{run.id[:8]}",
             stdout_path=output_path,
@@ -328,6 +338,7 @@ class SSHStageExecutor:
                 "remote pipeline did not publish a result directory"
             ) from exc
         result_dir = self._result_directory(run_dir, stage.stage_id)
+        self._require_done_marker(result_dir)
         manifest_path = self._remote_child(result_dir, "result_manifest.json")
         try:
             manifest = json.loads(
@@ -462,8 +473,9 @@ class SSHStageExecutor:
         positions: set[int] = set()
         batch: list[dict[str, object]] = []
         total_rows = 0
+        required_fields = STAGE_BY_ID[stage.stage_id].produced_annotations
         with local_path.open("r", encoding="utf-8", newline="") as stream:
-            for row in _iter_annotation_rows(stream):
+            for row in _iter_annotation_rows(stream, required_fields=required_fields):
                 position = int(str(row["aa_position"]))
                 if position < 1 or position > len(sequence):
                     raise RemoteStageExecutionError(
@@ -517,6 +529,17 @@ class SSHStageExecutor:
                 ) from exc
         return self._remote_child(self.root, *candidate.parts)
 
+    def _require_done_marker(self, result_dir: str) -> None:
+        try:
+            marker = self.client.read_text(
+                self._remote_child(result_dir, "DONE"),
+                64,
+            ).strip()
+        except Exception as exc:
+            raise RemoteStageExecutionError("remote result is missing its DONE marker") from exc
+        if marker != "OK":
+            raise RemoteStageExecutionError("remote result DONE marker is invalid")
+
     def _download_remote_file(
         self,
         store: ArtifactStore,
@@ -557,10 +580,19 @@ class SSHStageExecutor:
         return storage_key, size, digest
 
 
-def _iter_annotation_rows(stream: TextIO) -> Iterator[dict[str, object]]:
+def _iter_annotation_rows(
+    stream: TextIO,
+    *,
+    required_fields: Iterable[str] = (),
+) -> Iterator[dict[str, object]]:
     reader = csv.DictReader(stream, delimiter="\t")
     if not reader.fieldnames or not {"aa_position", "aa_ref"}.issubset(reader.fieldnames):
         raise RemoteStageExecutionError("remote annotations lack aa_position or aa_ref")
+    missing = set(required_fields).difference(reader.fieldnames)
+    if missing:
+        raise RemoteStageExecutionError(
+            f"remote annotations lack declared columns: {sorted(missing)}"
+        )
     fieldnames = reader.fieldnames
     for row in reader:
         if not row or all(value in {None, ""} for value in row.values()):

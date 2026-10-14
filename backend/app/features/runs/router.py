@@ -2,7 +2,7 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -24,10 +24,12 @@ router = APIRouter(prefix="/runs", tags=["runs"])
 @router.post("", response_model=RunRead, status_code=status.HTTP_201_CREATED)
 def create_run_endpoint(
     payload: RunCreate,
+    request: Request,
     session: Session = Depends(get_db),
     principal: Principal = Depends(get_principal),
 ) -> RunRead:
-    return serialize_run(create_run(session, payload, principal))
+    client_ip = request.client.host if request.client else None
+    return serialize_run(create_run(session, payload, principal, client_ip=client_ip))
 
 
 @router.get("/active", response_model=RunRead)
@@ -59,11 +61,20 @@ def read_run_stages(
 @router.post("/{run_id}/cancel", response_model=RunRead)
 def cancel_run(
     run_id: str,
+    request: Request,
     session: Session = Depends(get_db),
     principal: Principal = Depends(get_principal),
 ) -> RunRead:
     run = get_owned_run(session, run_id, principal)
-    return serialize_run(request_cancel(session, run))
+    client_ip = request.client.host if request.client else None
+    return serialize_run(
+        request_cancel(
+            session,
+            run,
+            actor_user_id=principal.user_id,
+            client_ip=client_ip,
+        )
+    )
 
 
 @router.get("/{run_id}/events")

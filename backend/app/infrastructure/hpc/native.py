@@ -22,7 +22,16 @@ class NativeSlurmClient:
         if not request.command:
             raise ValueError("job command cannot be empty")
         output = self._run(
-            ["sbatch", "--parsable", "--chdir", request.working_directory, *request.command]
+            [
+                "sbatch",
+                "--parsable",
+                "--chdir",
+                request.working_directory,
+                *([f"--cpus-per-task={request.cpu}"] if request.cpu else []),
+                *([f"--gres=gpu:{request.gpu}"] if request.gpu else []),
+                *([f"--mem={request.memory_gb}G"] if request.memory_gb else []),
+                *request.command,
+            ]
         )
         job_id = output.split(";", 1)[0].strip()
         return JobHandle(job_id=job_id, state=JobState.QUEUED)

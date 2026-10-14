@@ -22,6 +22,8 @@ class JobRequest:
     environment: dict[str, str] = field(default_factory=dict)
     cpu: int = 1
     gpu: int = 0
+    network: bool = False
+    memory_gb: int | None = None
     time_limit: str | None = None
     job_name: str | None = None
     stdout_path: str | None = None

@@ -68,7 +68,11 @@ class Settings(BaseSettings):
     hpc_pipeline_python: str = "python"
     hpc_pipeline_main: str = "main.py"
     hpc_pipeline_max_parallel: int = Field(default=1, ge=1, le=64)
-    hpc_pipeline_cpu_budget: int = Field(default=1, ge=1, le=256)
+    # The registry contains a 20-CPU relaxation stage. A smaller configured
+    # budget must fail a run before any remote submit rather than producing a
+    # predictable Slurm failure after consuming a slot.
+    hpc_pipeline_cpu_budget: int = Field(default=32, ge=1, le=256)
+    hpc_pipeline_gpu_budget: int = Field(default=1, ge=0, le=32)
     hpc_max_result_bytes: int = Field(default=256 * 1024 * 1024, ge=1)
     hpc_max_inflight_stages: int = Field(default=1, ge=1, le=64)
 
