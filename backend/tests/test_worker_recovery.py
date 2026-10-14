@@ -12,6 +12,7 @@ from app.features.runs.worker_service import (
     release_remote_stage_claim,
     renew_stage_lease,
 )
+from app.infrastructure.hpc.base import HPCConfigurationError
 from sqlalchemy import select
 
 SEQUENCE = "ACDE"
@@ -158,3 +159,37 @@ def test_remote_stage_claim_is_exclusive_until_released(client, session):
     reclaimed = claim_remote_stage(session, settings)
     assert reclaimed is not None
     assert reclaimed[0].id == first[0].id
+
+
+def test_remote_configuration_outage_keeps_stage_durable_and_retries(monkeypatch, client, session):
+    run_id = _create_run(client)
+    settings = get_settings().model_copy(update={"hpc_execution_mode": "ssh"})
+    events: list[dict[str, object]] = []
+
+    monkeypatch.setattr("app.features.runs.worker_service.get_settings", lambda: settings)
+    monkeypatch.setattr(
+        "app.features.runs.remote_executor.SSHStageExecutor",
+        lambda _settings: (_ for _ in ()).throw(
+            HPCConfigurationError("SSH password file is unavailable")
+        ),
+    )
+    monkeypatch.setattr(
+        "app.features.runs.worker_service.log_worker_event",
+        lambda event, **kwargs: events.append({"event": event, **kwargs}),
+    )
+
+    assert process_one(session) is False
+    stage = session.scalar(select(RunStage).where(RunStage.run_id == run_id))
+    run = session.get(Run, run_id)
+    assert stage is not None
+    assert run is not None
+    assert stage.status == RunStageStatus.READY
+    assert stage.slurm_job_id is None
+    assert run.status == "pending"
+    assert events == [
+        {
+            "event": "remote_executor_unavailable",
+            "status": "retryable",
+            "error_code": "hpc_configuration_unavailable",
+        }
+    ]

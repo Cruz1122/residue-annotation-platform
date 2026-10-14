@@ -17,6 +17,7 @@ from app.features.runs.models import ActiveRunSlot, Run, RunStage, Upload
 from app.features.runs.service import transition_stage
 from app.features.runs.state import RunStageStatus, RunStatus
 from app.features.stages.registry import STAGE_BY_ID
+from app.infrastructure.hpc.base import HPCConfigurationError
 from app.infrastructure.hpc.transfer import (
     InputTransferError,
     NativeInputTransfer,
@@ -474,7 +475,20 @@ def _process_remote(session: Session, settings: Settings) -> bool:
     executor_type = (
         NativeStageExecutor if settings.hpc_execution_mode == "native" else SSHStageExecutor
     )
-    executor = executor_type(settings)
+    try:
+        executor = executor_type(settings)
+    except HPCConfigurationError:
+        # A missing secret, host key or native Slurm installation is an
+        # operational condition, not a scientific result. Keep queued/ready
+        # stages durable and let the next worker tick retry after the
+        # deployment is repaired instead of crashing the worker or fabricating
+        # a stage failure.
+        log_worker_event(
+            "remote_executor_unavailable",
+            status="retryable",
+            error_code="hpc_configuration_unavailable",
+        )
+        return False
     inflight_count = _remote_inflight_count(session)
     processed = False
     for _ in range(settings.hpc_max_inflight_stages):
