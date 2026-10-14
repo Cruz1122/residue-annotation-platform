@@ -81,21 +81,21 @@ def cancel_run(
 async def run_events(
     run_id: str,
     principal: Principal = Depends(get_principal),
+    session: Session = Depends(get_db),
 ) -> StreamingResponse:
     # Events are a transport for persisted state, not a second source of truth.
-    with SessionLocal() as session:
-        get_owned_run(session, run_id, principal)
+    initial_run = get_owned_run(session, run_id, principal)
+    initial_payload = serialize_run(initial_run).model_dump(mode="json")
+    # The dependency owns this session, but the stream below deliberately opens
+    # short-lived sessions for every refresh so a long-lived SSE connection does
+    # not pin one database connection while waiting for a state change.
+    session.close()
 
     async def stream() -> AsyncIterator[str]:
         event_id = 0
         last_payload: str | None = None
+        payload = initial_payload
         while True:
-            with SessionLocal() as session:
-                try:
-                    run = get_owned_run(session, run_id, principal)
-                except HTTPException:
-                    return
-                payload = serialize_run(run).model_dump(mode="json")
             encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
             if encoded != last_payload:
                 event_id += 1
@@ -105,6 +105,12 @@ async def run_events(
                 return
             yield ": heartbeat\n\n"
             await asyncio.sleep(2)
+            with SessionLocal() as refresh_session:
+                try:
+                    run = get_owned_run(refresh_session, run_id, principal)
+                except HTTPException:
+                    return
+                payload = serialize_run(run).model_dump(mode="json")
 
     return StreamingResponse(
         stream(),

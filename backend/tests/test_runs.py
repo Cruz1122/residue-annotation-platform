@@ -61,6 +61,24 @@ def test_run_not_found_does_not_invent_progress(client):
     assert response.json()["detail"] == "Run not found"
 
 
+def test_run_events_emits_the_persisted_terminal_snapshot(client):
+    protein_id = _create_protein(client)
+    created = client.post("/api/v1/runs", json={"protein_id": protein_id})
+    assert created.status_code == 201
+    run_id = created.json()["id"]
+
+    cancelled = client.post(f"/api/v1/runs/{run_id}/cancel")
+    assert cancelled.status_code == 200
+
+    response = client.get(f"/api/v1/runs/{run_id}/events")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert "event: snapshot" in response.text
+    assert '"status":"cancelled"' in response.text
+    assert ": heartbeat" not in response.text
+
+
 def test_variants_are_normalized_and_duplicate_positions_are_rejected(client):
     protein_id = _create_protein(client)
     response = client.post(
