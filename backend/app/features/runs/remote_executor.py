@@ -78,7 +78,11 @@ class SSHStageExecutor:
     def _script(self, run: Run, stage: RunStage, accession: str, marker_path: str) -> str:
         python = shlex.quote(self.settings.hpc_pipeline_python)
         main = shlex.quote(self.settings.hpc_pipeline_main)
-        run_id = shlex.quote(run.id)
+        # The remote CLI's positional argument is the scientific identity
+        # (for example ``P01130``), not the platform's internal UUID. The
+        # platform run id remains local state and is already used to isolate
+        # the marker directory under ``.platform_jobs``.
+        requested_protein = shlex.quote(accession)
         quoted_accession = shlex.quote(accession)
         stage_id = shlex.quote(stage.stage_id)
         marker = shlex.quote(marker_path)
@@ -87,7 +91,7 @@ class SSHStageExecutor:
                 "set -u",
                 f"cd -- {shlex.quote(self.root)}",
                 (
-                    f"{python} {main} {run_id} --accession {quoted_accession} "
+                    f"{python} {main} {requested_protein} --accession {quoted_accession} "
                     f"--stages {stage_id} --max-parallel "
                     f"{self.settings.hpc_pipeline_max_parallel} --cpu-budget "
                     f"{self.settings.hpc_pipeline_cpu_budget} --fail-fast"
