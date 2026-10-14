@@ -145,6 +145,19 @@ finalizada, pero su `stages.tsv` de 51 bytes contiene sólo el encabezado; se
 clasifica como evidencia incompleta, no como resultado científico. No se
 descargaron logs de fallo, tablas de anotación ni datasets.
 
+Para diagnosticar la corrida fallida se descargó únicamente el log de consola
+`benchmarks/all_stages_47143345/profile_01/pipeline17.console.log` (21,826
+bytes, SHA-256
+`c2dcf2f0509821d95fd3e0618c9ddf7060c6091f90a83af735f1ba96b7c3d711`). El log
+confirma `conformational_ensemble` con `cache MISS`, parámetros
+`bioemu-v1.2`, `samples_per_round=250`, `min_retained=200` y
+`max_rounds=20`, seguido de `command failed (1)`, y termina en
+`status=partial_failed` con `ensemble_frustration=blocked`. El path temporal
+de `ensemble.log` que el productor reporta ya no existe al consultarlo por
+SFTP, por lo que la causa de bajo nivel no puede determinarse sin conservar el
+artefacto de diagnóstico en MN5. Esto es una incidencia reproducible para el
+dueño del pipeline, no una justificación para declarar equivalencia científica.
+
 Esta inspección es evidencia de conectividad, permisos de lectura y estructura de código en la raíz observada. No es evidencia de ejecución científica, de permisos de escritura ni de aceptación operativa del pipeline.
 
 ## Manejo de secretos
