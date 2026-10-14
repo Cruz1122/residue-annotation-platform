@@ -179,6 +179,10 @@ class SFTPReadOnlyInspector:
                 )
                 entries.append(InspectionEntry(path, attr.st_size, is_directory))
             return entries
+        except InspectionError:
+            raise
+        except Exception as exc:
+            raise InspectionError("remote inspection is unavailable") from exc
         finally:
             sftp.close()
             client.close()
@@ -192,6 +196,10 @@ class SFTPReadOnlyInspector:
             if stat.S_ISLNK(attr.st_mode):
                 raise InspectionError("symlinks are not allowed")
             return InspectionEntry(relative_path, attr.st_size, stat.S_ISDIR(attr.st_mode))
+        except InspectionError:
+            raise
+        except Exception as exc:
+            raise InspectionError("remote inspection is unavailable") from exc
         finally:
             sftp.close()
             client.close()
@@ -208,6 +216,10 @@ class SFTPReadOnlyInspector:
                 raise InspectionError("only regular files can be previewed")
             with sftp.open(remote_path, "rb") as stream:
                 return stream.read(limit)
+        except InspectionError:
+            raise
+        except Exception as exc:
+            raise InspectionError("remote inspection is unavailable") from exc
         finally:
             sftp.close()
             client.close()

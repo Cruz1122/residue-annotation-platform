@@ -235,6 +235,24 @@ def test_sftp_read_only_inspector_rejects_symlink_and_preview_over_limit(
         inspector.read_preview("docs.txt", settings.mn5_max_preview_bytes + 1)
 
 
+def test_sftp_read_only_inspector_sanitizes_remote_io_errors(tmp_path: Path, monkeypatch):
+    import app.infrastructure.hpc.readonly as readonly_module
+
+    settings, _password = _sftp_inspector_settings(tmp_path)
+    transport = _FakeSFTPInspectorTransport(AUTHORIZED_MN5_ROOT)
+    ssh = _FakeSSHInspectorTransport(transport)
+    monkeypatch.setattr(readonly_module.paramiko, "SSHClient", lambda: ssh)
+
+    def fail_list(_path: str):
+        raise OSError("/gpfs/private/secret details")
+
+    transport.listdir_attr = fail_list
+    inspector = SFTPReadOnlyInspector(settings)
+    with pytest.raises(InspectionError, match="unavailable") as error:
+        inspector.list()
+    assert "/gpfs/" not in str(error.value)
+
+
 @pytest.mark.parametrize(
     "overrides, password_mode, password_contents",
     [
