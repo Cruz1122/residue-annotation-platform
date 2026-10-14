@@ -130,8 +130,9 @@ modificar el pipeline. El resultado más informativo es
 nivel 1: 15 `success` y una `failed` en `conformational_ensemble`.
 `profiles.tsv` confirma `returncode=1`, `success=15`, `failed=1` y cero
 `cache_hits`. El archivo sólo cubre `pipeline17` de nivel 1; no prueba los
-niveles configurados `4` y `16`, ni contiene el manifest/provenance/outputs
-necesarios para un golden baseline publicable. Los hashes del snapshot fueron:
+niveles configurados `4` y `16`, ni contiene un manifest/provenance completo
+de la corrida ni los outputs necesarios para un golden baseline publicable.
+Los hashes del snapshot fueron:
 
 | Archivo remoto | Bytes | SHA-256 | Interpretación |
 | --- | ---: | --- | --- |
@@ -139,6 +140,24 @@ necesarios para un golden baseline publicable. Los hashes del snapshot fueron:
 | `benchmarks/all_stages_47143345/stages.tsv` | 1,706 | `cc7d03ed3168affd8fed27df23e45b6cde568c1ab6de8d9d4e071c26606dc6b1` | 15 éxitos y 1 fallo en nivel 1 |
 | `benchmarks/all_stages_47143345/profiles.tsv` | 243 | `f565b28151f6e3d2e05c247e568f64039b1f7ddd482aeb158d2a336c07944fb5` | retorno global `1`, sin hits de caché |
 | `benchmarks/all_stages_47143345/telemetry.tsv` | 24,680 | `98a0dcfa95c7f9cefa8db24908b7e74d4e05558e4feab399d2bf3b2a5c370322` | telemetría sólo de nivel 1/pipeline17 |
+
+Como evidencia adicional de la frontera de cache, se inspeccionó sólo el
+resultado remoto de `protein_identity` que terminó con éxito dentro de
+`all_stages_47143345/profile_01`. El snapshot SFTP explícito verificó `DONE`
+(3 bytes, SHA-256
+`a12b7cb43c9d9134b5bb1b35e9096b66775d9e92e7611d1cc92b02edd6782a87`),
+`result_manifest.json` (3,956 bytes, SHA-256
+`9524bc8a1f5c6b6de4108da335430d2591fa3ba8387ddb5c099264a1fd0b12c6`) y
+`provenance.json` (4,141 bytes, SHA-256
+`fb4da9f429c99334862edf607bd492fb5db73231ff8f28f93bd017ec263dfd3d`). El
+manifest remoto declara `schema=stage-result-v1`,
+`stage_id=protein_identity`, `status=success`, `partial=false`, 12 artefactos
+locales y una clave de cache válida; el hash y tamaño de `provenance.json`
+coinciden con `file_integrity`. El validador local
+`validate_remote_manifest` aceptó esa metadata. No se descargaron las tablas,
+FASTA ni otros artefactos científicos, de modo que esta evidencia confirma la
+forma e integridad del resultado de un stage, pero no la ejecución completa ni
+la equivalencia científica del benchmark.
 
 Como control, `benchmarks/all_stages_47069621/config.json` declara otra corrida
 finalizada, pero su `stages.tsv` de 51 bytes contiene sólo el encabezado; se
@@ -188,7 +207,8 @@ El repositorio debe contener únicamente rutas a secretos o nombres de variables
 La siguiente información no está verificada y no debe presentarse como disponible:
 
 - ejecución de una corrida o de un stage con entradas científicas aprobadas;
-- manifests, logs, outputs y provenance completos producidos por una corrida real;
+- manifests, logs, outputs y provenance completos de todas las etapas producidos
+  por una corrida real desde este checkout;
 - finalización del baseline `47265106`: el metadata y diez etapas parciales son observables, pero `summary.tsv` no contiene filas de proteína completada;
 - resolución reproducible del fallo `conformational_ensemble` observado en `all_stages_47143345` y una corrida completa de los niveles configurados;
 - versiones ejecutables, módulos, licencias, GPUs, cuotas y disponibilidad de cachés;
