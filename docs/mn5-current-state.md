@@ -158,6 +158,18 @@ SFTP, por lo que la causa de bajo nivel no puede determinarse sin conservar el
 artefacto de diagnóstico en MN5. Esto es una incidencia reproducible para el
 dueño del pipeline, no una justificación para declarar equivalencia científica.
 
+La inspección read-only del contrato actual de
+`stages/conformational_ensemble/contract.py` (751 bytes, SHA-256
+`042f6f00b29a2458d01d85d1e7b74bb2b88bba5a9101ec593ff0eebd881faf70`) declara
+explícitamente `dependencies=("protein_identity", "structure_modeling")`,
+`gpu=1` y el requisito técnico `msa_cache`; coincide con el registry local.
+Sin embargo, el log histórico de `pipeline17` imprimió
+`READY ... deps=protein_identity` para ese mismo stage. Esa discrepancia entre
+el contrato observado y la planificación de la corrida impide usarla como
+prueba de ejecución válida del DAG: antes de una aceptación científica se debe
+repetir la corrida con una versión fijada y demostrar que el scheduler espera
+`structure_modeling` y su `msa_cache_entry`.
+
 Esta inspección es evidencia de conectividad, permisos de lectura y estructura de código en la raíz observada. No es evidencia de ejecución científica, de permisos de escritura ni de aceptación operativa del pipeline.
 
 ## Manejo de secretos
