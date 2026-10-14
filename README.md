@@ -103,7 +103,7 @@ La URL browser-side se configura mediante `PUBLIC_API_BASE_URL`; el valor de eje
 
 1. En `/` se registra una secuencia FASTA real o se lee un archivo local en el navegador.
 2. El frontend hace `POST /api/v1/proteins` y después `POST /api/v1/runs`; `sessionStorage` sólo conserva la sesión Bearer real de la cuenta.
-3. `/proteins/{id}/progress/?run={run_id}` consulta el estado persistido cada dos segundos mediante requests autenticadas.
+3. `/proteins/{id}/progress/?run={run_id}` abre el stream SSE autenticado de estado persistido y vuelve automáticamente a GET/polling si el stream se corta o el navegador no puede consumirlo.
 4. `/proteins/{id}/info/?run={run_id}` muestra únicamente filas de anotación y artefactos publicados por el backend; `NA`, pendiente, fallido y ausencia de evidencia no se convierten en cero.
 5. `/proteins/{id}/viewer/?run={run_id}` muestra la secuencia registrada y carga Mol* con un artefacto PDB/mmCIF publicado o, si todavía no existe, con el upload de estructura de esa corrida. Sin estructura se informa que no está disponible.
 6. `/proteins/` consulta el catálogo privado mediante `GET /api/v1/proteins`.
