@@ -10,7 +10,7 @@ def build_hpc_client(settings: Settings) -> HPCClient:
     if settings.hpc_execution_mode == "mock":
         return OfflineHPCClient()
     if settings.hpc_execution_mode == "native":
-        return NativeSlurmClient()
+        return NativeSlurmClient(settings)
     if settings.hpc_execution_mode == "ssh":
         return SSHSlurmClient(settings)
     return DisabledHPCClient()
