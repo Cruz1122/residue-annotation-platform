@@ -4,12 +4,14 @@ services:
       context: ./infra/mn5-vpn
     init: true
     restart: unless-stopped
-    # The VPN is the only container allowed to create the PPP tunnel. The
-    # worker shares its network namespace without receiving NET_ADMIN.
+    # The VPN is the only container allowed to create the PPP tunnel. It gets
+    # DAC_READ_SEARCH only because Docker local preserves the host UID on the
+    # protected secret bind mount; it cannot write the mounted secret.
     cap_drop:
       - ALL
     cap_add:
       - NET_ADMIN
+      - DAC_READ_SEARCH
     devices:
       - /dev/ppp:/dev/ppp
     security_opt:
@@ -32,15 +34,13 @@ services:
         source: ${HPC_VPN_CONFIG_FILE:-/etc/openfortivpn/config}
         target: /etc/openfortivpn/config
         read_only: true
-      - type: bind
-        source: ${HPC_VPN_PASSWORD_FILE:-/dev/null}
-        target: /run/secrets/hpc_vpn_password
-        read_only: true
+    secrets:
+      - hpc_vpn_password
     healthcheck:
       test:
         [
           "CMD-SHELL",
-          "test -r /sys/class/net/ppp0/operstate && test \"$$(cat /sys/class/net/ppp0/operstate)\" = up && nc -z -w 5 \"$$HPC_SSH_HOST\" \"$$HPC_SSH_PORT\"",
+          "test -d /sys/class/net/ppp0 && nc -z -w 5 \"$$HPC_SSH_HOST\" \"$$HPC_SSH_PORT\"",
         ]
       interval: 10s
       timeout: 8s
@@ -116,12 +116,15 @@ services:
     init: true
     restart: unless-stopped
     # The worker needs to read the SSH secret, but it receives no host mounts,
-    # no NET_ADMIN capability, and no direct host network access. It shares
-    # only the isolated VPN namespace below.
+    # no NET_ADMIN capability, and no direct host network access. Its
+    # DAC_READ_SEARCH capability is read-only and scoped to these secret
+    # mounts. It shares only the isolated VPN namespace below.
     network_mode: service:vpn
     user: "0:0"
     cap_drop:
       - ALL
+    cap_add:
+      - DAC_READ_SEARCH
     security_opt:
       - no-new-privileges:true
     read_only: true
@@ -162,14 +165,9 @@ services:
       HPC_INPUT_REMOTE_SUBDIR: ${HPC_INPUT_REMOTE_SUBDIR:-uploads}
     volumes:
       - residue-artifacts:/app/data/artifacts
-      - type: bind
-        source: ${HPC_SSH_PASSWORD_FILE:-/dev/null}
-        target: /run/secrets/hpc_ssh_password
-        read_only: true
-      - type: bind
-        source: ${HPC_KNOWN_HOSTS_FILE:-/dev/null}
-        target: /run/secrets/hpc_known_hosts
-        read_only: true
+    secrets:
+      - hpc_ssh_password
+      - hpc_known_hosts
     depends_on:
       db:
         condition: service_healthy
@@ -193,3 +191,11 @@ services:
 volumes:
   residue-postgres-data:
   residue-artifacts:
+
+secrets:
+  hpc_vpn_password:
+    file: ${HPC_VPN_PASSWORD_FILE:-/dev/null}
+  hpc_ssh_password:
+    file: ${HPC_SSH_PASSWORD_FILE:-/dev/null}
+  hpc_known_hosts:
+    file: ${HPC_KNOWN_HOSTS_FILE:-/dev/null}

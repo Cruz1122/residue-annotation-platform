@@ -8,7 +8,18 @@ from pathlib import Path
 
 
 def _escape(value: str) -> str:
-    return value.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+    encoded: list[str] = []
+    for byte in value.encode("utf-8"):
+        if (
+            0x30 <= byte <= 0x39
+            or 0x41 <= byte <= 0x5A
+            or 0x61 <= byte <= 0x7A
+            or byte in b"-_.~"
+        ):
+            encoded.append(chr(byte))
+        else:
+            encoded.append(f"%{byte:02X}")
+    return "".join(encoded)
 
 
 def main() -> int:
@@ -22,11 +33,15 @@ def main() -> int:
     if not secret:
         return 2
 
+    # openfortivpn expects an Assuan-style greeting before it sends commands.
+    sys.stdout.write("OK Pleased to meet you\n")
+    sys.stdout.flush()
+
     for raw_line in sys.stdin:
-        command = raw_line.strip().upper()
-        if command.startswith("GETPIN"):
+        command = raw_line.rstrip("\r\n").upper()
+        if command == "GETPIN":
             sys.stdout.write(f"D {_escape(secret)}\nOK\n")
-        elif command.startswith(("BYE", "QUIT")):
+        elif command in {"BYE", "QUIT"}:
             sys.stdout.write("OK\n")
             sys.stdout.flush()
             return 0
