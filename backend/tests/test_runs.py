@@ -3,7 +3,8 @@ from app.features.auth.models import AuditEvent
 from app.features.runs.models import ActiveRunSlot, Run, RunStage, StageResult
 from app.features.runs.service import transition_stage
 from app.features.runs.state import RunStageStatus
-from app.features.runs.worker_service import process_one
+from app.features.runs.worker_service import process_one, refresh_ready_states
+from app.features.stages.registry import STAGE_BY_ID, STAGE_DEFINITIONS
 from sqlalchemy import select
 
 SEQUENCE = "ACDEFGHIKLMNPQRSTVWY"
@@ -208,6 +209,52 @@ def test_worker_finishes_failed_run_after_descendants_are_skipped(client, sessio
     assert run.status == "failed"
     assert all(stage.status in {"failed", "skipped"} for stage in run.stages)
     assert session.scalar(select(ActiveRunSlot).where(ActiveRunSlot.run_id == run_id)) is None
+
+
+def test_ready_states_require_all_dependencies(client, session):
+    protein_id = _create_protein(client)
+    run_id = client.post("/api/v1/runs", json={"protein_id": protein_id}).json()["id"]
+    run = session.get(Run, run_id)
+    assert run is not None
+
+    root = next(stage for stage in run.stages if stage.stage_id == "protein_identity")
+    transition_stage(session, root, RunStageStatus.SUCCESS)
+    session.commit()
+
+    refresh_ready_states(session, {run_id})
+    states = {stage.stage_id: RunStageStatus(stage.status) for stage in run.stages}
+    for definition in STAGE_DEFINITIONS:
+        if definition.dependencies == ("protein_identity",):
+            assert states[definition.id] == RunStageStatus.READY
+        elif (
+            definition.id != "protein_identity" and states[definition.id] != RunStageStatus.SKIPPED
+        ):
+            assert states[definition.id] == RunStageStatus.PENDING
+
+
+def test_dependency_failure_propagates_skipped_descendants(client, session):
+    protein_id = _create_protein(client)
+    run_id = client.post("/api/v1/runs", json={"protein_id": protein_id}).json()["id"]
+    failing_run = session.get(Run, run_id)
+    assert failing_run is not None
+    root = next(stage for stage in failing_run.stages if stage.stage_id == "protein_identity")
+    transition_stage(session, root, RunStageStatus.FAILED)
+    session.commit()
+
+    # Each pass only consumes the state made visible by the previous pass;
+    # repeating the worker refresh models the durable propagation tick-by-tick.
+    for _ in range(len(STAGE_DEFINITIONS)):
+        refresh_ready_states(session, {run_id})
+
+    final_states = {stage.stage_id: RunStageStatus(stage.status) for stage in failing_run.stages}
+    for definition in STAGE_DEFINITIONS:
+        if definition.id == "protein_identity":
+            continue
+        assert final_states[definition.id] == RunStageStatus.SKIPPED
+
+    # Keep the assertion coupled to the registry: a new stage with a missing
+    # dependency must fail the test instead of silently escaping the matrix.
+    assert set(final_states) == set(STAGE_BY_ID)
 
 
 def test_run_create_and_cancel_are_audited_without_scientific_payloads(client, session):
