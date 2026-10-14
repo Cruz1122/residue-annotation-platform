@@ -74,6 +74,50 @@ def test_native_slurm_submit_propagates_resources_environment_and_paths(tmp_path
     assert "exec python main.py --stage protein_identity" in args[-1]
 
 
+def test_ssh_slurm_submit_uses_wrap_without_script_file(tmp_path):
+    password_path = tmp_path / "password"
+    password_path.write_text("secret\n", encoding="utf-8")
+    password_path.chmod(0o600)
+    client = SSHSlurmClient(
+        Settings(
+            app_env="test",
+            database_url="sqlite://",
+            hpc_ssh_host="mn5.example",
+            hpc_ssh_username="runner",
+            hpc_ssh_password_file=password_path,
+            hpc_remote_root="/gpfs/project/root",
+            hpc_slurm_account="bsc-test",
+        )
+    )
+    captured: list[str] = []
+    client._command = lambda command: captured.append(command) or "12345;cluster"
+
+    handle = client.submit(
+        JobRequest(
+            stage_id="protein_identity",
+            command=("python", "main.py", "--stage", "protein_identity"),
+            working_directory="/gpfs/project/root/jobs/run",
+            environment={"PYTHONUNBUFFERED": "1"},
+            cpu=4,
+            gpu=1,
+            memory_gb=8,
+            time_limit="00:05:00",
+            job_name="rap-protein",
+            stdout_path="/gpfs/project/root/jobs/run/job.out",
+            stderr_path="/gpfs/project/root/jobs/run/job.err",
+        )
+    )
+
+    assert handle.job_id == "12345"
+    command = captured[0]
+    assert "sbatch --parsable" in command
+    assert "--account=bsc-test" in command
+    assert "--wrap" in command
+    assert "cd -- /gpfs/project/root/jobs/run" in command
+    assert "exec python main.py --stage protein_identity" in command
+    assert ".sbatch" not in command
+
+
 def test_native_slurm_status_uses_accounting_after_queue_exit():
     client = NativeSlurmClient(_settings())
     calls: list[list[str]] = []
