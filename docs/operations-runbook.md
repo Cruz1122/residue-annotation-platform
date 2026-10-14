@@ -36,10 +36,12 @@ state-preservation contract only.
 ### Remote result artifacts
 
 The MN5 pipeline may publish either regular files or directory artifacts. A
-regular file is transferred only when its manifest size and SHA-256 match. A
-directory artifact is traversed through the confined SFTP/native adapter; the
-native adapter uses descriptor-relative no-follow opens, while SFTP validates
-stable entry metadata and fails closed when a tree changes during traversal.
+regular file is transferred only when its manifest size and SHA-256 match; the
+native adapter opens it descriptor-relative with `O_NOFOLLOW` and compares
+descriptor metadata before and after the read. A directory artifact is
+traversed through the confined SFTP/native adapter; the native adapter uses
+the same descriptor-relative no-follow boundary, while SFTP validates stable
+entry metadata and fails closed when a tree changes during traversal.
 Both reject symlinks and special files, create a deterministic `.tar` archive,
 and apply both limits below before the artifact is published:
 

@@ -240,16 +240,15 @@ def test_ssh_authentication_and_host_key_errors_are_not_retryable(tmp_path, ssh_
     assert not isinstance(raised.value, HPCTransportError)
 
 
-def test_native_gpfs_io_error_is_reported_as_transport_unavailable(tmp_path):
+def test_native_gpfs_io_error_is_reported_as_transport_unavailable(tmp_path, monkeypatch):
     root = tmp_path / "hpc-root"
     root.mkdir()
     client = NativeSlurmClient(_settings(root))
 
-    class BrokenPath:
-        def stat(self):
-            raise OSError(errno.EIO, "stale GPFS handle")
+    def broken_open(*_args, **_kwargs):
+        raise OSError(errno.EIO, "stale GPFS handle")
 
-    client._confined_path = lambda _remote_path: BrokenPath()
+    monkeypatch.setattr("app.infrastructure.hpc.native._open_confined_path", broken_open)
 
     with pytest.raises(HPCTransportError, match="transport is unavailable"):
         client.read_text(str(root / "result.json"), 1_000)
@@ -262,14 +261,13 @@ def test_native_gpfs_directory_errors_are_reported_as_transport_unavailable(
     root = tmp_path / "hpc-root"
     root.mkdir()
     client = NativeSlurmClient(_settings(root))
-    original_exists = Path.exists
 
-    def broken_exists(path: Path) -> bool:
-        if path == root / "jobs":
-            raise OSError(filesystem_errno, "stale GPFS handle")
-        return original_exists(path)
+    def broken_open(*_args, **_kwargs):
+        raise OSError(filesystem_errno, "stale GPFS handle")
 
-    monkeypatch.setattr(Path, "exists", broken_exists)
+    monkeypatch.setattr(
+        "app.infrastructure.hpc.native._open_or_create_confined_directory", broken_open
+    )
 
     with pytest.raises(HPCTransportError, match="transport is unavailable"):
         client.ensure_directory(str(root / "jobs"))

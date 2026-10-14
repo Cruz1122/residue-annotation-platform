@@ -49,6 +49,102 @@ _TRANSIENT_SLURM_ERRNOS = frozenset(
 )
 
 
+def _native_directory_flags() -> int:
+    """Return flags required for descriptor-relative, no-follow traversal."""
+
+    if not hasattr(os, "O_DIRECTORY") or not hasattr(os, "O_NOFOLLOW"):
+        raise RuntimeError("native confined filesystem access needs no-follow support")
+    return os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+
+
+def _native_file_flags() -> int:
+    if not hasattr(os, "O_NOFOLLOW"):
+        raise RuntimeError("native confined filesystem access needs no-follow support")
+    return os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+
+
+def _raise_native_symlink_error(error: OSError) -> None:
+    if error.errno == errno.ELOOP:
+        raise RuntimeError("native HPC path uses a symlinked component") from error
+    raise error
+
+
+def _open_confined_path(root: Path, target: Path, *, directory: bool) -> int:
+    """Open a path below ``root`` without following any component symlink."""
+
+    relative = target.relative_to(root)
+    if not relative.parts:
+        if not directory:
+            raise RuntimeError("native HPC path must name a regular file")
+        try:
+            return os.open(root, _native_directory_flags())
+        except OSError as exc:
+            _raise_native_symlink_error(exc)
+
+    parent_fd: int | None = None
+    try:
+        parent_fd = os.open(root, _native_directory_flags())
+        for component in relative.parts[:-1]:
+            try:
+                child_fd = os.open(
+                    component,
+                    _native_directory_flags(),
+                    dir_fd=parent_fd,
+                )
+            except OSError as exc:
+                _raise_native_symlink_error(exc)
+            os.close(parent_fd)
+            parent_fd = child_fd
+        flags = _native_directory_flags() if directory else _native_file_flags()
+        try:
+            return os.open(relative.parts[-1], flags, dir_fd=parent_fd)
+        except OSError as exc:
+            _raise_native_symlink_error(exc)
+    finally:
+        if parent_fd is not None:
+            os.close(parent_fd)
+
+
+def _open_or_create_confined_directory(root: Path, target: Path) -> None:
+    """Create a directory tree below ``root`` with no-follow dirfds."""
+
+    relative = target.relative_to(root)
+    if not relative.parts:
+        return
+    current_fd: int | None = None
+    try:
+        current_fd = os.open(root, _native_directory_flags())
+        for component in relative.parts:
+            try:
+                child_fd = os.open(
+                    component,
+                    _native_directory_flags(),
+                    dir_fd=current_fd,
+                )
+            except FileNotFoundError:
+                try:
+                    os.mkdir(component, mode=0o700, dir_fd=current_fd)
+                except FileExistsError:
+                    # Another process created it. The no-follow open below is
+                    # still authoritative and rejects a symlink or file.
+                    pass
+                try:
+                    child_fd = os.open(
+                        component,
+                        _native_directory_flags(),
+                        dir_fd=current_fd,
+                    )
+                except OSError as exc:
+                    _raise_native_symlink_error(exc)
+            except OSError as exc:
+                _raise_native_symlink_error(exc)
+            os.close(current_fd)
+            current_fd = child_fd
+    finally:
+        if current_fd is not None:
+            os.close(current_fd)
+
+
 def _rethrow_native_transport_error(error: Exception) -> None:
     if isinstance(error, HPCTransportError):
         raise error
@@ -103,15 +199,7 @@ class NativeSlurmClient:
         try:
             root = self._root_path()
             target = self._confined_path(remote_path)
-            relative = target.relative_to(root)
-            current = root
-            for part in relative.parts:
-                current /= part
-                if current.exists():
-                    if current.is_symlink() or not current.is_dir():
-                        raise RuntimeError("native HPC directory component is unsafe")
-                    continue
-                current.mkdir(mode=0o700)
+            _open_or_create_confined_directory(root, target)
         except Exception as exc:
             _rethrow_native_transport_error(exc)
             raise
@@ -119,23 +207,31 @@ class NativeSlurmClient:
     def read_bytes(self, remote_path: str, max_bytes: int) -> bytes:
         if max_bytes < 1:
             raise ValueError("max_bytes must be positive")
+        descriptor: int | None = None
         try:
+            root = self._root_path()
             path = self._confined_path(remote_path)
-            attributes = path.stat()
-            if not stat.S_ISREG(attributes.st_mode) or path.is_symlink():
+            descriptor = _open_confined_path(root, path, directory=False)
+            attributes = os.fstat(descriptor)
+            if not stat.S_ISREG(attributes.st_mode):
                 raise RuntimeError("native HPC result is not a regular file")
             if attributes.st_size > max_bytes:
                 raise RuntimeError("native HPC result exceeds the configured size limit")
-            with path.open("rb") as stream:
+            with os.fdopen(descriptor, "rb") as stream:
+                descriptor = None
                 data = stream.read(max_bytes + 1)
+                final_attributes = os.fstat(stream.fileno())
             if len(data) > max_bytes:
                 raise RuntimeError("native HPC result exceeds the configured size limit")
-            if path.stat().st_size != attributes.st_size:
+            if final_attributes.st_size != attributes.st_size:
                 raise RuntimeError("native HPC result changed while it was being read")
             return data
         except Exception as exc:
             _rethrow_native_transport_error(exc)
             raise
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
 
     def read_text(self, remote_path: str, max_bytes: int) -> str:
         return self.read_bytes(remote_path, max_bytes).decode("utf-8")
@@ -145,29 +241,40 @@ class NativeSlurmClient:
 
         if max_bytes < 1:
             raise ValueError("max_bytes must be positive")
+        descriptor: int | None = None
         try:
+            root = self._root_path()
             source = self._confined_path(remote_path)
-            attributes = source.stat()
-            if not stat.S_ISREG(attributes.st_mode) or source.is_symlink():
+            descriptor = _open_confined_path(root, source, directory=False)
+            attributes = os.fstat(descriptor)
+            if not stat.S_ISREG(attributes.st_mode):
                 raise RuntimeError("native HPC result is not a regular file")
             if attributes.st_size > max_bytes:
                 raise RuntimeError("native HPC result exceeds the configured size limit")
             digest = hashlib.sha256()
             total = 0
             local_path.parent.mkdir(parents=True, exist_ok=True)
-            with source.open("rb") as source_stream, local_path.open("wb") as target_stream:
-                while chunk := source_stream.read(min(1024 * 1024, max_bytes + 1 - total)):
-                    total += len(chunk)
-                    if total > max_bytes:
-                        raise RuntimeError("native HPC result exceeds the configured size limit")
-                    digest.update(chunk)
-                    target_stream.write(chunk)
-            if total != attributes.st_size or source.stat().st_size != attributes.st_size:
+            with os.fdopen(descriptor, "rb") as source_stream:
+                descriptor = None
+                with local_path.open("wb") as target_stream:
+                    while chunk := source_stream.read(min(1024 * 1024, max_bytes + 1 - total)):
+                        total += len(chunk)
+                        if total > max_bytes:
+                            raise RuntimeError(
+                                "native HPC result exceeds the configured size limit"
+                            )
+                        digest.update(chunk)
+                        target_stream.write(chunk)
+                final_attributes = os.fstat(source_stream.fileno())
+            if total != attributes.st_size or final_attributes.st_size != attributes.st_size:
                 raise RuntimeError("native HPC result changed while it was being read")
             return total, digest.hexdigest()
         except Exception as exc:
             _rethrow_native_transport_error(exc)
             raise
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
 
     def download_directory_to(
         self,
@@ -183,12 +290,11 @@ class NativeSlurmClient:
         writer: BoundedTarWriter | None = None
         root_fd: int | None = None
         try:
+            root = self._root_path()
             directory = self._confined_path(remote_path)
-            attributes = directory.lstat()
-            if stat.S_ISLNK(attributes.st_mode) or not stat.S_ISDIR(attributes.st_mode):
+            root_fd = _open_confined_path(root, directory, directory=True)
+            if not stat.S_ISDIR(os.fstat(root_fd).st_mode):
                 raise RuntimeError("native HPC result is not a directory")
-            if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
-                raise RuntimeError("native HPC directory traversal needs no-follow support")
 
             archive_root = directory.name
             writer = BoundedTarWriter(
@@ -197,12 +303,6 @@ class NativeSlurmClient:
                 max_entries=max_entries,
             )
             writer.add_directory(archive_root)
-
-            directory_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY
-            file_flags = os.O_RDONLY | os.O_NOFOLLOW
-            root_fd = os.open(directory, directory_flags)
-            if not stat.S_ISDIR(os.fstat(root_fd).st_mode):
-                raise RuntimeError("native HPC result is not a directory")
 
             def walk(current_fd: int, archive_directory: str) -> None:
                 entries = []
@@ -221,13 +321,13 @@ class NativeSlurmClient:
                         raise RuntimeError("native HPC result contains a symlink")
                     archive_child = f"{archive_directory}/{name}"
                     try:
-                        child_fd = os.open(name, directory_flags, dir_fd=current_fd)
+                        child_fd = os.open(name, _native_directory_flags(), dir_fd=current_fd)
                     except OSError as open_directory_error:
+                        if open_directory_error.errno == errno.ELOOP:
+                            raise RuntimeError(
+                                "native HPC result contains a symlink"
+                            ) from open_directory_error
                         if open_directory_error.errno != errno.ENOTDIR:
-                            if open_directory_error.errno == errno.ELOOP:
-                                raise RuntimeError(
-                                    "native HPC result contains a symlink"
-                                ) from open_directory_error
                             raise
                         child_fd = None
                     if child_fd is not None:
@@ -237,7 +337,7 @@ class NativeSlurmClient:
                         finally:
                             os.close(child_fd)
                         continue
-                    file_fd = os.open(name, file_flags, dir_fd=current_fd)
+                    file_fd = os.open(name, _native_file_flags(), dir_fd=current_fd)
                     try:
                         file_attributes = os.fstat(file_fd)
                         if not stat.S_ISREG(file_attributes.st_mode):
