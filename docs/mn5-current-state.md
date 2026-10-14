@@ -164,11 +164,12 @@ La inspección read-only del contrato actual de
 explícitamente `dependencies=("protein_identity", "structure_modeling")`,
 `gpu=1` y el requisito técnico `msa_cache`; coincide con el registry local.
 Sin embargo, el log histórico de `pipeline17` imprimió
-`READY ... deps=protein_identity` para ese mismo stage. Esa discrepancia entre
-el contrato observado y la planificación de la corrida impide usarla como
-prueba de ejecución válida del DAG: antes de una aceptación científica se debe
-repetir la corrida con una versión fijada y demostrar que el scheduler espera
-`structure_modeling` y su `msa_cache_entry`.
+`READY ... deps=protein_identity` y `gpu=0` para ese mismo stage. Esas
+discrepancias entre el contrato observado y la planificación/recursos de la
+corrida impiden usarla como prueba de ejecución válida del DAG: antes de una
+aceptación científica se debe repetir la corrida con una versión fijada y
+demostrar que el scheduler espera `structure_modeling`, su `msa_cache_entry` y
+la reserva GPU declarada.
 
 Esta inspección es evidencia de conectividad, permisos de lectura y estructura de código en la raíz observada. No es evidencia de ejecución científica, de permisos de escritura ni de aceptación operativa del pipeline.
 
