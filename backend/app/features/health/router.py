@@ -35,7 +35,7 @@ def read_database_health(session: Session = Depends(get_db)) -> HealthResponse:
 
 
 @router.get("/metrics", response_class=PlainTextResponse)
-def read_metrics() -> PlainTextResponse:
-    """Expose non-sensitive process counters for the deployment monitor."""
+def read_metrics(session: Session = Depends(get_db)) -> PlainTextResponse:
+    """Expose non-sensitive process counters and durable state gauges."""
 
-    return PlainTextResponse(render_metrics(), media_type="text/plain; version=0.0.4")
+    return PlainTextResponse(render_metrics(session), media_type="text/plain; version=0.0.4")

@@ -18,8 +18,11 @@ curl --fail-with-body http://localhost:8742/api/v1/metrics
 The worker emits JSON `worker_event` records with `run_id`, `stage_id`, and,
 when a remote stage exists, `job_id`. Error text is deliberately omitted from
 these correlation records; the durable stage fields retain the sanitized
-`error_code`/`error_message`. The metrics endpoint contains only aggregate
-counters and stage/status labels, not run or job identifiers.
+`error_code`/`error_message`. The metrics endpoint contains process counters
+plus PostgreSQL-backed aggregate gauges for run status, stage/status, active
+slots, and database availability. It exposes only bounded status/stage labels,
+never run or job identifiers, so the API process reports work observed by a
+separate worker process as well.
 
 A VPN or SFTP outage is a remote-availability event. It must not be converted
 into a Slurm job failure or trigger an automatic resubmission. The next worker
