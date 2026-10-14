@@ -1,6 +1,7 @@
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from app.core.config import Settings
@@ -111,6 +112,33 @@ class FakeTamperedProvenanceRemote(FakeCompletedRemote):
         if remote_path.endswith("provenance.json"):
             return '{"tool":"tampered","version":"1.0"}'
         return super().read_text(remote_path, max_bytes)
+
+
+class FakeUnavailableRemote:
+    def read_text(self, _remote_path: str, _max_bytes: int) -> str:
+        raise RuntimeError("remote path /gpfs/private/secret is unavailable")
+
+
+def test_remote_failure_message_redacts_untrusted_paths(tmp_path: Path):
+    settings = Settings(
+        app_env="test",
+        database_url="sqlite://",
+        artifact_root=tmp_path / "artifacts",
+        hpc_remote_root="/gpfs/test",
+    )
+    executor = SSHStageExecutor.__new__(SSHStageExecutor)
+    executor.settings = settings
+    executor.client = FakeUnavailableRemote()
+    stage = SimpleNamespace(run_id="run-1", stage_id="protein_identity")
+
+    message = executor._failure_message(
+        stage,
+        "Slurm failed at /scratch/private/output password=secret-value",
+    )
+
+    assert "/gpfs/" not in message
+    assert "/scratch/" not in message
+    assert "secret-value" not in message
 
 
 def test_submit_poll_and_ingest_persist_a_linked_stage_result(client, session, tmp_path: Path):

@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from app.core.security import sanitize_error_message
 from app.features.artifacts.storage import ArtifactPathError, safe_storage_path
 from app.features.runs.cache import canonical_cache_key
 from app.features.runs.manifest import (
@@ -45,6 +46,24 @@ def test_cache_key_changes_with_scientific_inputs_but_not_log_level():
     )
     assert first != second
     assert first == logging_only
+
+
+def test_error_sanitizer_redacts_filesystem_paths_and_secret_assignments():
+    message = (
+        "remote failed at /gpfs/projects/private/results/model.cif "
+        "password=super-secret token:abc123 C:\\Users\\alice\\secret.txt"
+    )
+
+    sanitized = sanitize_error_message(
+        message,
+        roots=("/gpfs/projects/private",),
+    )
+
+    assert "/gpfs/" not in sanitized
+    assert "C:\\Users" not in sanitized
+    assert "super-secret" not in sanitized
+    assert "abc123" not in sanitized
+    assert "<remote-root>" in sanitized
 
 
 def test_cache_key_includes_dependency_and_sequence_identity():

@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.core.auth import Principal
 from app.core.config import get_settings
+from app.core.security import sanitize_error_message
 from app.features.auth.service import record_audit
 from app.features.proteins.models import Protein
 from app.features.runs.models import ActiveRunSlot, Run, RunStage, StageResult, Upload
@@ -56,7 +57,14 @@ def _stage_read(stage: RunStage) -> StageRead:
         stage_result_id=stage.stage_result_id,
         slurm_job_id=stage.slurm_job_id,
         error_code=stage.error_code,
-        error_message=stage.error_message,
+        error_message=(
+            sanitize_error_message(
+                stage.error_message,
+                roots=(get_settings().hpc_remote_root,),
+            )
+            if stage.error_message is not None
+            else None
+        ),
         started_at=stage.started_at,
         finished_at=stage.finished_at,
         artifacts=artifacts,

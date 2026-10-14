@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.core.config import Settings, get_settings
 from app.core.observability import log_worker_event
+from app.core.security import sanitize_error_message
 from app.features.artifacts.storage import ArtifactStore
 from app.features.runs.models import ActiveRunSlot, Run, RunStage, Upload
 from app.features.runs.service import transition_stage
@@ -276,7 +277,14 @@ def finalize_run(session: Session, run: Run) -> None:
     session.commit()
 
 
-def _fail_stage(session: Session, stage: RunStage, error_code: str, message: str) -> None:
+def _fail_stage(
+    session: Session,
+    stage: RunStage,
+    error_code: str,
+    message: str,
+    *,
+    remote_root: str | None = None,
+) -> None:
     persisted = (
         session.scalar(select(RunStage.status).where(RunStage.id == stage.id))
         if stage.id is not None
@@ -294,7 +302,10 @@ def _fail_stage(session: Session, stage: RunStage, error_code: str, message: str
         session.rollback()
         return
     stage.error_code = error_code
-    stage.error_message = message[:1000]
+    stage.error_message = sanitize_error_message(
+        message,
+        roots=(remote_root,) if remote_root else (),
+    )
     session.commit()
     log_worker_event(
         "stage_failed",
@@ -496,13 +507,25 @@ def _process_remote(session: Session, settings: Settings) -> bool:
         except InputTransferError as exc:
             failed = session.get(RunStage, stage.id)
             if failed is not None:
-                _fail_stage(session, failed, "input_transfer_failed", str(exc))
+                _fail_stage(
+                    session,
+                    failed,
+                    "input_transfer_failed",
+                    str(exc),
+                    remote_root=settings.hpc_remote_root,
+                )
                 refresh_ready_states(session, {failed.run_id})
                 _finalize_runs(session, {failed.run_id})
         except Exception as exc:
             failed = session.get(RunStage, stage.id)
             if failed is not None:
-                _fail_stage(session, failed, "remote_submit_failed", str(exc))
+                _fail_stage(
+                    session,
+                    failed,
+                    "remote_submit_failed",
+                    str(exc),
+                    remote_root=settings.hpc_remote_root,
+                )
                 refresh_ready_states(session, {failed.run_id})
                 _finalize_runs(session, {failed.run_id})
 
@@ -551,7 +574,13 @@ def process_one(session: Session, executor: ScientificStageExecutor | None = Non
         failed = session.get(RunStage, stage.id)
         if failed is None:
             return True
-        _fail_stage(session, failed, "stage_execution_unavailable", str(exc))
+        _fail_stage(
+            session,
+            failed,
+            "stage_execution_unavailable",
+            str(exc),
+            remote_root=settings.hpc_remote_root,
+        )
         refresh_ready_states(session, {failed.run_id})
         _finalize_runs(session, {failed.run_id})
     return True

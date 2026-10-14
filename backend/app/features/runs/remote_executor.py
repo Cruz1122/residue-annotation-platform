@@ -16,6 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.config import Settings
+from app.core.security import sanitize_error_message
 from app.features.annotations.models import ANNOTATION_TABLES
 from app.features.annotations.service import ANNOTATION_INSERT_BATCH_SIZE, insert_annotation_rows
 from app.features.artifacts.storage import ArtifactPathError, ArtifactStore
@@ -275,7 +276,7 @@ class SSHStageExecutor:
         except Exception:
             remote_error = ""
         message = remote_error or status_message or "remote Slurm job failed"
-        return message.replace(self.root, "<remote-root>")[:1_000]
+        return sanitize_error_message(message, roots=(self.root,))
 
     def _mark_failed(
         self, session: Session, stage: RunStage, error_code: str, message: str
@@ -294,7 +295,7 @@ class SSHStageExecutor:
             session.rollback()
             return
         stage.error_code = error_code
-        stage.error_message = message.replace(self.root, "<remote-root>")[:1_000]
+        stage.error_message = sanitize_error_message(message, roots=(self.root,))
         session.commit()
 
     def _find_reusable_result(
