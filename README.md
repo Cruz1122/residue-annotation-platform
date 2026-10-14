@@ -187,6 +187,15 @@ uv run pytest -q
 # Optional: PostgreSQL concurrency tests (run-slot unique, remote poll claim,
 # refresh rotation race, logout race, rate-limit bucket race, and invariants).
 POSTGRES_TEST_DATABASE_URL=postgresql+psycopg://user:pass@localhost:5432/db uv run pytest -q
+
+# Compare two local stage annotation tables. The command reports exact
+# differences and exits 1 when outputs differ; it never signs off scientific
+# equivalence by itself. Keep NA distinct from numeric zero and provide any
+# numeric tolerance explicitly.
+uv run python -m app.features.runs.science_diff \
+  /path/to/baseline/annotations.tsv \
+  /path/to/candidate/annotations.tsv \
+  --absolute-tolerance 0.001
 ```
 
 Frontend:

@@ -1,13 +1,17 @@
 import errno
 import hashlib
 import io
+import json
 import stat
+import sys
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from app.core.security import sanitize_error_message
 from app.features.artifacts.storage import ArtifactPathError, safe_storage_path
+from app.features.runs import science_diff
 from app.features.runs.cache import canonical_cache_key
 from app.features.runs.manifest import (
     ManifestError,
@@ -16,6 +20,7 @@ from app.features.runs.manifest import (
     validate_manifest,
     validate_remote_manifest,
 )
+from app.features.runs.science_diff import ScienceDiffError, compare_annotation_tables
 from app.infrastructure.hpc.readonly import (
     AUTHORIZED_MN5_ROOT,
     InMemoryReadOnlyInspector,
@@ -85,6 +90,82 @@ def test_cache_key_includes_dependency_and_sequence_identity():
     reference_change = canonical_cache_key(**base, reference_sequence_sha256="e" * 64)
     assert first != dependency_change
     assert first != reference_change
+
+
+def test_science_diff_reports_numeric_tolerance_without_collapsing_na_into_zero(tmp_path: Path):
+    before = tmp_path / "before.tsv"
+    after = tmp_path / "after.tsv"
+    header = "protein_id\taa_position\taa_ref\tscore\tcomment\n"
+    before.write_text(header + "P00001\t1\tA\t0\tNA\nP00001\t2\tC\t1.0\tstable\n")
+    after.write_text(header + "P00001\t1\tA\t0.0005\tNA\nP00001\t2\tC\t1.1\tstable\n")
+
+    report = compare_annotation_tables(before, after, absolute_tolerance=Decimal("0.001"))
+
+    assert report.equivalent is False
+    assert report.unchanged_cells == 3
+    assert report.changed_cells == 1
+    assert report.differences[0].column == "score"
+    assert report.differences[0].reason == "numeric_outside_tolerance"
+
+
+def test_science_diff_reports_canonical_identity_change_as_added_removed_and_mismatch(
+    tmp_path: Path,
+):
+    before = tmp_path / "before.tsv"
+    after = tmp_path / "after.tsv"
+    before.write_text("protein_id\taa_position\taa_ref\tscore\nP00001\t1\tA\t0\n")
+    after.write_text("protein_id\taa_position\taa_ref\tscore\nP00001\t1\tY\t0\n")
+
+    report = compare_annotation_tables(before, after)
+
+    assert report.equivalent is False
+    assert report.added_keys == (("P00001", 1, "Y"),)
+    assert report.removed_keys == (("P00001", 1, "A"),)
+    assert report.identity_mismatches == (
+        {
+            "protein_id": "P00001",
+            "aa_position": 1,
+            "before_aa_ref": "A",
+            "after_aa_ref": "Y",
+        },
+    )
+
+
+def test_science_diff_rejects_duplicate_or_unbounded_annotation_tables(tmp_path: Path):
+    duplicate = tmp_path / "duplicate.tsv"
+    duplicate.write_text(
+        "protein_id\taa_position\taa_ref\tscore\nP00001\t1\tA\t0\nP00001\t1\tA\t1\n"
+    )
+    oversized = tmp_path / "oversized.tsv"
+    oversized.write_text("protein_id\taa_position\taa_ref\tscore\nP00001\t1\tA\t0\n")
+
+    with pytest.raises(ScienceDiffError, match="duplicate canonical row"):
+        compare_annotation_tables(duplicate, duplicate)
+
+    conflicting_reference = tmp_path / "conflicting-reference.tsv"
+    conflicting_reference.write_text(
+        "protein_id\taa_position\taa_ref\tscore\nP00001\t1\tA\t0\nP00001\t1\tY\t1\n"
+    )
+    with pytest.raises(ScienceDiffError, match="duplicate canonical position"):
+        compare_annotation_tables(conflicting_reference, conflicting_reference)
+
+    with pytest.raises(ScienceDiffError, match="byte limit"):
+        compare_annotation_tables(oversized, oversized, max_bytes=1)
+
+
+def test_science_diff_cli_emits_json_and_nonzero_for_differences(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    before = tmp_path / "before.tsv"
+    after = tmp_path / "after.tsv"
+    before.write_text("protein_id\taa_position\taa_ref\tscore\nP00001\t1\tA\t0\n")
+    after.write_text("protein_id\taa_position\taa_ref\tscore\nP00001\t1\tA\t1\n")
+    monkeypatch.setattr(sys, "argv", ["science_diff", str(before), str(after)])
+
+    assert science_diff.main() == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["equivalent"] is False
+    assert payload["changed_cells"] == 1
 
 
 def test_manifest_rejects_unsafe_storage_keys():
