@@ -9,15 +9,20 @@ import sys
 from pathlib import Path
 
 
-def _regular_secret(path: Path) -> bool:
+def _regular_file(path: Path) -> bool:
     try:
         metadata = path.lstat()
     except OSError:
         return False
-    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+    return not stat.S_ISLNK(metadata.st_mode) and stat.S_ISREG(metadata.st_mode)
+
+
+def _private_nonempty_file(path: Path, label: str) -> bool:
+    if not _regular_file(path):
         return False
+    metadata = path.lstat()
     if metadata.st_mode & 0o077:
-        raise SystemExit("VPN password file must not be accessible by group or others")
+        raise SystemExit(f"{label} must not be accessible by group or others")
     return metadata.st_size > 0
 
 
@@ -43,9 +48,12 @@ def main() -> int:
     password_file = Path(
         os.environ.get("HPC_VPN_PASSWORD_FILE", "/run/secrets/hpc_vpn_password")
     )
-    password_available = _regular_secret(password_file)
-    config_available = config.is_file() and not config.is_symlink()
-    if not password_available and not (config_available and _config_contains_password(config)):
+    password_available = _private_nonempty_file(password_file, "VPN password file")
+    config_available = _regular_file(config)
+    config_contains_credentials = config_available and _config_contains_password(config)
+    if config_contains_credentials:
+        _private_nonempty_file(config, "VPN config file")
+    if not password_available and not config_contains_credentials:
         print(
             "VPN credentials are unavailable: provide HPC_VPN_PASSWORD_FILE "
             "or a protected openfortivpn config with a password/cookie",
