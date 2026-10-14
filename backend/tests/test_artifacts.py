@@ -106,3 +106,14 @@ def test_artifact_metadata_never_exposes_storage_or_gpfs_paths(client, session):
     assert "storage_key" not in payload
     assert "/gpfs/" not in str(payload)
     assert payload["download_url"] == f"/api/v1/artifacts/{artifact_id}/content"
+
+
+def test_foreign_principal_cannot_read_or_download_artifact(client, session):
+    artifact_id = _artifact_with_recorded_size(client, session, size=4)
+    foreign_headers = {"X-User-Id": "other-user", "X-Project-Id": "other-project"}
+
+    metadata = client.get(f"/api/v1/artifacts/{artifact_id}", headers=foreign_headers)
+    content = client.get(f"/api/v1/artifacts/{artifact_id}/content", headers=foreign_headers)
+
+    assert metadata.status_code == 404
+    assert content.status_code == 404
