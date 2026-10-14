@@ -19,6 +19,7 @@ from app.features.runs.state import RunStageStatus, RunStatus
 from app.features.stages.registry import STAGE_BY_ID
 from app.infrastructure.hpc.transfer import (
     InputTransferError,
+    NativeInputTransfer,
     SCPInputTransfer,
     remote_pipeline_input_path,
 )
@@ -40,17 +41,17 @@ class ScientificStageExecutor:
 
 
 def prepare_run_inputs(session: Session, run: Run, settings: Settings) -> None:
-    """Transfer attached small inputs only for an explicitly enabled SSH profile."""
+    """Transfer attached small inputs only for an explicitly enabled HPC profile."""
 
     if not run.uploads:
         return
-    if settings.hpc_execution_mode != "ssh":
+    if settings.hpc_execution_mode not in {"ssh", "native"}:
         if not settings.hpc_input_transfer_enabled:
             return
-        raise InputTransferError("SCP input transfer requires the SSH HPC execution profile")
+        raise InputTransferError("input transfer requires the SSH or native HPC execution profile")
     if not settings.hpc_input_transfer_enabled:
         raise InputTransferError(
-            "attached inputs require HPC_INPUT_TRANSFER_ENABLED=true for SSH execution"
+            "attached inputs require HPC_INPUT_TRANSFER_ENABLED=true for HPC execution"
         )
 
     accession = None
@@ -93,7 +94,10 @@ def prepare_run_inputs(session: Session, run: Run, settings: Settings) -> None:
     if not pending:
         return
 
-    with SCPInputTransfer(settings) as transfer:
+    transfer_type = (
+        SCPInputTransfer if settings.hpc_execution_mode == "ssh" else NativeInputTransfer
+    )
+    with transfer_type(settings) as transfer:
         for upload, local_path, remote_path in pending:
             try:
                 transfer.upload(local_path, remote_path)
@@ -465,9 +469,12 @@ def _finalize_active_runs(session: Session) -> None:
 
 
 def _process_remote(session: Session, settings: Settings) -> bool:
-    from app.features.runs.remote_executor import SSHStageExecutor
+    from app.features.runs.remote_executor import NativeStageExecutor, SSHStageExecutor
 
-    executor = SSHStageExecutor(settings)
+    executor_type = (
+        NativeStageExecutor if settings.hpc_execution_mode == "native" else SSHStageExecutor
+    )
+    executor = executor_type(settings)
     inflight_count = _remote_inflight_count(session)
     processed = False
     for _ in range(settings.hpc_max_inflight_stages):
@@ -542,7 +549,7 @@ def process_one(session: Session, executor: ScientificStageExecutor | None = Non
     if recovered:
         refresh_ready_states(session, recovered)
         _finalize_runs(session, recovered)
-    if executor is None and settings.hpc_execution_mode == "ssh":
+    if executor is None and settings.hpc_execution_mode in {"ssh", "native"}:
         return _process_remote(session, settings)
     stage = claim_ready_stage(session, settings)
     if stage is None:

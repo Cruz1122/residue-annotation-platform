@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import errno
+import os
+import shutil
 import stat
 from pathlib import Path, PurePosixPath
 
@@ -8,6 +10,7 @@ import paramiko
 from scp import SCPClient
 
 from app.core.config import Settings
+from app.infrastructure.hpc.native import NativeSlurmClient
 
 
 class InputTransferError(RuntimeError):
@@ -287,3 +290,67 @@ class SCPInputTransfer:
 
     def __exit__(self, *_: object) -> None:
         self.close()
+
+
+class NativeInputTransfer:
+    """Copy generated inputs into the approved local GPFS root.
+
+    Native execution runs on the same host as the application worker, so an
+    SSH/SCP hop would add no isolation and would make local verification
+    impossible. The same path and symlink constraints still apply at this
+    boundary before a file is created below the configured root.
+    """
+
+    def __init__(self, settings: Settings):
+        self.settings = settings
+        self.client = NativeSlurmClient(settings)
+
+    def __enter__(self) -> NativeInputTransfer:
+        self.client._root_path()
+        return self
+
+    def upload(self, local_path: Path, remote_path: str) -> None:
+        artifact_root = Path(self.settings.artifact_root).resolve()
+        if local_path.is_symlink():
+            raise InputTransferError("local input must not be a symlink")
+        resolved = local_path.resolve()
+        if resolved != artifact_root and artifact_root not in resolved.parents:
+            raise InputTransferError("local input path is outside artifact storage")
+        try:
+            source_attributes = local_path.stat()
+        except OSError as exc:
+            raise InputTransferError("local input is unavailable") from exc
+        if not stat.S_ISREG(source_attributes.st_mode):
+            raise InputTransferError("local input is not a regular file")
+
+        destination = self.client._confined_path(remote_path)
+        root = self.client._root_path()
+        if destination == root:
+            raise InputTransferError("remote input path is outside configured root")
+        self.client.ensure_directory(str(destination.parent))
+        if destination.exists() or destination.is_symlink():
+            raise InputTransferError("remote input destination already exists")
+
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            descriptor = os.open(destination, flags, 0o600)
+        except OSError as exc:
+            raise InputTransferError("remote input destination could not be created") from exc
+        try:
+            with os.fdopen(descriptor, "wb") as target:
+                descriptor = -1
+                with local_path.open("rb") as source:
+                    shutil.copyfileobj(source, target, length=1024 * 1024)
+                target.flush()
+                os.fsync(target.fileno())
+            os.chmod(destination, 0o600)
+        except Exception as exc:
+            if descriptor != -1:
+                os.close(descriptor)
+            destination.unlink(missing_ok=True)
+            raise InputTransferError("native input transfer failed") from exc
+
+    def __exit__(self, *_: object) -> None:
+        return None

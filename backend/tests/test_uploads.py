@@ -328,6 +328,36 @@ def test_prepare_run_inputs_rejects_remote_mmcif_before_opening_ssh(session, tmp
     assert persisted.transfer_status == "failed"
 
 
+def test_native_input_transfer_confines_and_does_not_overwrite(tmp_path):
+    from app.core.config import Settings
+    from app.infrastructure.hpc.transfer import InputTransferError, NativeInputTransfer
+
+    artifact_root = tmp_path / "artifacts"
+    source = artifact_root / "uploads" / "sequence.fasta"
+    source.parent.mkdir(parents=True)
+    source.write_text(">P00001\nACDE\n", encoding="utf-8")
+    hpc_root = tmp_path / "hpc-root"
+    hpc_root.mkdir()
+    settings = Settings(
+        app_env="test",
+        database_url="sqlite://",
+        artifact_root=artifact_root,
+        hpc_execution_mode="native",
+        hpc_remote_root=str(hpc_root),
+    )
+    remote = (
+        hpc_root / "uploads" / "P00001" / ".platform_runs" / "run-1" / "fasta" / "upload-1.fasta"
+    )
+
+    with NativeInputTransfer(settings) as transfer:
+        transfer.upload(source, str(remote))
+        with pytest.raises(InputTransferError, match="already exists"):
+            transfer.upload(source, str(remote))
+
+    assert remote.read_text(encoding="utf-8") == source.read_text(encoding="utf-8")
+    assert remote.stat().st_mode & 0o077 == 0
+
+
 def test_upload_service_bounds_files():
     from app.core.config import Settings
 

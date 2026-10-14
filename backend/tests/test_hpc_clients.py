@@ -1,4 +1,5 @@
 import subprocess
+from pathlib import Path
 
 import pytest
 from app.core.config import Settings
@@ -6,10 +7,11 @@ from app.infrastructure.hpc.base import JobRequest, JobState
 from app.infrastructure.hpc.native import NativeSlurmClient
 
 
-def _settings() -> Settings:
+def _settings(root: Path | None = None) -> Settings:
     return Settings(
         app_env="test",
         database_url="sqlite://",
+        hpc_remote_root=str(root or "/gpfs/project/root"),
         hpc_slurm_account="bsc-test",
         hpc_slurm_partition="debug",
         hpc_slurm_qos="normal",
@@ -17,8 +19,10 @@ def _settings() -> Settings:
     )
 
 
-def test_native_slurm_submit_propagates_resources_environment_and_paths():
-    client = NativeSlurmClient(_settings())
+def test_native_slurm_submit_propagates_resources_environment_and_paths(tmp_path):
+    root = tmp_path / "hpc-root"
+    root.mkdir()
+    client = NativeSlurmClient(_settings(root))
     captured: list[list[str]] = []
     client._run = lambda args: captured.append(args) or "12345;cluster"
 
@@ -26,15 +30,15 @@ def test_native_slurm_submit_propagates_resources_environment_and_paths():
         JobRequest(
             stage_id="protein_identity",
             command=("python", "main.py", "--stage", "protein_identity"),
-            working_directory="/gpfs/project/root",
+            working_directory=str(root),
             environment={"PYTHONUNBUFFERED": "1"},
             cpu=4,
             gpu=1,
             memory_gb=8,
             time_limit="00:05:00",
             job_name="rap-protein",
-            stdout_path="/gpfs/project/root/job.out",
-            stderr_path="/gpfs/project/root/job.err",
+            stdout_path=str(root / "job.out"),
+            stderr_path=str(root / "job.err"),
         )
     )
 
@@ -46,8 +50,8 @@ def test_native_slurm_submit_propagates_resources_environment_and_paths():
     assert "--gres=gpu:1" in args
     assert "--mem=8G" in args
     assert "--time=00:05:00" in args
-    assert "--output=/gpfs/project/root/job.out" in args
-    assert "--error=/gpfs/project/root/job.err" in args
+    assert f"--output={root}/job.out" in args
+    assert f"--error={root}/job.err" in args
     assert args[-2] == "--wrap"
     assert "export PYTHONUNBUFFERED=1;" in args[-1]
     assert "exec python main.py --stage protein_identity" in args[-1]
@@ -97,3 +101,28 @@ def test_native_slurm_status_sanitizes_accounting_command_failure():
     assert status.state == JobState.UNKNOWN
     assert status.message == "accounting unavailable"
     assert "/gpfs/" not in status.message
+
+
+def test_native_slurm_reads_and_downloads_only_confined_regular_files(tmp_path):
+    root = tmp_path / "hpc-root"
+    root.mkdir()
+    client = NativeSlurmClient(_settings(root))
+    result = root / "jobs" / "run" / "manifest.json"
+    client.ensure_directory(str(result.parent))
+    result.write_text('{"status":"success"}\n', encoding="utf-8")
+
+    assert client.read_text(str(result), 1_000) == '{"status":"success"}\n'
+    downloaded = tmp_path / "artifacts" / "manifest.json"
+    size, digest = client.download_to(str(result), downloaded, 1_000)
+    assert size == downloaded.stat().st_size
+    assert digest
+    assert downloaded.read_text(encoding="utf-8") == result.read_text(encoding="utf-8")
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (root / "link").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(RuntimeError, match="symlinked component"):
+        client.read_text(str(root / "link" / "manifest.json"), 1_000)
+
+    with pytest.raises(RuntimeError, match="outside"):
+        client.read_text(str(outside / "manifest.json"), 1_000)

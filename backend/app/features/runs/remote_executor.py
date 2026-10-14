@@ -31,6 +31,7 @@ from app.features.runs.state import RunStageStatus
 from app.features.stages.registry import STAGE_BY_ID
 from app.infrastructure.hpc.base import JobRequest, JobState
 from app.infrastructure.hpc.factory import build_hpc_client
+from app.infrastructure.hpc.native import NativeSlurmClient
 from app.infrastructure.hpc.ssh import SSHConfigurationError, SSHSlurmClient, _remote_path_under
 from app.infrastructure.hpc.transfer import InputTransferError, remote_pipeline_input_path
 
@@ -649,6 +650,23 @@ class SSHStageExecutor:
             temporary.unlink(missing_ok=True)
             raise
         return storage_key, size, digest
+
+
+class NativeStageExecutor(SSHStageExecutor):
+    """Run the same remote-pipeline contract through local GPFS and Slurm.
+
+    The scientific pipeline, manifest validation, annotation checks, cache
+    publication, and artifact integrity rules are shared with the SSH path.
+    Only the transport/client boundary changes: commands and result files are
+    accessed through the explicitly configured native root on this host.
+    """
+
+    def __init__(self, settings: Settings):
+        client = build_hpc_client(settings)
+        if not isinstance(client, NativeSlurmClient):
+            raise SSHConfigurationError("native stage execution requires the native HPC profile")
+        self.settings = settings
+        self.client = client
 
 
 def _iter_annotation_rows(

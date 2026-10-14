@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import re
 import shlex
+import stat
 import subprocess
+from pathlib import Path, PurePosixPath
 
 from app.core.config import Settings
 from app.infrastructure.hpc.base import JobHandle, JobRequest, JobState, JobStatus
@@ -13,6 +16,88 @@ class NativeSlurmClient:
 
     def __init__(self, settings: Settings):
         self.settings = settings
+
+    def _root_path(self) -> Path:
+        root = Path(self.settings.hpc_remote_root)
+        if not root.is_absolute() or root.is_symlink() or not root.is_dir():
+            raise RuntimeError("configured native HPC root is not a real directory")
+        return root.resolve()
+
+    def _confined_path(self, remote_path: str) -> Path:
+        root = self._root_path()
+        candidate = PurePosixPath(remote_path)
+        if not candidate.is_absolute():
+            raise RuntimeError("native HPC path must be absolute")
+        try:
+            relative = candidate.relative_to(PurePosixPath(root))
+        except ValueError as exc:
+            raise RuntimeError("native HPC path is outside the configured root") from exc
+        current = root
+        for part in relative.parts:
+            current /= part
+            if current.is_symlink():
+                raise RuntimeError("native HPC path uses a symlinked component")
+        return current
+
+    def ensure_directory(self, remote_path: str) -> None:
+        """Create a job directory below the approved local GPFS root."""
+
+        root = self._root_path()
+        target = self._confined_path(remote_path)
+        relative = target.relative_to(root)
+        current = root
+        for part in relative.parts:
+            current /= part
+            if current.exists():
+                if current.is_symlink() or not current.is_dir():
+                    raise RuntimeError("native HPC directory component is unsafe")
+                continue
+            current.mkdir(mode=0o700)
+
+    def read_bytes(self, remote_path: str, max_bytes: int) -> bytes:
+        if max_bytes < 1:
+            raise ValueError("max_bytes must be positive")
+        path = self._confined_path(remote_path)
+        attributes = path.stat()
+        if not stat.S_ISREG(attributes.st_mode) or path.is_symlink():
+            raise RuntimeError("native HPC result is not a regular file")
+        if attributes.st_size > max_bytes:
+            raise RuntimeError("native HPC result exceeds the configured size limit")
+        with path.open("rb") as stream:
+            data = stream.read(max_bytes + 1)
+        if len(data) > max_bytes:
+            raise RuntimeError("native HPC result exceeds the configured size limit")
+        if path.stat().st_size != attributes.st_size:
+            raise RuntimeError("native HPC result changed while it was being read")
+        return data
+
+    def read_text(self, remote_path: str, max_bytes: int) -> str:
+        return self.read_bytes(remote_path, max_bytes).decode("utf-8")
+
+    def download_to(self, remote_path: str, local_path: Path, max_bytes: int) -> tuple[int, str]:
+        """Copy a verified native result file into the application artifact store."""
+
+        if max_bytes < 1:
+            raise ValueError("max_bytes must be positive")
+        source = self._confined_path(remote_path)
+        attributes = source.stat()
+        if not stat.S_ISREG(attributes.st_mode) or source.is_symlink():
+            raise RuntimeError("native HPC result is not a regular file")
+        if attributes.st_size > max_bytes:
+            raise RuntimeError("native HPC result exceeds the configured size limit")
+        digest = hashlib.sha256()
+        total = 0
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        with source.open("rb") as source_stream, local_path.open("wb") as target_stream:
+            while chunk := source_stream.read(min(1024 * 1024, max_bytes + 1 - total)):
+                total += len(chunk)
+                if total > max_bytes:
+                    raise RuntimeError("native HPC result exceeds the configured size limit")
+                digest.update(chunk)
+                target_stream.write(chunk)
+        if total != attributes.st_size or source.stat().st_size != attributes.st_size:
+            raise RuntimeError("native HPC result changed while it was being read")
+        return total, digest.hexdigest()
 
     def _run(self, args: list[str]) -> str:
         completed = subprocess.run(
@@ -34,6 +119,13 @@ class NativeSlurmClient:
         for key in request.environment:
             if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
                 raise ValueError("job environment contains an invalid variable name")
+        workdir = self._confined_path(request.working_directory)
+        stdout_path = (
+            self._confined_path(request.stdout_path) if request.stdout_path is not None else None
+        )
+        stderr_path = (
+            self._confined_path(request.stderr_path) if request.stderr_path is not None else None
+        )
         exports = " ".join(
             f"export {key}={shlex.quote(value)};" for key, value in request.environment.items()
         )
@@ -49,7 +141,7 @@ class NativeSlurmClient:
         args.extend(
             [
                 "--chdir",
-                request.working_directory,
+                str(workdir),
                 "--nodes=1",
                 "--ntasks=1",
                 f"--cpus-per-task={request.cpu}",
@@ -64,10 +156,10 @@ class NativeSlurmClient:
             args.append(f"--time={time_limit}")
         if request.job_name:
             args.append(f"--job-name={request.job_name}")
-        if request.stdout_path:
-            args.append(f"--output={request.stdout_path}")
-        if request.stderr_path:
-            args.append(f"--error={request.stderr_path}")
+        if stdout_path is not None:
+            args.append(f"--output={stdout_path}")
+        if stderr_path is not None:
+            args.append(f"--error={stderr_path}")
         args.extend(["--wrap", script])
         output = self._run(args)
         job_id = output.split(";", 1)[0].strip()
