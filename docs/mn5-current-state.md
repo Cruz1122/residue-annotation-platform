@@ -173,7 +173,12 @@ completa ni la equivalencia científica del benchmark. Como comprobación de
 integridad del conjunto, un snapshot posterior leyó 16 archivos explícitos
 (`DONE`, manifest, provenance, annotations y los 12 artefactos); todos
 quedaron `VERIFIED_READ`, sin fallos, y cada tamaño/hash coincidió con el
-manifest remoto.
+manifest remoto. Además, el método productivo `_ingest_result` fue reproducido
+localmente con un transporte apuntando exclusivamente a esos bytes ya
+verificados: publicó 13 artefactos (12 del manifest más annotations), 860 filas
+en la tabla del stage y `provenance.source=mn5-slurm` en una base SQLite
+temporal. Eso valida la publicación local del resultado real, pero no el
+submit/poll del worker contra SSH/Slurm.
 
 Como control, `benchmarks/all_stages_47069621/config.json` declara otra corrida
 finalizada, pero su `stages.tsv` de 51 bytes contiene sólo el encabezado; se
