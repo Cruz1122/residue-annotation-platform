@@ -141,7 +141,8 @@ def test_postgres_run_ownership_blocks_a_foreign_principal():
         with pytest.raises(HTTPException) as error:
             get_owned_run(session, run_id, Principal("u2", "p2"))
 
-    assert error.value.status_code == 404
+    assert error.value.status_code == 403
+    assert error.value.detail == "Run access denied"
 
 
 def test_concurrent_claim_has_single_winner(tmp_path: Path):
