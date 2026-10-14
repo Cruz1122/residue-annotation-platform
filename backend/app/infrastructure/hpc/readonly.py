@@ -121,7 +121,7 @@ class LocalReadOnlyInspector:
         if not directory.is_dir():
             raise InspectionError("not a directory")
         entries = []
-        for index, child in enumerate(sorted(directory.iterdir(), key=lambda item: item.name)):
+        for index, child in enumerate(directory.iterdir()):
             if index >= self.max_entries:
                 raise InspectionError("directory listing exceeds configured limit")
             if child.is_symlink() or child.name.startswith("."):
@@ -134,6 +134,7 @@ class LocalReadOnlyInspector:
                     str(child.relative_to(self.root)), child.stat().st_size, is_directory
                 )
             )
+        entries.sort(key=lambda item: item.path)
         return entries
 
     def stat(self, relative_path: str) -> InspectionEntry:
@@ -319,13 +320,14 @@ class InMemoryReadOnlyInspector:
         if relative_dir:
             validate_relative_path(relative_dir)
         prefix = f"{relative_dir.rstrip('/')}/" if relative_dir else ""
-        entries = [
-            InspectionEntry(path, len(value), False)
-            for path, value in self.files.items()
-            if path.startswith(prefix)
-        ]
-        if len(entries) > self.max_entries:
-            raise InspectionError("directory listing exceeds configured limit")
+        entries = []
+        for path, value in self.files.items():
+            if not path.startswith(prefix):
+                continue
+            entries.append(InspectionEntry(path, len(value), False))
+            if len(entries) > self.max_entries:
+                raise InspectionError("directory listing exceeds configured limit")
+        entries.sort(key=lambda item: item.path)
         return entries
 
     def stat(self, relative_path: str) -> InspectionEntry:
