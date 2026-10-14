@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 from app.core.auth import Principal
 from app.core.config import Settings
-from app.core.db import Base
+from app.core.db import Base, get_db
 from app.features.annotations import models as _annotations  # noqa: F401
 from app.features.auth import models as _auth  # noqa: F401
 from app.features.auth.models import RateLimitBucket, RefreshToken, User, UserRole
@@ -30,6 +30,7 @@ from app.features.auth.service import (
     create_refresh_token,
     enforce_rate_limit,
     hash_password,
+    issue_access_token,
     revoke_refresh_tokens,
     rotate_refresh_token,
     utcnow,
@@ -47,7 +48,9 @@ from app.features.runs.worker_service import (
     claim_remote_stage,
     finalize_run,
 )
+from app.main import app
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import sessionmaker
@@ -143,6 +146,48 @@ def test_postgres_run_ownership_blocks_a_foreign_principal():
 
     assert error.value.status_code == 403
     assert error.value.detail == "Run access denied"
+
+
+def test_postgres_http_bearer_ownership_blocks_a_foreign_principal(tmp_path: Path):
+    settings = _settings(tmp_path)
+    with TestSession() as session:
+        protein_id = _protein(session).id
+        run = create_run(session, RunCreate(protein_id=protein_id), Principal("u1", "p1"))
+        foreign_user = User(
+            id="foreign-user",
+            email="foreign@example.com",
+            password_hash=hash_password("correct horse battery staple"),
+            project_id="p2",
+            email_verified_at=utcnow(),
+        )
+        session.add(foreign_user)
+        session.commit()
+        token = issue_access_token(foreign_user, settings)
+        run_id = run.id
+
+    def override_get_db():
+        session = TestSession()
+        try:
+            yield session
+        finally:
+            session.close()
+
+    previous = app.dependency_overrides.get(get_db)
+    app.dependency_overrides[get_db] = override_get_db
+    try:
+        with TestClient(app) as client:
+            response = client.get(
+                f"/api/v1/runs/{run_id}",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+    finally:
+        if previous is None:
+            app.dependency_overrides.pop(get_db, None)
+        else:
+            app.dependency_overrides[get_db] = previous
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Run access denied"
 
 
 def test_concurrent_claim_has_single_winner(tmp_path: Path):
