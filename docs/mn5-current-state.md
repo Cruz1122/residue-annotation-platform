@@ -169,7 +169,11 @@ real de ingesta del backend (`SSHStageExecutor._consume_annotation_file`) cargó
 esas 860 filas en una base SQLite temporal y produjo 860 registros en
 `annotation_protein_identity`, con cobertura `1..860`. Esta evidencia prueba un
 stage real y su forma de ingesta, pero no el submit/poll de Slurm, la ejecución
-completa ni la equivalencia científica del benchmark.
+completa ni la equivalencia científica del benchmark. Como comprobación de
+integridad del conjunto, un snapshot posterior leyó 16 archivos explícitos
+(`DONE`, manifest, provenance, annotations y los 12 artefactos); todos
+quedaron `VERIFIED_READ`, sin fallos, y cada tamaño/hash coincidió con el
+manifest remoto.
 
 Como control, `benchmarks/all_stages_47069621/config.json` declara otra corrida
 finalizada, pero su `stages.tsv` de 51 bytes contiene sólo el encabezado; se
