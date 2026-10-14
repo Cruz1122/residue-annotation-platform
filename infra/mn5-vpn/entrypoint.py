@@ -49,6 +49,8 @@ def main() -> int:
         os.environ.get("HPC_VPN_PASSWORD_FILE", "/run/secrets/hpc_vpn_password")
     )
     password_available = _private_nonempty_file(password_file, "VPN password file")
+    if config.is_symlink():
+        raise SystemExit("VPN config file must not be a symlink")
     config_available = _regular_file(config)
     config_contains_credentials = config_available and _config_contains_password(config)
     if config_contains_credentials:

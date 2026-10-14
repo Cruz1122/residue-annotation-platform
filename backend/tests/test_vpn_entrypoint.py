@@ -28,14 +28,29 @@ def test_vpn_config_with_credentials_requires_private_mode(tmp_path: Path, monke
         entrypoint.main()
 
 
+def test_vpn_config_symlink_is_rejected_with_external_password(tmp_path: Path, monkeypatch):
+    entrypoint = _load_entrypoint()
+    target = tmp_path / "openfortivpn.conf"
+    target.write_text("password=not-for-logs\n", encoding="utf-8")
+    target.chmod(0o644)
+    config = tmp_path / "config-link"
+    config.symlink_to(target)
+    password = tmp_path / "vpn-password"
+    password.write_text("secret\n", encoding="utf-8")
+    password.chmod(0o600)
+    monkeypatch.setattr(entrypoint.shutil, "which", lambda _name: "/usr/bin/openfortivpn")
+    monkeypatch.setenv("HPC_VPN_CONFIG_FILE", str(config))
+    monkeypatch.setenv("HPC_VPN_PASSWORD_FILE", str(password))
+
+    with pytest.raises(SystemExit, match="must not be a symlink"):
+        entrypoint.main()
+
+
 def test_vpn_password_file_builds_non_interactive_command(tmp_path: Path, monkeypatch):
     entrypoint = _load_entrypoint()
     password = tmp_path / "vpn-password"
     password.write_text("secret\n", encoding="utf-8")
     password.chmod(0o600)
-    config = tmp_path / "empty-config"
-    config.write_text("# no credential\n", encoding="utf-8")
-    config.chmod(0o600)
     command: list[str] = []
 
     def fake_execv(_binary: str, argv: list[str]) -> None:
@@ -44,7 +59,7 @@ def test_vpn_password_file_builds_non_interactive_command(tmp_path: Path, monkey
 
     monkeypatch.setattr(entrypoint.shutil, "which", lambda _name: "/usr/bin/openfortivpn")
     monkeypatch.setattr(os, "execv", fake_execv)
-    monkeypatch.setenv("HPC_VPN_CONFIG_FILE", str(config))
+    monkeypatch.setenv("HPC_VPN_CONFIG_FILE", "/dev/null")
     monkeypatch.setenv("HPC_VPN_PASSWORD_FILE", str(password))
     monkeypatch.setenv("HPC_VPN_HOST", "gw.bsc.es")
     monkeypatch.setenv("HPC_VPN_PORT", "443")
@@ -57,9 +72,10 @@ def test_vpn_password_file_builds_non_interactive_command(tmp_path: Path, monkey
     assert command[:5] == [
         "/usr/bin/openfortivpn",
         "--config",
-        str(config),
+        "/dev/null",
         "gw.bsc.es:443",
         "--username",
     ]
     assert "--pinentry" in command
     assert str(password) not in command
+    assert "secret" not in command
