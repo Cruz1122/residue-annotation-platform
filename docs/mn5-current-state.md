@@ -164,10 +164,12 @@ SHA-256 `a5c4dcfa102171bde737bedd8a6c9ba31d76c927c88e97c3458d7c5cb3d32c3c`),
 tabla contiene 860 filas de `P01130` con cobertura exacta `1..860`; el
 `aa_ref` coincide con la secuencia canónica de longitud 860 y la identidad
 reporta el mismo SHA-256 de secuencia
-`36a68c5510827c435b046def3dd5413c4715085cfdc1fdcb4b05a83e805ef3a2`. El
-parser local de anotaciones aceptó las 860 filas. Esta evidencia prueba un
-stage real y su forma de ingesta, pero no la ejecución completa ni la
-equivalencia científica del benchmark.
+`36a68c5510827c435b046def3dd5413c4715085cfdc1fdcb4b05a83e805ef3a2`. La ruta
+real de ingesta del backend (`SSHStageExecutor._consume_annotation_file`) cargó
+esas 860 filas en una base SQLite temporal y produjo 860 registros en
+`annotation_protein_identity`, con cobertura `1..860`. Esta evidencia prueba un
+stage real y su forma de ingesta, pero no el submit/poll de Slurm, la ejecución
+completa ni la equivalencia científica del benchmark.
 
 Como control, `benchmarks/all_stages_47069621/config.json` declara otra corrida
 finalizada, pero su `stages.tsv` de 51 bytes contiene sólo el encabezado; se
