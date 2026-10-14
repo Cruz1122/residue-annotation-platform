@@ -180,6 +180,18 @@ en la tabla del stage y `provenance.source=mn5-slurm` en una base SQLite
 temporal. Eso valida la publicación local del resultado real, pero no el
 submit/poll del worker contra SSH/Slurm.
 
+Como segundo control de integración se inspeccionó el resultado exitoso de
+`variant_predictors` del mismo benchmark. El snapshot SFTP verificó ocho
+archivos explícitos (`DONE`, manifest, provenance, annotations y cuatro
+artefactos), sin fallos y con hashes/tamaños consistentes con el manifest. La
+tabla real de `P01130` contiene 860 filas `1..860`, `aa_ref` concordante y las
+columnas contractuales `alphamissense_mean`, `alphamissense_max`,
+`cadd_phred_mean` y `revel_mean`; `validate_remote_manifest` la aceptó. La ruta
+productiva `_ingest_result`, reproducida localmente sobre esos bytes, publicó
+cinco artefactos y 860 filas en SQLite temporal. Esto prueba un stage
+dependiente y su contrato de columnas, pero no el rollout de los 18 stages ni
+la equivalencia del benchmark completo.
+
 Como control, `benchmarks/all_stages_47069621/config.json` declara otra corrida
 finalizada, pero su `stages.tsv` de 51 bytes contiene sólo el encabezado; se
 clasifica como evidencia incompleta, no como resultado científico. No se
