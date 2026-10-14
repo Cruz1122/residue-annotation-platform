@@ -59,33 +59,53 @@ def _validate_pdb(text: str) -> None:
 
 def _validate_mmcif(text: str) -> None:
     lines = text.splitlines()
-    try:
-        loop_index = next(
-            index for index, line in enumerate(lines) if line.strip().lower() == "loop_"
-        )
-    except StopIteration as exc:
-        raise UploadValidationError("mmCIF upload has no atom_site loop") from exc
+    fields: list[str] | None = None
+    data_start = 0
+    index = 0
+    while index < len(lines):
+        if lines[index].strip().lower() != "loop_":
+            index += 1
+            continue
+        candidate_fields: list[str] = []
+        candidate_start = index + 1
+        cursor = candidate_start
+        while cursor < len(lines):
+            stripped = lines[cursor].strip()
+            if not stripped or stripped.startswith("#"):
+                cursor += 1
+                continue
+            if not stripped.startswith("_"):
+                break
+            candidate_fields.append(stripped.split()[0])
+            cursor += 1
+        if any(field.lower().startswith("_atom_site.") for field in candidate_fields):
+            fields = candidate_fields
+            data_start = cursor
+            break
+        index = cursor
 
-    fields: list[str] = []
-    data_start = loop_index + 1
-    for index in range(data_start, len(lines)):
-        stripped = lines[index].strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        if stripped.startswith("_"):
-            fields.append(stripped.split()[0])
-            continue
-        data_start = index
-        break
-    required = {
-        "_atom_site.label_atom_id",
-        "_atom_site.label_comp_id",
-        "_atom_site.label_seq_id",
-        "_atom_site.Cartn_x",
-        "_atom_site.Cartn_y",
-        "_atom_site.Cartn_z",
-    }
-    if not required.issubset(fields):
+    if not fields:
+        raise UploadValidationError("mmCIF upload has no atom_site loop")
+
+    field_indexes = {field.lower(): position for position, field in enumerate(fields)}
+
+    def first_index(*names: str) -> int | None:
+        for name in names:
+            position = field_indexes.get(name.lower())
+            if position is not None:
+                return position
+        return None
+
+    atom_name_index = first_index("_atom_site.label_atom_id", "_atom_site.auth_atom_id")
+    residue_name_index = first_index("_atom_site.label_comp_id", "_atom_site.auth_comp_id")
+    sequence_index = first_index("_atom_site.label_seq_id", "_atom_site.auth_seq_id")
+    coordinate_indexes = tuple(first_index(f"_atom_site.Cartn_{axis}") for axis in ("x", "y", "z"))
+    if (
+        atom_name_index is None
+        or residue_name_index is None
+        or sequence_index is None
+        or any(position is None for position in coordinate_indexes)
+    ):
         raise UploadValidationError("mmCIF upload lacks required atom_site columns")
 
     tokens: list[str] = []
@@ -103,21 +123,21 @@ def _validate_mmcif(text: str) -> None:
             raise UploadValidationError("mmCIF upload contains invalid quoting") from exc
 
     field_count = len(fields)
-    if field_count == 0 or len(tokens) < field_count:
+    if field_count == 0 or len(tokens) < field_count or len(tokens) % field_count:
         raise UploadValidationError("mmCIF upload has no atom records")
-    indexes = {field: fields.index(field) for field in required}
     atom_records = 0
     for offset in range(0, len(tokens) - field_count + 1, field_count):
         row = tokens[offset : offset + field_count]
         try:
-            if row[indexes["_atom_site.label_atom_id"]] in {".", "?"}:
+            if row[atom_name_index] in {".", "?"}:
                 raise ValueError("missing atom name")
-            if row[indexes["_atom_site.label_comp_id"]] in {".", "?"}:
+            if row[residue_name_index] in {".", "?"}:
                 raise ValueError("missing residue name")
-            int(row[indexes["_atom_site.label_seq_id"]])
-            _parse_float(row[indexes["_atom_site.Cartn_x"]])
-            _parse_float(row[indexes["_atom_site.Cartn_y"]])
-            _parse_float(row[indexes["_atom_site.Cartn_z"]])
+            sequence = row[sequence_index]
+            if sequence not in {".", "?"}:
+                int(sequence)
+            for coordinate_index in coordinate_indexes:
+                _parse_float(row[coordinate_index])
         except (IndexError, TypeError, ValueError) as exc:
             raise UploadValidationError("invalid mmCIF atom record") from exc
         atom_records += 1

@@ -107,6 +107,37 @@ ATOM 1 N N ALA A 1 11.104 13.207 14.456
         validate_upload_bytes(b"not an mmCIF document", "structure", "model.cif", settings)
 
 
+def test_mmcif_validation_finds_atom_site_loop_after_metadata_loops():
+    from app.core.config import Settings
+
+    valid_mmcif = b"""data_example
+#
+loop_
+_audit_author.name
+_audit_author.ordinal
+"Example" 1
+#
+loop_
+_atom_site.group_PDB
+_atom_site.id
+_atom_site.type_symbol
+_atom_site.label_atom_id
+_atom_site.label_alt_id
+_atom_site.label_comp_id
+_atom_site.label_asym_id
+_atom_site.label_entity_id
+_atom_site.label_seq_id
+_atom_site.pdbx_PDB_ins_code
+_atom_site.Cartn_x
+_atom_site.Cartn_y
+_atom_site.Cartn_z
+ATOM 1 N N . ALA A 1 1 ? 11.104 13.207 14.456
+#
+"""
+
+    validate_upload_bytes(valid_mmcif, "structure", "model.cif", Settings())
+
+
 def test_structure_upload_content_is_limited_to_the_owner(client):
     payload = (
         b"ATOM      1  N   ALA A   1      11.104  13.207  14.456  1.00 20.00           N  \nEND\n"
