@@ -1,4 +1,5 @@
 import hashlib
+import os
 
 import pytest
 from app.features.artifacts.storage import ArtifactIntegrityError, ArtifactStore
@@ -122,6 +123,20 @@ def test_verified_artifact_stream_uses_the_hashed_descriptor(tmp_path):
             size=4,
             sha256=hashlib.sha256(b"tampered").hexdigest(),
         )
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="named pipes are not supported")
+def test_verified_artifact_stream_rejects_special_files(tmp_path):
+    from app.core.config import Settings
+    from app.features.artifacts.storage import ArtifactPathError
+
+    stored = tmp_path / "artifacts" / "artifact" / "pipe"
+    stored.parent.mkdir(parents=True, exist_ok=True)
+    os.mkfifo(stored)
+    store = ArtifactStore(Settings(artifact_root=tmp_path / "artifacts"))
+
+    with pytest.raises(ArtifactPathError):
+        store.open_verified("artifact/pipe", size=0, sha256=hashlib.sha256(b"").hexdigest())
 
 
 def test_artifact_metadata_never_exposes_storage_or_gpfs_paths(client, session):

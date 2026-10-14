@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import stat
 from collections.abc import Iterator
 from pathlib import Path
 from typing import BinaryIO
@@ -74,11 +75,20 @@ class ArtifactStore:
         flags = os.O_RDONLY
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
+        if hasattr(os, "O_NONBLOCK"):
+            flags |= os.O_NONBLOCK
         descriptor = os.open(path, flags)
+        stream: BinaryIO | None = None
         try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise ArtifactPathError("artifact is not a regular file")
             stream = os.fdopen(descriptor, "rb")
+            descriptor = -1
         except Exception:
-            os.close(descriptor)
+            if stream is not None:
+                stream.close()
+            elif descriptor != -1:
+                os.close(descriptor)
             raise
         try:
             descriptor_size = stream.seek(0, 2)
