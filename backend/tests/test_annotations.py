@@ -431,7 +431,7 @@ def test_stale_cache_entry_is_purged_and_republished(client, session, tmp_path: 
 
 @pytest.mark.parametrize(
     "failure_mode",
-    ["download", "provenance_hash", "provenance_json", "missing_provenance"],
+    ["download", "provenance_hash", "provenance_json"],
 )
 def test_failed_republish_restores_stale_cache_row_and_files(
     client, session, tmp_path: Path, monkeypatch, failure_mode: str
@@ -482,9 +482,6 @@ def test_failed_republish_restores_stale_cache_row_and_files(
         "annotations": {"sha256": "c" * 64, "size": 4},
         "provenance.json": provenance_record,
     }
-    if failure_mode == "missing_provenance":
-        file_integrity.pop("provenance.json")
-        expected_error = "provenance.json"
     manifest = {
         "schema": "stage-result-v1",
         "stage_id": "physicochemical_context",
@@ -530,5 +527,66 @@ def test_failed_republish_restores_stale_cache_row_and_files(
     session.expire_all()
     restored = session.get(StageResult, old_id)
     assert restored is not None
+    assert stale_path.read_bytes() == b"old"
+    assert "remote_executor.deferred_artifact_cleanup" not in session.info
+
+
+def test_missing_provenance_rejects_before_stale_cache_purge(client, session, tmp_path: Path):
+    stage = _stage_for_consumer(session, client, "physicochemical_context")
+    result = session.get(StageResult, stage.stage_result_id)
+    assert result is not None
+    old_id = result.id
+    settings = Settings(
+        app_env="test",
+        database_url="sqlite://",
+        artifact_root=tmp_path / "artifacts",
+        hpc_remote_root="/gpfs/root",
+    )
+    stale_path = settings.artifact_root / "remote/stale/model.cif"
+    stale_path.parent.mkdir(parents=True, exist_ok=True)
+    stale_path.write_bytes(b"old")
+    session.add(
+        Artifact(
+            stage_result_id=result.id,
+            artifact_type="model",
+            storage_backend="filesystem",
+            storage_key="remote/stale/model.cif",
+            sha256="a" * 64,
+            size=3,
+        )
+    )
+    session.commit()
+
+    manifest = {
+        "schema": "stage-result-v1",
+        "stage_id": "physicochemical_context",
+        "status": "success",
+        "cache_key": result.cache_key,
+        "annotations": "rows.tsv",
+        "artifacts": {"model": {"path": "model.cif", "sha256": "b" * 64, "size": 4}},
+        "file_integrity": {"annotations": {"sha256": "c" * 64, "size": 4}},
+    }
+
+    class _FakeClient:
+        def read_text(self, remote_path: str, max_bytes: int) -> str:
+            if remote_path.endswith(".result"):
+                return "/gpfs/root/runs/run-1"
+            if remote_path.endswith("run_context.json"):
+                return json.dumps({"stage_results": {}})
+            if remote_path.endswith("DONE"):
+                return "OK\n"
+            if remote_path.endswith("result_manifest.json"):
+                return json.dumps(manifest)
+            raise RuntimeError(f"unexpected read: {remote_path}")
+
+    executor = SSHStageExecutor.__new__(SSHStageExecutor)
+    executor.settings = settings
+    executor.client = _FakeClient()
+
+    with pytest.raises(RemoteStageExecutionError, match="provenance.json"):
+        executor._ingest_result(session, stage)
+
+    session.expire_all()
+    assert session.get(StageResult, old_id) is not None
     assert stale_path.read_bytes() == b"old"
     assert "remote_executor.deferred_artifact_cleanup" not in session.info
