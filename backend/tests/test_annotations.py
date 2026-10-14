@@ -429,8 +429,12 @@ def test_stale_cache_entry_is_purged_and_republished(client, session, tmp_path: 
     assert remaining[0].id == new_id
 
 
+@pytest.mark.parametrize(
+    "failure_mode",
+    ["download", "provenance_hash", "provenance_json", "missing_provenance"],
+)
 def test_failed_republish_restores_stale_cache_row_and_files(
-    client, session, tmp_path: Path, monkeypatch
+    client, session, tmp_path: Path, monkeypatch, failure_mode: str
 ):
     stage = _stage_for_consumer(session, client, "physicochemical_context")
     result = session.get(StageResult, stage.stage_result_id)
@@ -457,6 +461,46 @@ def test_failed_republish_restores_stale_cache_row_and_files(
     )
     session.commit()
 
+    provenance_text = "{}"
+    provenance_record = {
+        "sha256": hashlib.sha256(provenance_text.encode()).hexdigest(),
+        "size": len(provenance_text.encode()),
+    }
+    expected_error = "simulated publication failure"
+    if failure_mode == "provenance_hash":
+        provenance_record["sha256"] = "b" * 64
+        expected_error = "remote provenance does not match"
+    elif failure_mode == "provenance_json":
+        provenance_text = "not-json"
+        provenance_record = {
+            "sha256": hashlib.sha256(provenance_text.encode()).hexdigest(),
+            "size": len(provenance_text.encode()),
+        }
+        expected_error = "remote provenance is unreadable"
+
+    file_integrity = {
+        "annotations": {"sha256": "c" * 64, "size": 4},
+        "provenance.json": provenance_record,
+    }
+    if failure_mode == "missing_provenance":
+        file_integrity.pop("provenance.json")
+        expected_error = "provenance.json"
+    manifest = {
+        "schema": "stage-result-v1",
+        "stage_id": "physicochemical_context",
+        "status": "success",
+        "cache_key": result.cache_key,
+        "annotations": "rows.tsv",
+        "artifacts": {
+            "model": {
+                "path": "model.cif",
+                "sha256": "b" * 64,
+                "size": 4,
+            }
+        },
+        "file_integrity": file_integrity,
+    }
+
     class _FakeClient:
         def read_text(self, remote_path: str, max_bytes: int) -> str:
             if remote_path.endswith(".result"):
@@ -466,31 +510,9 @@ def test_failed_republish_restores_stale_cache_row_and_files(
             if remote_path.endswith("DONE"):
                 return "OK\n"
             if remote_path.endswith("result_manifest.json"):
-                return json.dumps(
-                    {
-                        "schema": "stage-result-v1",
-                        "stage_id": "physicochemical_context",
-                        "status": "success",
-                        "cache_key": result.cache_key,
-                        "annotations": "rows.tsv",
-                        "artifacts": {
-                            "model": {
-                                "path": "model.cif",
-                                "sha256": "b" * 64,
-                                "size": 4,
-                            }
-                        },
-                        "file_integrity": {
-                            "annotations": {"sha256": "c" * 64, "size": 4},
-                            "provenance.json": {
-                                "sha256": hashlib.sha256(b"{}").hexdigest(),
-                                "size": 2,
-                            },
-                        },
-                    }
-                )
+                return json.dumps(manifest)
             if remote_path.endswith("provenance.json"):
-                return "{}"
+                return provenance_text
             raise RuntimeError(f"unexpected read: {remote_path}")
 
     executor = SSHStageExecutor.__new__(SSHStageExecutor)
@@ -500,11 +522,13 @@ def test_failed_republish_restores_stale_cache_row_and_files(
     def fail_download(*_args, **_kwargs):
         raise RemoteStageExecutionError("simulated publication failure")
 
-    monkeypatch.setattr(executor, "_download_remote_file", fail_download)
-    with pytest.raises(RemoteStageExecutionError, match="simulated publication failure"):
+    if failure_mode == "download":
+        monkeypatch.setattr(executor, "_download_remote_file", fail_download)
+    with pytest.raises(RemoteStageExecutionError, match=expected_error):
         executor._ingest_result(session, stage)
 
     session.expire_all()
     restored = session.get(StageResult, old_id)
     assert restored is not None
     assert stale_path.read_bytes() == b"old"
+    assert "remote_executor.deferred_artifact_cleanup" not in session.info

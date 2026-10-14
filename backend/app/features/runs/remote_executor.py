@@ -437,39 +437,43 @@ class SSHStageExecutor:
         reusable = self._find_reusable_result(session, stage, cache_key, store)
         if reusable is not None:
             return reusable.id, True
-        self._purge_stale_results(session, stage, cache_key)
-
-        annotations_relative = str(manifest["annotations"])
-        annotations_path = self._remote_child(result_dir, annotations_relative)
-
-        try:
-            provenance_record = manifest["file_integrity"]["provenance.json"]
-            provenance_text = self.client.read_text(
-                self._remote_child(result_dir, "provenance.json"),
-                self.settings.hpc_max_result_bytes,
-            )
-            provenance_bytes = provenance_text.encode("utf-8")
-        except (UnicodeError, RuntimeError) as exc:
-            raise RemoteStageExecutionError("remote provenance is unreadable") from exc
-        if (
-            len(provenance_bytes) != provenance_record["size"]
-            or hashlib.sha256(provenance_bytes).hexdigest() != provenance_record["sha256"]
-        ):
-            raise RemoteStageExecutionError("remote provenance does not match its manifest")
-        try:
-            provenance = json.loads(provenance_text)
-        except json.JSONDecodeError as exc:
-            raise RemoteStageExecutionError("remote provenance is unreadable") from exc
-        if not isinstance(provenance, dict):
-            raise RemoteStageExecutionError("remote provenance must be an object")
-
         stored_keys: list[str] = []
-        # Each ingest attempt owns a distinct namespace. If a stale worker
-        # loses a database race, its rollback cleanup cannot remove files that
-        # another worker has already published successfully.
-        ingest_namespace = uuid4().hex
-        storage_prefix = f"remote/{stage.run_id}/{stage.stage_id}/{ingest_namespace}"
         try:
+            # Keep the stale-row purge in the same rollback boundary as every
+            # validation and download step. A bad provenance file must not
+            # become a committed deletion when poll_stage marks the stage
+            # failed afterward.
+            self._purge_stale_results(session, stage, cache_key)
+
+            annotations_relative = str(manifest["annotations"])
+            annotations_path = self._remote_child(result_dir, annotations_relative)
+
+            try:
+                provenance_record = manifest["file_integrity"]["provenance.json"]
+                provenance_text = self.client.read_text(
+                    self._remote_child(result_dir, "provenance.json"),
+                    self.settings.hpc_max_result_bytes,
+                )
+                provenance_bytes = provenance_text.encode("utf-8")
+            except (KeyError, TypeError, UnicodeError, RuntimeError) as exc:
+                raise RemoteStageExecutionError("remote provenance is unreadable") from exc
+            if (
+                len(provenance_bytes) != provenance_record["size"]
+                or hashlib.sha256(provenance_bytes).hexdigest() != provenance_record["sha256"]
+            ):
+                raise RemoteStageExecutionError("remote provenance does not match its manifest")
+            try:
+                provenance = json.loads(provenance_text)
+            except json.JSONDecodeError as exc:
+                raise RemoteStageExecutionError("remote provenance is unreadable") from exc
+            if not isinstance(provenance, dict):
+                raise RemoteStageExecutionError("remote provenance must be an object")
+
+            # Each ingest attempt owns a distinct namespace. If a stale worker
+            # loses a database race, its rollback cleanup cannot remove files that
+            # another worker has already published successfully.
+            ingest_namespace = uuid4().hex
+            storage_prefix = f"remote/{stage.run_id}/{stage.stage_id}/{ingest_namespace}"
             annotation_integrity = manifest.get("file_integrity", {}).get("annotations", {})
             annotation_key, annotation_size, annotation_sha = self._download_remote_file(
                 store,
