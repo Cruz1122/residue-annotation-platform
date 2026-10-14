@@ -313,30 +313,49 @@ class InMemoryReadOnlyInspector:
         if max_preview_bytes < 1:
             raise ValueError("max_preview_bytes must be positive")
         self.files = {str(validate_relative_path(path)): value for path, value in files.items()}
+        self.directories: set[str] = set()
+        for path in self.files:
+            parent = PurePosixPath(path).parent
+            while str(parent) != ".":
+                self.directories.add(str(parent))
+                parent = parent.parent
         self.max_entries = max_entries
         self.max_preview_bytes = max_preview_bytes
 
     def list(self, relative_dir: str = "") -> list[InspectionEntry]:
         if relative_dir:
             validate_relative_path(relative_dir)
-        prefix = f"{relative_dir.rstrip('/')}/" if relative_dir else ""
-        entries = []
+        base = PurePosixPath(relative_dir) if relative_dir else PurePosixPath()
+        children: dict[str, InspectionEntry] = {}
         for path, value in self.files.items():
-            if not path.startswith(prefix):
+            candidate = PurePosixPath(path)
+            try:
+                remaining = candidate.relative_to(base)
+            except ValueError:
                 continue
-            entries.append(InspectionEntry(path, len(value), False))
-            if len(entries) > self.max_entries:
-                raise InspectionError("directory listing exceeds configured limit")
+            if not remaining.parts:
+                continue
+            child_name = remaining.parts[0]
+            child_path = str(base / child_name) if relative_dir else child_name
+            if len(remaining.parts) == 1:
+                children[child_path] = InspectionEntry(child_path, len(value), False)
+            else:
+                children[child_path] = InspectionEntry(child_path, 0, True)
+        if len(children) > self.max_entries:
+            raise InspectionError("directory listing exceeds configured limit")
+        if relative_dir and relative_dir not in self.directories:
+            raise InspectionError("not a directory")
+        entries = list(children.values())
         entries.sort(key=lambda item: item.path)
         return entries
 
     def stat(self, relative_path: str) -> InspectionEntry:
-        validate_relative_path(relative_path)
-        try:
-            value = self.files[relative_path]
-        except KeyError as exc:
-            raise InspectionError("file not found") from exc
-        return InspectionEntry(relative_path, len(value), False)
+        normalized = str(validate_relative_path(relative_path))
+        if normalized in self.files:
+            return InspectionEntry(normalized, len(self.files[normalized]), False)
+        if normalized in self.directories:
+            return InspectionEntry(normalized, 0, True)
+        raise InspectionError("file not found")
 
     def read_preview(self, relative_path: str, limit: int) -> bytes:
         if limit < 1 or limit > self.max_preview_bytes:

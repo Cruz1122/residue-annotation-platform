@@ -165,6 +165,17 @@ def test_in_memory_read_only_inspector_applies_same_bounds():
         inspector.read_preview("one.txt", 3)
 
 
+def test_in_memory_read_only_inspector_lists_direct_children_and_stats_directories():
+    inspector = InMemoryReadOnlyInspector(
+        {"root.txt": b"root", "nested/one.txt": b"one", "nested/deep/two.txt": b"two"}
+    )
+
+    assert [entry.path for entry in inspector.list()] == ["nested", "root.txt"]
+    assert [entry.path for entry in inspector.list("nested")] == ["nested/deep", "nested/one.txt"]
+    assert inspector.stat("nested").is_directory is True
+    assert inspector.stat("nested/deep").is_directory is True
+
+
 @pytest.mark.parametrize("relative_path", ["payload.bin", "private-key.txt", "password.txt"])
 def test_read_only_inspector_rejects_binary_and_sensitive_previews(
     tmp_path: Path, relative_path: str
