@@ -217,7 +217,9 @@ class SFTPReadOnlyInspector:
             remote_dir = self._remote(relative_dir)
             self._assert_safe(sftp, str(self.root), remote_dir)
             entries = []
-            for attr in sorted(sftp.listdir_attr(remote_dir), key=lambda item: item.filename):
+            for index, attr in enumerate(sftp.listdir_iter(remote_dir, read_aheads=16)):
+                if index >= self.settings.mn5_max_entries:
+                    raise InspectionError("directory listing exceeds configured limit")
                 if attr.filename.startswith("."):
                     continue
                 if stat.S_ISLNK(attr.st_mode):

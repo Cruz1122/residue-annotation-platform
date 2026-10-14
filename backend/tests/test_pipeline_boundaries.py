@@ -170,6 +170,10 @@ class _FakeSFTPInspectorTransport:
             SimpleNamespace(filename="link.txt", st_mode=stat.S_IFLNK | 0o777, st_size=0),
         ]
 
+    def listdir_iter(self, path: str, read_aheads: int):
+        assert read_aheads == 16
+        yield from self.listdir_attr(path)
+
     def open(self, path: str, _mode: str):
         return io.BytesIO(self.files[path])
 
@@ -260,6 +264,19 @@ def test_sftp_read_only_inspector_rejects_symlink_and_preview_over_limit(
         inspector.read_preview("docs.txt", settings.mn5_max_preview_bytes + 1)
     with pytest.raises(InspectionError):
         inspector.read_preview("payload.bin", 4)
+
+
+def test_sftp_read_only_inspector_bounds_directory_listing(tmp_path: Path, monkeypatch):
+    import app.infrastructure.hpc.readonly as readonly_module
+
+    settings, _password = _sftp_inspector_settings(tmp_path, mn5_max_entries=1)
+    transport = _FakeSFTPInspectorTransport(AUTHORIZED_MN5_ROOT)
+    ssh = _FakeSSHInspectorTransport(transport)
+    monkeypatch.setattr(readonly_module.paramiko, "SSHClient", lambda: ssh)
+
+    inspector = SFTPReadOnlyInspector(settings)
+    with pytest.raises(InspectionError, match="listing exceeds"):
+        inspector.list()
 
 
 def test_sftp_read_only_inspector_sanitizes_remote_io_errors(tmp_path: Path, monkeypatch):

@@ -89,7 +89,9 @@ scientific/text suffixes (`.pdb`, `.cif`, `.mmcif`, `.tsv`, `.csv`, `.json`,
 `.fasta`, `.fa`, `.faa`, `.txt`, `.log`, `.md`) are accepted; dotfiles,
 secret-like names, binary files, special files, symlinks, traversal, backslash,
 percent-encoded, control-character, and duplicated-separator paths are
-rejected before any remote file is opened.
+rejected before any remote file is opened. Directory listings are non-recursive
+and bounded by `MN5_MAX_ENTRIES`; previews are bounded by
+`MN5_MAX_PREVIEW_BYTES`.
 
 For Windows development, validate the host VPN route and whether Docker/WSL2
 can reach the approved SSH endpoint before enabling the SSH Compose overlay.

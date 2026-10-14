@@ -79,6 +79,7 @@ class Settings(BaseSettings):
     mn5_inspection_mode: Literal["disabled", "mock", "ssh_sftp", "native"] = "disabled"
     mn5_inspection_enabled: bool = False
     mn5_root: str = "/gpfs/projects/bsc08/bsc001997/vcfs_1000geno/hilo_integrado_anotacion"
+    mn5_max_entries: int = Field(default=100, ge=1, le=10_000)
     mn5_max_preview_bytes: int = Field(default=64_000, ge=1)
 
     @property
