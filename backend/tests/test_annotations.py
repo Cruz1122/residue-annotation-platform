@@ -172,7 +172,9 @@ def test_annotation_consumer_rejects_duplicate_positions(client, session, tmp_pa
     stage = _stage_for_consumer(session, client)
     annotations = tmp_path / "rows.tsv"
     annotations.write_text(
-        "aa_position\taa_ref\tscore\n1\tA\t0.1\n1\tA\t0.2\n",
+        f"protein_id\taa_position\taa_ref\tscore\n"
+        f"{stage.run.protein_id}\t1\tA\t0.1\n"
+        f"{stage.run.protein_id}\t1\tA\t0.2\n",
         encoding="utf-8",
     )
 
@@ -189,7 +191,7 @@ def test_annotation_consumer_rejects_reference_mismatch(client, session, tmp_pat
     stage = _stage_for_consumer(session, client)
     annotations = tmp_path / "rows.tsv"
     annotations.write_text(
-        "aa_position\taa_ref\tscore\n1\tY\t0.1\n",
+        f"protein_id\taa_position\taa_ref\tscore\n{stage.run.protein_id}\t1\tY\t0.1\n",
         encoding="utf-8",
     )
 
@@ -206,7 +208,7 @@ def test_annotation_consumer_requires_full_coverage_for_identity(client, session
     stage = _stage_for_consumer(session, client)
     annotations = tmp_path / "rows.tsv"
     annotations.write_text(
-        "aa_position\taa_ref\tscore\n1\tA\t0.1\n",
+        f"protein_id\taa_position\taa_ref\tscore\n{stage.run.protein_id}\t1\tA\t0.1\n",
         encoding="utf-8",
     )
 
@@ -220,7 +222,9 @@ def test_annotation_consumer_requires_full_coverage_for_identity(client, session
 
 
 def test_parse_annotation_rows_accepts_valid_tsv():
-    rows = _parse_annotation_rows("aa_position\taa_ref\tscore\n1\tA\t0.5\n2\tC\t0.7\n")
+    rows = _parse_annotation_rows(
+        "protein_id\taa_position\taa_ref\tscore\nP00001\t1\tA\t0.5\nP00001\t2\tC\t0.7\n"
+    )
 
     assert [row["aa_position"] for row in rows] == [1, 2]
     assert rows[0]["values"] == {"score": "0.5"}
@@ -357,9 +361,10 @@ def test_stale_cache_entry_is_purged_and_republished(client, session, tmp_path: 
     )
     session.commit()
     annotations = (
-        b"aa_position\taa_ref\tsecondary_structure\tburied_status\n"
-        b"1\tA\tH\tburied\n2\tC\tC\texposed\n"
-    )
+        f"protein_id\taa_position\taa_ref\tsecondary_structure\tburied_status\n"
+        f"{stage.run.protein_id}\t1\tA\tH\tburied\n"
+        f"{stage.run.protein_id}\t2\tC\tC\texposed\n"
+    ).encode()
     artifact_payload = b"data"
     manifest = {
         "schema": "stage-result-v1",

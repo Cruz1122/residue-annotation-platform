@@ -524,12 +524,25 @@ class SSHStageExecutor:
         stage_result_id: str,
     ) -> None:
         sequence = stage.run.protein.sequence
+        accepted_protein_ids = {stage.run.protein_id}
+        try:
+            accepted_protein_ids.add(self._accession(stage.run))
+        except RemoteStageExecutionError:
+            # A remote submit would already require an accession. Keeping the
+            # local id here also makes this validator safe for direct unit
+            # tests and for future native adapters with a different identity
+            # resolver.
+            pass
         positions: set[int] = set()
         batch: list[dict[str, object]] = []
         total_rows = 0
         required_fields = STAGE_BY_ID[stage.stage_id].produced_annotations
         with local_path.open("r", encoding="utf-8", newline="") as stream:
             for row in _iter_annotation_rows(stream, required_fields=required_fields):
+                if str(row["protein_id"]).strip() not in accepted_protein_ids:
+                    raise RemoteStageExecutionError(
+                        "remote annotation protein_id does not match the requested protein"
+                    )
                 position = int(str(row["aa_position"]))
                 if position < 1 or position > len(sequence):
                     raise RemoteStageExecutionError(
@@ -553,11 +566,15 @@ class SSHStageExecutor:
             insert_annotation_rows(session, stage.stage_id, stage_result_id, batch)
         if total_rows == 0:
             raise RemoteStageExecutionError("remote annotations are empty")
-        if stage.stage_id == "protein_identity":
-            if positions != set(range(1, len(sequence) + 1)) or total_rows != len(sequence):
-                raise RemoteStageExecutionError(
-                    "protein_identity result does not cover the canonical sequence"
-                )
+        # ``protein_identity`` is the canonical sequence source and must cover
+        # every residue. Other stages may legitimately publish a sparse table
+        # when their scientific contract has no evidence for part of a
+        # sequence; those missing values remain distinguishable from zero in
+        # the product API.
+        if stage.stage_id == "protein_identity" and total_rows != len(sequence):
+            raise RemoteStageExecutionError(
+                "protein_identity result does not cover the canonical sequence"
+            )
 
     def _result_directory(self, run_dir: str, stage_id: str) -> str:
         context_path = self._remote_child(run_dir, "run_context.json")
@@ -640,8 +657,11 @@ def _iter_annotation_rows(
     required_fields: Iterable[str] = (),
 ) -> Iterator[dict[str, object]]:
     reader = csv.DictReader(stream, delimiter="\t")
-    if not reader.fieldnames or not {"aa_position", "aa_ref"}.issubset(reader.fieldnames):
-        raise RemoteStageExecutionError("remote annotations lack aa_position or aa_ref")
+    canonical_fields = {"protein_id", "aa_position", "aa_ref"}
+    if not reader.fieldnames or not canonical_fields.issubset(reader.fieldnames):
+        raise RemoteStageExecutionError(
+            "remote annotations lack canonical protein_id, aa_position or aa_ref"
+        )
     missing = set(required_fields).difference(reader.fieldnames)
     if missing:
         raise RemoteStageExecutionError(
@@ -663,10 +683,11 @@ def _iter_annotation_rows(
         values = {
             key: value
             for key, value in row.items()
-            if key not in {"aa_position", "aa_ref"} and value not in {None, ""}
+            if key not in {"protein_id", "aa_position", "aa_ref"} and value not in {None, ""}
         }
         source_row = "\t".join(str(row.get(field, "")) for field in fieldnames)
         yield {
+            "protein_id": str(row["protein_id"]).strip(),
             "aa_position": position,
             "aa_ref": aa_ref,
             "values": values,

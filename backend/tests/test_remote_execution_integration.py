@@ -22,9 +22,9 @@ class FakeCompletedRemote:
         self.job_id = "fake-slurm-101"
         self.requests: list[JobRequest] = []
         self.annotations = (
-            "aa_position\taa_ref\tgene\taccession\n"
+            "protein_id\taa_position\taa_ref\tgene\taccession\n"
             + "".join(
-                f"{position}\t{amino_acid}\tGENE1\tP00001\n"
+                f"P00001\t{position}\t{amino_acid}\tGENE1\tP00001\n"
                 for position, amino_acid in enumerate(SEQUENCE, start=1)
             )
         ).encode()
@@ -114,6 +114,27 @@ class FakeTamperedProvenanceRemote(FakeCompletedRemote):
         return super().read_text(remote_path, max_bytes)
 
 
+class FakeInvalidCanonicalAnnotationsRemote(FakeCompletedRemote):
+    def __init__(self, run_id: str, *, wrong_protein: bool = False):
+        super().__init__(run_id)
+        lines = self.annotations.splitlines()
+        if wrong_protein:
+            lines[1] = lines[1].replace(b"P00001\t1\tA", b"OTHER\t1\tA", 1)
+        else:
+            lines = lines[:-1]
+        self.annotations = b"\n".join(lines) + b"\n"
+
+    def read_text(self, remote_path: str, max_bytes: int) -> str:
+        if remote_path.endswith("result_manifest.json"):
+            manifest = json.loads(super().read_text(remote_path, max_bytes))
+            manifest["file_integrity"]["annotations"] = {
+                "sha256": hashlib.sha256(self.annotations).hexdigest(),
+                "size": len(self.annotations),
+            }
+            return json.dumps(manifest)
+        return super().read_text(remote_path, max_bytes)
+
+
 class FakeUnavailableRemote:
     def read_text(self, _remote_path: str, _max_bytes: int) -> str:
         raise RuntimeError("remote path /gpfs/private/secret is unavailable")
@@ -139,6 +160,62 @@ def test_remote_failure_message_redacts_untrusted_paths(tmp_path: Path):
     assert "/gpfs/" not in message
     assert "/scratch/" not in message
     assert "secret-value" not in message
+
+
+@pytest.mark.parametrize(
+    ("wrong_protein", "error_message"),
+    [
+        (True, "protein_id does not match"),
+        (False, "does not cover the canonical sequence"),
+    ],
+)
+def test_remote_annotations_require_identity_and_complete_coverage(
+    client,
+    session,
+    tmp_path: Path,
+    wrong_protein: bool,
+    error_message: str,
+):
+    protein = client.post(
+        "/api/v1/proteins",
+        json={
+            "sequence": SEQUENCE,
+            "aliases": [{"source": "uniprot", "identifier": "P00001"}],
+        },
+    )
+    assert protein.status_code == 201
+    created_run = client.post(
+        "/api/v1/runs",
+        json={"protein_id": protein.json()["id"]},
+    )
+    assert created_run.status_code == 201
+
+    settings = Settings(
+        app_env="test",
+        database_url="sqlite://",
+        artifact_root=tmp_path / "artifacts",
+        hpc_remote_root="/gpfs/test",
+    )
+    stage = claim_ready_stage(session, settings)
+    assert stage is not None
+    remote = FakeInvalidCanonicalAnnotationsRemote(
+        created_run.json()["id"],
+        wrong_protein=wrong_protein,
+    )
+    executor = SSHStageExecutor.__new__(SSHStageExecutor)
+    executor.settings = settings
+    executor.client = remote
+
+    executor.submit_stage(session, stage)
+    assert executor.poll_stage(session, stage) is True
+
+    session.expire_all()
+    persisted_stage = session.get(RunStage, stage.id)
+    assert persisted_stage is not None
+    assert persisted_stage.status == "failed"
+    assert persisted_stage.error_code == "remote_result_invalid"
+    assert error_message in (persisted_stage.error_message or "")
+    assert session.scalar(select(StageResult)) is None
 
 
 def test_submit_poll_and_ingest_persist_a_linked_stage_result(client, session, tmp_path: Path):
