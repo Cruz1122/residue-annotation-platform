@@ -30,6 +30,7 @@ from app.features.stages.registry import STAGE_BY_ID
 from app.infrastructure.hpc.base import JobRequest, JobState
 from app.infrastructure.hpc.factory import build_hpc_client
 from app.infrastructure.hpc.ssh import SSHConfigurationError, SSHSlurmClient, _remote_path_under
+from app.infrastructure.hpc.transfer import InputTransferError, remote_pipeline_input_path
 
 
 class RemoteStageExecutionError(RuntimeError):
@@ -109,6 +110,37 @@ class SSHStageExecutor:
             ]
         )
 
+    def _pipeline_input_environment(self, run: Run, accession: str) -> dict[str, str]:
+        environment: dict[str, str] = {}
+        variables = {"fasta": "PIPELINE_SELECTED_FASTA", "structure": "PIPELINE_SELECTED_PDB"}
+        for upload in run.uploads:
+            if upload.transfer_status != "uploaded":
+                continue
+            try:
+                expected_path = remote_pipeline_input_path(
+                    self.settings,
+                    accession,
+                    run.id,
+                    upload.id,
+                    Path(upload.original_filename).suffix.lower(),
+                    input_type=upload.input_type,
+                )
+            except InputTransferError as exc:
+                raise RemoteStageExecutionError(str(exc)) from exc
+            if upload.remote_path != expected_path:
+                raise RemoteStageExecutionError(
+                    f"uploaded {upload.input_type} input has an unexpected remote path"
+                )
+            variable = variables.get(upload.input_type)
+            if variable is None:
+                raise RemoteStageExecutionError("uploaded input type is invalid")
+            if variable in environment:
+                raise RemoteStageExecutionError(
+                    f"more than one uploaded {upload.input_type} input is attached"
+                )
+            environment[variable] = expected_path
+        return environment
+
     def _accession(self, run: Run) -> str:
         for identifier in run.protein.identifiers:
             source = identifier.source.lower()
@@ -134,6 +166,7 @@ class SSHStageExecutor:
             )
         run = stage.run
         accession = self._accession(run)
+        input_environment = self._pipeline_input_environment(run, accession)
         job_directory = self._job_directory(run.id)
         self.client.ensure_directory(job_directory)
         marker_path = self._marker_path(run.id, stage.stage_id)
@@ -143,7 +176,7 @@ class SSHStageExecutor:
             stage_id=stage.stage_id,
             command=("bash", "-lc", self._script(run, stage, accession, marker_path)),
             working_directory=self.root,
-            environment={"PYTHONUNBUFFERED": "1"},
+            environment={"PYTHONUNBUFFERED": "1", **input_environment},
             cpu=definition.cpu or 1,
             gpu=definition.gpu or 0,
             network=definition.network,

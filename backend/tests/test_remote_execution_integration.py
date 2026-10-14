@@ -8,6 +8,7 @@ from app.features.runs.models import Artifact, Run, RunStage, StageResult
 from app.features.runs.remote_executor import SSHStageExecutor
 from app.features.runs.worker_service import claim_ready_stage
 from app.infrastructure.hpc.base import JobHandle, JobRequest, JobState, JobStatus
+from app.infrastructure.hpc.transfer import remote_pipeline_input_path
 from sqlalchemy import select
 
 SEQUENCE = "ACDEFGHIKLMNPQRSTVWY"
@@ -170,6 +171,56 @@ def test_submit_poll_and_ingest_persist_a_linked_stage_result(client, session, t
     assert annotations[0]["aa_position"] == 1
     assert annotations[0]["aa_ref"] == "A"
     assert annotations[0]["values"] == {"gene": "GENE1", "accession": "P00001"}
+
+
+def test_remote_submit_selects_transferred_pipeline_inputs(client, session, tmp_path: Path):
+    protein = client.post(
+        "/api/v1/proteins",
+        json={
+            "sequence": SEQUENCE,
+            "aliases": [{"source": "uniprot", "identifier": "P00001"}],
+        },
+    )
+    assert protein.status_code == 201
+    upload = client.post(
+        "/api/v1/uploads",
+        files={"file": ("query.fasta", b">P00001\nACDEFGHIKLMNPQRSTVWY\n", "text/plain")},
+        data={"input_type": "fasta"},
+    )
+    assert upload.status_code == 201
+    created_run = client.post(
+        "/api/v1/runs",
+        json={"protein_id": protein.json()["id"], "upload_ids": [upload.json()["id"]]},
+    )
+    assert created_run.status_code == 201
+
+    settings = Settings(
+        app_env="test",
+        database_url="sqlite://",
+        artifact_root=tmp_path / "artifacts",
+        hpc_remote_root="/gpfs/test",
+        hpc_input_transfer_enabled=True,
+    )
+    run = session.get(Run, created_run.json()["id"])
+    assert run is not None
+    attached = run.uploads[0]
+    attached.transfer_status = "uploaded"
+    attached.remote_path = remote_pipeline_input_path(
+        settings, "P00001", run.id, attached.id, ".fasta", input_type="fasta"
+    )
+    session.commit()
+    session.refresh(run)
+
+    stage = claim_ready_stage(session, settings)
+    assert stage is not None
+    remote = FakeCompletedRemote(run.id)
+    executor = SSHStageExecutor.__new__(SSHStageExecutor)
+    executor.settings = settings
+    executor.client = remote
+
+    executor.submit_stage(session, stage)
+
+    assert remote.requests[0].environment["PIPELINE_SELECTED_FASTA"] == attached.remote_path
 
 
 def test_truncated_remote_manifest_fails_stage_without_publishing(client, session, tmp_path: Path):

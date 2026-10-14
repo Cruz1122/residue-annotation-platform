@@ -10,7 +10,12 @@ from app.features.runs.state import RunStatus
 from app.features.runs.worker_service import finalize_run
 from app.features.uploads.service import UploadValidationError, validate_upload_bytes
 from app.infrastructure.hpc.ssh import SSHConfigurationError, _remote_path_under
-from app.infrastructure.hpc.transfer import InputTransferError, SCPInputTransfer, remote_input_path
+from app.infrastructure.hpc.transfer import (
+    InputTransferError,
+    SCPInputTransfer,
+    remote_input_path,
+    remote_pipeline_input_path,
+)
 from sqlalchemy import select
 
 
@@ -204,6 +209,47 @@ def test_remote_input_path_is_generated_inside_configured_root():
         pass
     else:
         raise AssertionError("SSH path traversal unexpectedly accepted")
+
+
+def test_remote_pipeline_input_path_matches_remote_upload_contract():
+    from app.core.config import Settings
+
+    settings = Settings(hpc_remote_root="/gpfs/project/root")
+    path = remote_pipeline_input_path(
+        settings,
+        "P00001",
+        "run-1",
+        "upload-1",
+        ".pdb",
+        input_type="structure",
+    )
+    assert path == "/gpfs/project/root/uploads/P00001/.platform_runs/run-1/pdb/upload-1.pdb"
+
+    fasta_path = remote_pipeline_input_path(
+        settings,
+        "P00001",
+        "run-1",
+        "upload-1",
+        ".fasta",
+        input_type="fasta",
+    )
+    expected_fasta_path = "/gpfs/project/root/uploads/P00001"
+    expected_fasta_path += "/.platform_runs/run-1/fasta/upload-1.fasta"
+    assert fasta_path == expected_fasta_path
+
+    try:
+        remote_pipeline_input_path(
+            settings,
+            "P00001",
+            "run-1",
+            "upload-1",
+            ".mmcif",
+            input_type="structure",
+        )
+    except InputTransferError as exc:
+        assert "only as .pdb" in str(exc)
+    else:
+        raise AssertionError("remote mmCIF input unexpectedly accepted")
 
 
 def test_upload_service_bounds_files():

@@ -60,6 +60,67 @@ def remote_input_path(
     return str(candidate)
 
 
+def remote_pipeline_input_path(
+    settings: Settings,
+    protein_id: str,
+    run_id: str,
+    upload_id: str,
+    suffix: str,
+    input_type: str = "structure",
+) -> str:
+    """Build a path selected by the remote pipeline's input contract.
+
+    The MareNostrum CLI resolves ``uploads/<protein_id>`` and accepts an
+    explicit ``PIPELINE_SELECTED_*`` path only when it remains below that
+    directory.  Keep each platform run in a hidden, run-scoped child so an
+    uploaded input cannot collide with the pipeline's canonical input files
+    or another platform run.
+    """
+
+    root = PurePosixPath(settings.hpc_remote_root)
+    subdir = PurePosixPath(settings.hpc_input_remote_subdir)
+    if (
+        not root.is_absolute()
+        or subdir != PurePosixPath("uploads")
+        or not settings.hpc_input_remote_subdir
+        or ".." in subdir.parts
+        or any(part.startswith(".") for part in subdir.parts)
+    ):
+        raise InputTransferError("remote pipeline inputs require HPC_INPUT_REMOTE_SUBDIR=uploads")
+
+    _safe_component(protein_id, "protein id")
+    _safe_component(run_id, "run id")
+    _safe_component(upload_id, "upload id")
+    _safe_component(suffix, "file suffix")
+    if not suffix.startswith("."):
+        raise InputTransferError("file suffix is invalid")
+
+    if input_type == "fasta":
+        if suffix not in {".fa", ".fasta", ".faa"}:
+            raise InputTransferError(
+                "the remote pipeline accepts FASTA inputs only with .fa, .fasta or .faa"
+            )
+        input_directory = "fasta"
+    elif input_type == "structure":
+        if suffix != ".pdb":
+            raise InputTransferError("the remote pipeline accepts uploaded structures only as .pdb")
+        input_directory = "pdb"
+    else:
+        raise InputTransferError("input type is invalid")
+
+    candidate = (
+        root
+        / subdir
+        / protein_id
+        / ".platform_runs"
+        / run_id
+        / input_directory
+        / f"{upload_id}{suffix}"
+    )
+    _remote_path_under(root, candidate)
+    return str(candidate)
+
+
 class SCPInputTransfer:
     """Password-authenticated SCP transfer for small, generated input paths only."""
 

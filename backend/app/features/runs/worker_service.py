@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -15,7 +16,11 @@ from app.features.runs.models import ActiveRunSlot, Run, RunStage
 from app.features.runs.service import transition_stage
 from app.features.runs.state import RunStageStatus, RunStatus
 from app.features.stages.registry import STAGE_BY_ID
-from app.infrastructure.hpc.transfer import InputTransferError, SCPInputTransfer, remote_input_path
+from app.infrastructure.hpc.transfer import (
+    InputTransferError,
+    SCPInputTransfer,
+    remote_pipeline_input_path,
+)
 
 
 class StageExecutionUnavailable(RuntimeError):
@@ -36,22 +41,47 @@ class ScientificStageExecutor:
 def prepare_run_inputs(session: Session, run: Run, settings: Settings) -> None:
     """Transfer attached small inputs only for an explicitly enabled SSH profile."""
 
-    if not run.uploads or not settings.hpc_input_transfer_enabled:
+    if not run.uploads:
         return
     if settings.hpc_execution_mode != "ssh":
+        if not settings.hpc_input_transfer_enabled:
+            return
         raise InputTransferError("SCP input transfer requires the SSH HPC execution profile")
+    if not settings.hpc_input_transfer_enabled:
+        raise InputTransferError(
+            "attached inputs require HPC_INPUT_TRANSFER_ENABLED=true for SSH execution"
+        )
+
+    accession = None
+    for identifier in run.protein.identifiers:
+        source = identifier.source.lower()
+        if source in {"uniprot", "uniprot_accession", "accession"}:
+            accession = identifier.identifier
+            break
+        if source == "fasta_header":
+            match = re.search(r"(?:sp|tr)\|([^|]+)\|", identifier.identifier)
+            if match:
+                accession = match.group(1)
+                break
+    if not accession:
+        raise InputTransferError("the protein needs a UniProt accession before input transfer")
 
     store = ArtifactStore(settings)
     with SCPInputTransfer(settings) as transfer:
         for upload in run.uploads:
-            if upload.transfer_status == "uploaded":
-                continue
             local_path = store.resolve(upload.storage_key)
             suffix = Path(upload.original_filename).suffix.lower()
-            remote_path = remote_input_path(
-                settings, run.id, upload.id, suffix, input_type=upload.input_type
-            )
             try:
+                remote_path = remote_pipeline_input_path(
+                    settings,
+                    accession,
+                    run.id,
+                    upload.id,
+                    suffix,
+                    input_type=upload.input_type,
+                )
+                if upload.transfer_status == "uploaded" and upload.remote_path == remote_path:
+                    continue
                 transfer.upload(local_path, remote_path)
             except InputTransferError as exc:
                 upload.transfer_status = "failed"
