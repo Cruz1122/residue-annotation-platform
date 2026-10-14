@@ -159,6 +159,14 @@ interface and `worker-vpn` shares only that network namespace. The `mn5`
 profile is the direct-host path: `worker-mn5` runs with the host's Slurm and
 GPFS integration and does not start a VPN or SSH client.
 
+On 2026-10-14, the configured workstation profile was also smoke-tested with
+the actual local Compose stack, without creating a run or submitting a Slurm
+job: `vpn` reported `healthy`, `worker-vpn` remained `running`, the backend
+health and database-readiness endpoints returned `{"status":"ok"}`, and the
+frontend returned HTTP 200. The VPN log reached `Tunnel is up and running`.
+This proves automatic local startup and transport health only; it is not
+evidence of an authorized scientific submit, poll, or result publication.
+
 Rollback is a deployment decision, not a blind database downgrade. First stop
 new submissions, preserve active-run state, and determine whether the release
 changed schema or scientific contracts. Restore the last compatible image and
