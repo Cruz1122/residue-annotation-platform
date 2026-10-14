@@ -6,7 +6,8 @@ COPY --from=uv /uv /uvx /bin/
 
 WORKDIR /app
 
-RUN groupadd --system app && useradd --system --gid app --home-dir /app --no-create-home app
+RUN groupadd --system --gid 999 app \
+    && useradd --system --uid 999 --gid app --home-dir /app --no-create-home app
 
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
@@ -19,7 +20,7 @@ ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-RUN mkdir -p /app/data/artifacts
+RUN mkdir -p /app/data/artifacts && chmod 0770 /app/data/artifacts
 RUN chown -R app:app /app
 USER app
 

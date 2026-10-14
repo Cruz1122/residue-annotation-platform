@@ -65,6 +65,12 @@ docker compose config --services
 
 Ese arranque usa `APP_ENV=development` salvo que el entorno lo cambie. La contraseña local de Postgres es `residue-dev` si `POSTGRES_PASSWORD` no está definida. No cambia los puertos públicos `4742/8742`. Para detener el stack usa `docker compose down`. No uses `down -v` si necesitas conservar PostgreSQL y los artefactos.
 
+Si vienes de una versión donde el worker corría como `root`, ejecuta una vez
+la migración documentada de permisos del volumen `residue-artifacts` en
+[`docs/operations-runbook.md`](docs/operations-runbook.md) antes de activar el
+worker no-root. La migración preserva los contenidos y no es necesaria para un
+volumen nuevo.
+
 Para el arranque automático, configura una sola vez en `.env` los paths host de los secretos y del `known_hosts` verificado. No pongas passwords en `.env`, en argumentos de proceso ni en el repositorio:
 
 ```bash
@@ -80,7 +86,7 @@ HPC_KNOWN_HOSTS_FILE=/ruta/local/known_hosts \
 docker compose up --build -d
 ```
 
-El password de VPN puede vivir en un archivo de una sola línea con permisos `0600`, o en un archivo de configuración `openfortivpn` protegido. El servicio `vpn` es el único que recibe `NET_ADMIN`; además, `vpn` y `worker-vpn` reciben únicamente `DAC_READ_SEARCH` para poder leer secretos `0600` propiedad del usuario del host cuando Docker local conserva sus UID, sin capacidad de escritura. El backend, frontend y `worker-vpn` nunca reciben `NET_ADMIN`, no tienen red directa al host y sólo `worker-vpn` monta, en modo lectura, el password SSH y `known_hosts`; no se monta `.env` ni el filesystem del host.
+El password de VPN puede vivir en un archivo de una sola línea con permisos `0600`, o en un archivo de configuración `openfortivpn` protegido. El servicio `vpn` es el único que recibe `NET_ADMIN`; `worker-vpn` ejecuta como el UID/GID no root configurado en `HPC_WORKER_UID`/`HPC_WORKER_GID`, que debe ser propietario de los secretos protegidos, y recibe el grupo de artefactos para escribir sólo su volumen. El backend, frontend y `worker-vpn` nunca reciben `NET_ADMIN`, no tienen red directa al host y sólo `worker-vpn` monta, en modo lectura, el password SSH y `known_hosts`; no se monta `.env` ni el filesystem del host.
 
 ### Ejecución directa en MareNostrum
 
@@ -200,7 +206,7 @@ Estos checks no requieren VPN, GPU, secretos, `SLURM_JOB_ID` ni acceso a MN5. Lo
 
 ## Configuración y seguridad
 
-`.env.example` sólo contiene valores no secretos y referencias a ficheros externos. `.env`, `run/secrets/`, bases SQLite, artefactos y salidas de build están ignorados por Git. Las credenciales no se pasan en argumentos ni se registran: Compose monta sólo los archivos necesarios como read-only. El contenedor VPN se limita a `NET_ADMIN` y `DAC_READ_SEARCH` para leer su secreto local protegido; el worker sólo recibe `DAC_READ_SEARCH` por la misma razón y no recibe `NET_ADMIN`. El backend y frontend no reciben capabilities Linux adicionales, el root filesystem de los servicios sensibles es read-only y la verificación SSH exige `known_hosts`; una clave ausente o cambiada hace fallar cerrado. La autenticación de desarrollo usa una identidad local configurable; en `APP_ENV=production` faltan `X-User-Id` y `X-Project-Id` y el backend falla cerrado. La autorización se comprueba al leer proteínas, runs y artefactos.
+`.env.example` sólo contiene valores no secretos y referencias a ficheros externos. `.env`, `run/secrets/`, bases SQLite, artefactos y salidas de build están ignorados por Git. Las credenciales no se pasan en argumentos ni se registran: Compose monta sólo los archivos necesarios como read-only. El contenedor VPN se limita a `NET_ADMIN` y `DAC_READ_SEARCH` para leer su secreto local protegido; el worker corre como usuario no root, sin capabilities adicionales y sin `NET_ADMIN`. El backend y frontend no reciben capabilities Linux adicionales, el root filesystem de los servicios sensibles es read-only y la verificación SSH exige `known_hosts`; una clave ausente o cambiada hace fallar cerrado. La autenticación de desarrollo usa una identidad local configurable; en `APP_ENV=production` faltan `X-User-Id` y `X-Project-Id` y el backend falla cerrado. La autorización se comprueba al leer proteínas, runs y artefactos.
 
 La autenticación de cuenta usa Bearer tokens en producción; el fallback por headers sólo existe en development/test. En producción, `AUTH_JWT_SECRET` debe ser explícito y tener al menos 32 caracteres, y `CORS_ORIGINS` debe contener únicamente orígenes HTTPS concretos, sin wildcard. Los refresh tokens y tokens de verificación/reset se almacenan únicamente como hashes, los passwords se derivan con scrypt y las acciones de auth generan auditoría sin secretos. La verificación y recuperación se entregan mediante Resend cuando `EMAIL_PROVIDER=resend`; la API key permanece en el entorno y `EMAIL_FROM` debe usar un dominio verificado en producción. La regla de dominio es máximo una run no terminal por usuario. La VPN se establece en un contenedor separado del backend y sólo ese contenedor recibe `NET_ADMIN`. La inspección MN5, cuando esté autorizada, utiliza la interfaz separada `ReadOnlyMN5Inspector`, paths relativos y SFTP sin shell ni operaciones de escritura. Los uploads de run se transfieren por SCP con host keys verificadas; consultar la spec 0016 y [`specs/contracts/mn5-readonly-inspection.md`](specs/contracts/mn5-readonly-inspection.md).
 

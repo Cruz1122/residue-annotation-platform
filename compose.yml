@@ -1,7 +1,10 @@
 x-worker-common: &worker-common
   init: true
   restart: unless-stopped
-  user: "0:0"
+  # The SSH secret bind mount keeps the host file owner/mode. Match that
+  # owner explicitly instead of running the worker as root; set these values
+  # to the UID/GID that owns the protected secret files on the host.
+  user: "${HPC_WORKER_UID:-1000}:${HPC_WORKER_GID:-1000}"
   cap_drop:
     - ALL
   security_opt:
@@ -133,11 +136,11 @@ services:
       context: ./backend
     # The worker needs to read the SSH secret, but it receives no host mounts,
     # no NET_ADMIN capability, and no direct host network access. Its
-    # DAC_READ_SEARCH capability is read-only and scoped to these secret
-    # mounts. It shares only the isolated VPN namespace below.
+    # It shares only the isolated VPN namespace below and runs without extra
+    # capabilities. The configured worker UID reads the mode-0600 SSH secret.
     network_mode: service:vpn
-    cap_add:
-      - DAC_READ_SEARCH
+    group_add:
+      - "${HPC_APP_GID:-999}"
     environment:
       APP_ENV: ${APP_ENV:-development}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:4742}

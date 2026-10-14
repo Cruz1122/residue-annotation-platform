@@ -54,6 +54,38 @@ changes the target database. A production restore requires an approved
 maintenance window, a separate target check, application quiescence, and a
 post-restore health/readability check before traffic is pointed at it.
 
+### One-time artifact-volume migration to the non-root worker
+
+The current worker runs as the configured host UID/GID and uses the image's
+`app` group (`999:999`) for the artifact volume. A named volume created by a
+previous release may contain files owned by the old root worker, so migrate it
+once before enabling the non-root `worker-vpn` profile. This operation changes
+ownership and group-write bits only; it does not delete or rewrite artifact
+contents.
+
+First stop new submissions and take/verify the backup bundle above. Then run
+the explicit maintenance container below from the repository root. It uses
+temporary `CHOWN`/`FOWNER` capabilities only for this migration; the normal
+worker keeps `cap_drop: ALL` and receives no such capabilities:
+
+```bash
+docker compose --profile vpn run --rm --no-deps \
+  --user 0:0 --cap-add CHOWN --cap-add FOWNER \
+  --entrypoint sh worker-vpn -c '
+    find /app/data/artifacts -xdev -exec chown --no-dereference 999:999 {} +
+    find /app/data/artifacts -xdev -type d -exec chmod g+rwx {} +
+    find /app/data/artifacts -xdev -type f -exec chmod g+rw {} +
+  '
+```
+
+Verify that the artifact root and a representative existing artifact are
+readable/writable by the configured non-root worker before restarting the
+profile. For a new volume, the image initializes `/app/data/artifacts` with
+`999:999` and mode `0770`, so this migration is not required. If the host
+secret files are owned by a different UID, set `HPC_WORKER_UID` and
+`HPC_WORKER_GID` to that owner before starting the VPN profile; do not loosen
+their `0600` mode.
+
 ## Controlled deployment and rollback
 
 Before a rollout, record the image/source revision, run the local quality
