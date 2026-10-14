@@ -1,3 +1,8 @@
+import errno
+import stat
+from pathlib import Path
+from types import SimpleNamespace
+
 import pytest
 from app.features.auth.models import AuditEvent
 from app.features.runs.models import Run
@@ -5,7 +10,7 @@ from app.features.runs.state import RunStatus
 from app.features.runs.worker_service import finalize_run
 from app.features.uploads.service import UploadValidationError, validate_upload_bytes
 from app.infrastructure.hpc.ssh import SSHConfigurationError, _remote_path_under
-from app.infrastructure.hpc.transfer import InputTransferError, remote_input_path
+from app.infrastructure.hpc.transfer import InputTransferError, SCPInputTransfer, remote_input_path
 from sqlalchemy import select
 
 
@@ -212,3 +217,113 @@ def test_upload_service_bounds_files():
         pass
     else:
         raise AssertionError("oversized upload unexpectedly accepted")
+
+
+class _FakeTransferSFTP:
+    def __init__(self, root: str, symlinks: set[str] | None = None):
+        self.root = root
+        self.entries = {root: stat.S_IFDIR | 0o700}
+        self.symlinks = symlinks or set()
+        self.created: list[str] = []
+        self.closed = False
+
+    def lstat(self, path: str):
+        if path in self.symlinks:
+            return SimpleNamespace(st_mode=stat.S_IFLNK | 0o777)
+        try:
+            mode = self.entries[path]
+        except KeyError as exc:
+            error = OSError(errno.ENOENT, "missing")
+            raise error from exc
+        return SimpleNamespace(st_mode=mode)
+
+    def mkdir(self, path: str, mode: int):
+        assert mode == 0o700
+        self.entries[path] = stat.S_IFDIR | mode
+        self.created.append(path)
+
+    def close(self):
+        self.closed = True
+
+
+class _FakeTransferSSH:
+    def __init__(self, sftp: _FakeTransferSFTP):
+        self.sftp = sftp
+
+    def open_sftp(self):
+        return self.sftp
+
+    def exec_command(self, *_args, **_kwargs):
+        raise AssertionError("SCP input transfer must not use a remote shell")
+
+
+class _FakeTransferSCP:
+    def __init__(self):
+        self.calls: list[tuple[str, str]] = []
+
+    def put(self, local_path: str, remote_path: str, preserve_times: bool):
+        assert preserve_times is False
+        self.calls.append((local_path, remote_path))
+
+
+def _configured_transfer(tmp_path: Path, sftp: _FakeTransferSFTP):
+    from app.core.config import Settings
+
+    local_root = tmp_path / "artifacts"
+    local_root.mkdir()
+    local_file = local_root / "upload.pdb"
+    local_file.write_text("ATOM\n", encoding="utf-8")
+    transfer = SCPInputTransfer(
+        Settings(
+            app_env="test",
+            database_url="sqlite://",
+            artifact_root=local_root,
+            hpc_remote_root="/gpfs/project/root",
+            hpc_ssh_host="glogin4.bsc.es",
+            hpc_ssh_username="bsc001997",
+            hpc_ssh_password_file=tmp_path / "password",
+        )
+    )
+    transfer.client = _FakeTransferSSH(sftp)
+    transfer.scp = _FakeTransferSCP()
+    return transfer, local_file
+
+
+def test_scp_input_transfer_creates_verified_components_without_remote_shell(tmp_path: Path):
+    sftp = _FakeTransferSFTP("/gpfs/project/root")
+    transfer, local_file = _configured_transfer(tmp_path, sftp)
+
+    transfer.upload(
+        local_file,
+        "/gpfs/project/root/uploads/run-1/pdb/upload-1.pdb",
+    )
+
+    assert sftp.created == [
+        "/gpfs/project/root/uploads",
+        "/gpfs/project/root/uploads/run-1",
+        "/gpfs/project/root/uploads/run-1/pdb",
+    ]
+    assert transfer.scp.calls == [
+        (
+            str(local_file),
+            "/gpfs/project/root/uploads/run-1/pdb/upload-1.pdb",
+        )
+    ]
+
+
+def test_scp_input_transfer_rejects_symlinked_parent_before_put(tmp_path: Path):
+    sftp = _FakeTransferSFTP(
+        "/gpfs/project/root",
+        symlinks={"/gpfs/project/root/uploads"},
+    )
+    sftp.entries["/gpfs/project/root/uploads"] = stat.S_IFDIR | 0o700
+    transfer, local_file = _configured_transfer(tmp_path, sftp)
+
+    with pytest.raises(InputTransferError, match="symlinked component"):
+        transfer.upload(
+            local_file,
+            "/gpfs/project/root/uploads/run-1/pdb/upload-1.pdb",
+        )
+
+    assert transfer.scp.calls == []
+    assert sftp.created == []

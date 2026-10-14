@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import shlex
+import errno
 import stat
 from pathlib import Path, PurePosixPath
 
@@ -12,35 +12,6 @@ from app.core.config import Settings
 
 class InputTransferError(RuntimeError):
     pass
-
-
-def _assert_no_symlink_components(
-    client: paramiko.SSHClient,
-    root: PurePosixPath,
-    remote_directory: PurePosixPath,
-) -> None:
-    """Reject a remote directory whose created parents include a symlink."""
-
-    try:
-        sftp = client.open_sftp()
-    except Exception as exc:
-        raise InputTransferError("could not verify the remote input directory") from exc
-    try:
-        try:
-            relative = remote_directory.relative_to(root)
-        except ValueError as exc:
-            raise InputTransferError("remote input path is outside configured root") from exc
-        current = root
-        for part in relative.parts:
-            current = current / part
-            try:
-                attributes = sftp.lstat(str(current))
-            except OSError as exc:
-                raise InputTransferError("remote input directory is unavailable") from exc
-            if stat.S_ISLNK(attributes.st_mode or 0):
-                raise InputTransferError("remote input directory uses a symlinked component")
-    finally:
-        sftp.close()
 
 
 def _safe_component(value: str, label: str) -> str:
@@ -157,22 +128,93 @@ class SCPInputTransfer:
         if remote == root_remote:
             raise InputTransferError("remote input path is outside configured root")
         _remote_path_under(root_remote, remote)
-        remote_dir = str(remote.parent)
-        _, stdout, stderr = self.client.exec_command(
-            f"mkdir -p -- {shlex.quote(remote_dir)}",
-            timeout=self.settings.hpc_command_timeout_seconds,
-        )
-        exit_status = stdout.channel.recv_exit_status()
-        if exit_status != 0:
-            message = stderr.read().decode("utf-8", errors="replace").strip()
-            raise InputTransferError(
-                f"remote input directory could not be created: {message[:300]}"
-            )
-        _assert_no_symlink_components(self.client, root_remote, remote.parent)
+        self._ensure_remote_directory(root_remote, remote.parent)
+        self._assert_destination_absent(remote)
         try:
             self.scp.put(str(resolved), remote_path, preserve_times=False)
         except Exception as exc:
             raise InputTransferError("SCP input transfer failed") from exc
+
+    def _ensure_remote_directory(self, root: PurePosixPath, target: PurePosixPath) -> None:
+        """Create missing parents one component at a time without remote shell.
+
+        ``mkdir -p`` cannot be safely preceded by a single lexical check: a
+        parent may be replaced by a symlink between checks, and the command
+        would then create or use a directory outside the configured root.
+        SFTP lets us inspect every component and keeps the mutating boundary
+        explicit.
+        """
+
+        if self.client is None:
+            raise InputTransferError("SCP transfer is not connected")
+        try:
+            sftp = self.client.open_sftp()
+        except Exception as exc:
+            raise InputTransferError("could not verify the remote input directory") from exc
+        try:
+            try:
+                root_attributes = sftp.lstat(str(root))
+            except OSError as exc:
+                raise InputTransferError("configured remote root is unavailable") from exc
+            if stat.S_ISLNK(root_attributes.st_mode or 0) or not stat.S_ISDIR(
+                root_attributes.st_mode or 0
+            ):
+                raise InputTransferError("configured remote root is not a real directory")
+            try:
+                relative = target.relative_to(root)
+            except ValueError as exc:
+                raise InputTransferError("remote input path is outside configured root") from exc
+
+            current = root
+            for part in relative.parts:
+                current /= part
+                current_string = str(current)
+                try:
+                    attributes = sftp.lstat(current_string)
+                except OSError as exc:
+                    if getattr(exc, "errno", None) != errno.ENOENT:
+                        raise InputTransferError("remote input directory is unavailable") from exc
+                    try:
+                        sftp.mkdir(current_string, mode=0o700)
+                    except OSError as mkdir_error:
+                        if getattr(mkdir_error, "errno", None) != errno.EEXIST:
+                            raise InputTransferError(
+                                "remote input directory could not be created"
+                            ) from mkdir_error
+                    try:
+                        attributes = sftp.lstat(current_string)
+                    except OSError as verify_error:
+                        raise InputTransferError(
+                            "remote input directory could not be verified"
+                        ) from verify_error
+                if stat.S_ISLNK(attributes.st_mode or 0):
+                    raise InputTransferError("remote input directory uses a symlinked component")
+                if not stat.S_ISDIR(attributes.st_mode or 0):
+                    raise InputTransferError("remote input path component is not a directory")
+        finally:
+            sftp.close()
+
+    def _assert_destination_absent(self, remote: PurePosixPath) -> None:
+        """Reject an existing destination so SCP cannot overwrite a symlink."""
+
+        if self.client is None:
+            raise InputTransferError("SCP transfer is not connected")
+        try:
+            sftp = self.client.open_sftp()
+        except Exception as exc:
+            raise InputTransferError("could not verify the remote input destination") from exc
+        try:
+            try:
+                attributes = sftp.lstat(str(remote))
+            except OSError as exc:
+                if getattr(exc, "errno", None) == errno.ENOENT:
+                    return
+                raise InputTransferError("remote input destination is unavailable") from exc
+            if stat.S_ISLNK(attributes.st_mode or 0):
+                raise InputTransferError("remote input destination uses a symlink")
+            raise InputTransferError("remote input destination already exists")
+        finally:
+            sftp.close()
 
     def close(self) -> None:
         if self.scp is not None:
