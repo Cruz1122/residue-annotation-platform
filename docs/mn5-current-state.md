@@ -208,7 +208,7 @@ Como control, `benchmarks/all_stages_47069621/config.json` declara otra corrida
 finalizada, pero su `stages.tsv` de 51 bytes contiene sólo el encabezado; se
 clasifica como evidencia incompleta, no como resultado científico. No se
 descargaron datasets masivos ni outputs de etapas distintas de
-`protein_identity`.
+`protein_identity`, `variant_predictors` y `structure_modeling`.
 
 Para diagnosticar la corrida fallida se descargó únicamente el log de consola
 `benchmarks/all_stages_47143345/profile_01/pipeline17.console.log` (21,826
