@@ -126,3 +126,30 @@ def test_native_slurm_reads_and_downloads_only_confined_regular_files(tmp_path):
 
     with pytest.raises(RuntimeError, match="outside"):
         client.read_text(str(outside / "manifest.json"), 1_000)
+
+
+def test_native_slurm_rejects_job_paths_outside_root(tmp_path):
+    root = tmp_path / "hpc-root"
+    root.mkdir()
+    client = NativeSlurmClient(_settings(root))
+    request = JobRequest(
+        stage_id="protein_identity",
+        command=("python", "main.py"),
+        working_directory=str(tmp_path / "outside"),
+    )
+
+    with pytest.raises(RuntimeError, match="outside"):
+        client.submit(request)
+
+
+def test_native_stage_executor_selects_native_client(tmp_path):
+    from app.features.runs.remote_executor import NativeStageExecutor
+
+    root = tmp_path / "hpc-root"
+    root.mkdir()
+    settings = _settings(root)
+    settings.hpc_execution_mode = "native"
+
+    executor = NativeStageExecutor(settings)
+
+    assert isinstance(executor.client, NativeSlurmClient)

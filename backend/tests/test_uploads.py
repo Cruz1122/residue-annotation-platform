@@ -353,6 +353,10 @@ def test_native_input_transfer_confines_and_does_not_overwrite(tmp_path):
         transfer.upload(source, str(remote))
         with pytest.raises(InputTransferError, match="already exists"):
             transfer.upload(source, str(remote))
+        linked_source = artifact_root / "uploads" / "linked.fasta"
+        linked_source.symlink_to(source)
+        with pytest.raises(InputTransferError, match="must not be a symlink"):
+            transfer.upload(linked_source, str(hpc_root / "uploads" / "linked.fasta"))
 
     assert remote.read_text(encoding="utf-8") == source.read_text(encoding="utf-8")
     assert remote.stat().st_mode & 0o077 == 0
