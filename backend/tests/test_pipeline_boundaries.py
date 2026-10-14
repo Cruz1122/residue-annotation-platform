@@ -440,6 +440,10 @@ def _remote_manifest(size: object) -> dict:
         "status": "success",
         "cache_key": "b" * 64,
         "annotations": "annotations.tsv",
+        "file_integrity": {
+            "annotations": {"sha256": "d" * 64, "size": 1},
+            "provenance.json": {"sha256": "e" * 64, "size": 1},
+        },
         "artifacts": {"structure": {"path": "model.cif", "sha256": "c" * 64, "size": size}},
     }
 
@@ -451,6 +455,18 @@ def test_manifests_reject_boolean_sizes():
         validate_remote_manifest(_remote_manifest(True), "protein_identity")
     validate_manifest(_local_manifest(0), "protein_identity")
     validate_remote_manifest(_remote_manifest(0), "protein_identity")
+
+
+def test_remote_manifest_requires_integrity_for_annotations_and_provenance():
+    manifest = _remote_manifest(1)
+    manifest.pop("file_integrity")
+    with pytest.raises(ManifestError, match="file integrity is missing"):
+        validate_remote_manifest(manifest, "protein_identity")
+
+    manifest = _remote_manifest(1)
+    manifest["file_integrity"].pop("provenance.json")
+    with pytest.raises(ManifestError, match="provenance.json"):
+        validate_remote_manifest(manifest, "protein_identity")
 
 
 def test_remote_manifest_normalizes_in_root_absolute_artifact_paths():

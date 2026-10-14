@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import json
 import os
@@ -406,13 +407,22 @@ class SSHStageExecutor:
         annotations_path = self._remote_child(result_dir, annotations_relative)
 
         try:
-            provenance = json.loads(
-                self.client.read_text(
-                    self._remote_child(result_dir, "provenance.json"),
-                    self.settings.hpc_max_result_bytes,
-                )
+            provenance_record = manifest["file_integrity"]["provenance.json"]
+            provenance_text = self.client.read_text(
+                self._remote_child(result_dir, "provenance.json"),
+                self.settings.hpc_max_result_bytes,
             )
-        except (json.JSONDecodeError, UnicodeError, RuntimeError) as exc:
+            provenance_bytes = provenance_text.encode("utf-8")
+        except (UnicodeError, RuntimeError) as exc:
+            raise RemoteStageExecutionError("remote provenance is unreadable") from exc
+        if (
+            len(provenance_bytes) != provenance_record["size"]
+            or hashlib.sha256(provenance_bytes).hexdigest() != provenance_record["sha256"]
+        ):
+            raise RemoteStageExecutionError("remote provenance does not match its manifest")
+        try:
+            provenance = json.loads(provenance_text)
+        except json.JSONDecodeError as exc:
             raise RemoteStageExecutionError("remote provenance is unreadable") from exc
         if not isinstance(provenance, dict):
             raise RemoteStageExecutionError("remote provenance must be an object")

@@ -2,10 +2,11 @@ import hashlib
 import json
 from pathlib import Path
 
+import pytest
 from app.core.config import Settings
 from app.features.annotations.models import ANNOTATION_TABLES
 from app.features.runs.models import Artifact, Run, RunStage, StageResult
-from app.features.runs.remote_executor import SSHStageExecutor
+from app.features.runs.remote_executor import RemoteStageExecutionError, SSHStageExecutor
 from app.features.runs.worker_service import claim_ready_stage
 from app.infrastructure.hpc.base import JobHandle, JobRequest, JobState, JobStatus
 from app.infrastructure.hpc.transfer import remote_pipeline_input_path
@@ -27,6 +28,7 @@ class FakeCompletedRemote:
             )
         ).encode()
         self.summary = b'{"accession":"P00001","status":"verified"}\n'
+        self.provenance = b'{"tool":"fake-pipeline","version":"1.0"}'
         self.remote_run = f"/gpfs/test/runs/{run_id}"
         self.result_directory = f"{self.remote_run}/results/protein_identity"
 
@@ -62,7 +64,11 @@ class FakeCompletedRemote:
                         "annotations": {
                             "sha256": hashlib.sha256(self.annotations).hexdigest(),
                             "size": len(self.annotations),
-                        }
+                        },
+                        "provenance.json": {
+                            "sha256": hashlib.sha256(self.provenance).hexdigest(),
+                            "size": len(self.provenance),
+                        },
                     },
                     "artifacts": {
                         "summary": {
@@ -75,7 +81,7 @@ class FakeCompletedRemote:
                 }
             )
         if remote_path.endswith("provenance.json"):
-            return json.dumps({"tool": "fake-pipeline", "version": "1.0"})
+            return self.provenance.decode("utf-8")
         raise AssertionError(f"unexpected remote read: {remote_path}")
 
     def download_to(
@@ -97,6 +103,13 @@ class FakeTruncatedManifestRemote(FakeCompletedRemote):
     def read_text(self, remote_path: str, max_bytes: int) -> str:
         if remote_path.endswith("result_manifest.json"):
             return '{"schema":"stage-result-v1"'
+        return super().read_text(remote_path, max_bytes)
+
+
+class FakeTamperedProvenanceRemote(FakeCompletedRemote):
+    def read_text(self, remote_path: str, max_bytes: int) -> str:
+        if remote_path.endswith("provenance.json"):
+            return '{"tool":"tampered","version":"1.0"}'
         return super().read_text(remote_path, max_bytes)
 
 
@@ -264,3 +277,34 @@ def test_truncated_remote_manifest_fails_stage_without_publishing(client, sessio
     assert persisted_stage.status == "failed"
     assert persisted_stage.error_code == "remote_result_invalid"
     assert persisted_stage.stage_result_id is None
+
+
+def test_tampered_remote_provenance_fails_before_publishing(client, session, tmp_path: Path):
+    protein = client.post(
+        "/api/v1/proteins",
+        json={"sequence": SEQUENCE},
+    )
+    assert protein.status_code == 201
+    created_run = client.post(
+        "/api/v1/runs",
+        json={"protein_id": protein.json()["id"]},
+    )
+    assert created_run.status_code == 201
+
+    settings = Settings(
+        app_env="test",
+        database_url="sqlite://",
+        artifact_root=tmp_path / "artifacts",
+        hpc_remote_root="/gpfs/test",
+    )
+    stage = claim_ready_stage(session, settings)
+    assert stage is not None
+    remote = FakeTamperedProvenanceRemote(created_run.json()["id"])
+    executor = SSHStageExecutor.__new__(SSHStageExecutor)
+    executor.settings = settings
+    executor.client = remote
+
+    with pytest.raises(RemoteStageExecutionError, match="provenance does not match its manifest"):
+        executor._ingest_result(session, stage)
+
+    assert session.scalar(select(StageResult)) is None

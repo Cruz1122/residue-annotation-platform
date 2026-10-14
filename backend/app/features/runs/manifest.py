@@ -104,18 +104,30 @@ def validate_remote_manifest(manifest: dict[str, Any], expected_stage_id: str) -
             raise ManifestError(f"remote manifest artifact {artifact_name!r} is invalid")
 
     integrity = manifest.get("file_integrity")
-    if integrity is not None:
-        if not isinstance(integrity, dict):
-            raise ManifestError("remote manifest file integrity is invalid")
-        for name, record in integrity.items():
-            if not isinstance(name, str) or not isinstance(record, dict):
-                raise ManifestError("remote manifest file integrity entry is invalid")
-            if "size" in record and not _valid_size(record["size"]):
-                raise ManifestError(f"remote manifest file integrity size is invalid: {name}")
-            if "sha256" in record and not (
-                isinstance(record["sha256"], str) and _SHA256.fullmatch(record["sha256"])
-            ):
-                raise ManifestError(f"remote manifest file integrity hash is invalid: {name}")
+    if not isinstance(integrity, dict):
+        raise ManifestError("remote manifest file integrity is missing")
+    for name, record in integrity.items():
+        if not isinstance(name, str) or not isinstance(record, dict):
+            raise ManifestError("remote manifest file integrity entry is invalid")
+        if "size" in record and not _valid_size(record["size"]):
+            raise ManifestError(f"remote manifest file integrity size is invalid: {name}")
+        if "sha256" in record and not (
+            isinstance(record["sha256"], str) and _SHA256.fullmatch(record["sha256"])
+        ):
+            raise ManifestError(f"remote manifest file integrity hash is invalid: {name}")
+
+    # These files are read during publication and must be bound to the same
+    # manifest that declared them. Without both records, a producer could
+    # replace provenance or annotations after the result was marked complete.
+    for required_name in ("annotations", "provenance.json"):
+        record = integrity.get(required_name)
+        if (
+            not isinstance(record, dict)
+            or not _valid_size(record.get("size"))
+            or not isinstance(record.get("sha256"), str)
+            or not _SHA256.fullmatch(record["sha256"])
+        ):
+            raise ManifestError(f"remote manifest file integrity is incomplete: {required_name}")
 
 
 def normalize_remote_manifest_paths(manifest: dict[str, Any], remote_root: str) -> dict[str, Any]:

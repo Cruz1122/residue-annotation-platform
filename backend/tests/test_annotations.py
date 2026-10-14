@@ -298,6 +298,16 @@ def test_ingest_result_reuses_existing_cache_entry(client, session, tmp_path: Pa
         "cache_key": result.cache_key,
         "annotations": "rows.tsv",
         "artifacts": {"model": {"path": "model.cif", "sha256": "b" * 64, "size": 4}},
+        "file_integrity": {
+            "annotations": {
+                "sha256": hashlib.sha256(b"data").hexdigest(),
+                "size": 4,
+            },
+            "provenance.json": {
+                "sha256": hashlib.sha256(b"{}").hexdigest(),
+                "size": 2,
+            },
+        },
     }
 
     class _FakeClient:
@@ -363,6 +373,16 @@ def test_stale_cache_entry_is_purged_and_republished(client, session, tmp_path: 
                 "sha256": hashlib.sha256(artifact_payload).hexdigest(),
                 "size": len(artifact_payload),
             }
+        },
+        "file_integrity": {
+            "annotations": {
+                "sha256": hashlib.sha256(annotations).hexdigest(),
+                "size": len(annotations),
+            },
+            "provenance.json": {
+                "sha256": hashlib.sha256(b"{}").hexdigest(),
+                "size": 2,
+            },
         },
     }
 
