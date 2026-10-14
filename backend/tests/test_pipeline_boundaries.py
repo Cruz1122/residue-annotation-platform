@@ -116,7 +116,7 @@ def test_manifest_requires_real_sha256_and_nonempty_remote_paths():
 
 
 def test_artifact_store_rejects_traversal_and_absolute_paths(tmp_path: Path):
-    for key in ("../secret", "/etc/passwd", ".hidden/file"):
+    for key in (".", "../secret", "/etc/passwd", ".hidden/file"):
         with pytest.raises(ArtifactPathError):
             safe_storage_path(tmp_path, key)
     (tmp_path / "link").symlink_to(tmp_path)

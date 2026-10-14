@@ -15,7 +15,11 @@ def safe_storage_path(root: Path, storage_key: str) -> Path:
     if not storage_key:
         raise ArtifactPathError("artifact key cannot be empty")
     candidate = Path(storage_key)
-    if candidate.is_absolute() or ".." in candidate.parts:
+    if (
+        not candidate.parts
+        or candidate.is_absolute()
+        or any(part in {"", ".", ".."} for part in candidate.parts)
+    ):
         raise ArtifactPathError("invalid artifact key")
     if any(part.startswith(".") for part in candidate.parts):
         raise ArtifactPathError("hidden artifact paths are not allowed")
