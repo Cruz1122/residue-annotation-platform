@@ -3,16 +3,75 @@ import LucideIcon from '@shared/components/icons/LucideIcon.jsx';
 import { withViewTransition } from '@shared/lib/transition.js';
 import { StatusNotice } from '@features/auth/components/AuthFrame';
 import { ApiError, createProtein, createRun, uploadInput } from '@shared/api/client';
+import { readAuthSession } from '@shared/auth/session';
 import '@features/runs/styles/onboarding.css';
 
 const VALID_AA = new Set('ACDEFGHIKLMNPQRSTVWY'.split(''));
 const FASTA_EXTENSIONS = /\.(fasta|fa|faa|fas|fna)$/i;
 const STRUCTURE_EXTENSIONS = /\.(pdb|cif|mmcif)$/i;
+const PENDING_SUBMISSION_PREFIX = 'residue-annotation-pending-run-v1';
 const RESIDUE_NAMES = {
   A: 'ALA', C: 'CYS', D: 'ASP', E: 'GLU', F: 'PHE', G: 'GLY', H: 'HIS', I: 'ILE',
   K: 'LYS', L: 'LEU', M: 'MET', N: 'ASN', P: 'PRO', Q: 'GLN', R: 'ARG', S: 'SER',
   T: 'THR', V: 'VAL', W: 'TRP', Y: 'TYR',
 };
+
+function pendingSubmissionStorageKey() {
+  const userId = readAuthSession()?.user.id ?? 'anonymous';
+  return `${PENDING_SUBMISSION_PREFIX}:${userId}`;
+}
+
+function readPendingSubmission() {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = window.sessionStorage.getItem(pendingSubmissionStorageKey());
+    if (!raw) return null;
+    const value = JSON.parse(raw);
+    if (!value || typeof value !== 'object' || !value.intent || !value.request || !value.idempotencyKey) {
+      return null;
+    }
+    return value;
+  } catch {
+    return null;
+  }
+}
+
+function writePendingSubmission(value) {
+  if (typeof window === 'undefined') return;
+  try {
+    window.sessionStorage.setItem(pendingSubmissionStorageKey(), JSON.stringify(value));
+  } catch {
+    // The in-memory ref remains authoritative when browser storage is blocked.
+  }
+}
+
+function clearStoredPendingSubmission() {
+  if (typeof window === 'undefined') return;
+  try {
+    window.sessionStorage.removeItem(pendingSubmissionStorageKey());
+  } catch {
+    // Storage failure must not prevent the user from editing the form.
+  }
+}
+
+function newIdempotencyKey() {
+  return typeof globalThis.crypto?.randomUUID === 'function'
+    ? globalThis.crypto.randomUUID()
+    : `onboarding-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function sameSubmissionIntent(left, right) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function fileSignature(file) {
+  if (!file) return null;
+  return {
+    name: file.name,
+    size: file.size,
+    lastModified: file.lastModified,
+  };
+}
 
 function parseFasta(text) {
   const lines = String(text ?? '').split(/\r?\n/);
@@ -158,7 +217,8 @@ function VariantSequence({ residues, variantsRef, onSelect, buttonRefs }) {
 }
 
 export default function OnboardingFlow() {
-  const [step, setStep] = useState(1);
+  const [step, setStep] = useState('upload');
+  const [structureSource, setStructureSource] = useState(null);
   const [selectedIndex, setSelectedIndex] = useState(null);
   const [upload, setUpload] = useState({
     pdb: { status: 'idle', progress: 0, name: null, file: null, sequence: '' },
@@ -174,6 +234,8 @@ export default function OnboardingFlow() {
   const swapTimerRef = useRef(null);
   const showingMutantRef = useRef(false);
   const selectedIndexRef = useRef(null);
+  const idempotencyKeyRef = useRef(null);
+  const pendingSubmissionRef = useRef(null);
 
   const sequence = upload.fasta.status === 'done' ? upload.fasta.sequence : upload.pdb.sequence;
   const residues = useMemo(
@@ -188,7 +250,14 @@ export default function OnboardingFlow() {
   const submitting = state === 'submitting';
   const selectedResidue = selectedIndex === null ? null : residues[selectedIndex] ?? null;
 
+  const clearPendingSubmission = () => {
+    pendingSubmissionRef.current = null;
+    idempotencyKeyRef.current = null;
+    clearStoredPendingSubmission();
+  };
+
   const resetFasta = () => {
+    clearPendingSubmission();
     setUpload((current) => ({
       ...current,
       fasta: { status: 'idle', progress: 0, name: null, file: null, text: null, sequence: '' },
@@ -196,6 +265,8 @@ export default function OnboardingFlow() {
   };
 
   const resetPdb = () => {
+    clearPendingSubmission();
+    setStructureSource(null);
     setUpload((current) => ({
       ...current,
       pdb: { status: 'idle', progress: 0, name: null, file: null, sequence: '' },
@@ -242,6 +313,7 @@ export default function OnboardingFlow() {
       return;
     }
     setError('');
+    setStructureSource(null);
     setUpload((current) => ({
       ...current,
       pdb: { status: 'loading', progress: 10, name: file.name, file, sequence: '' },
@@ -278,9 +350,23 @@ export default function OnboardingFlow() {
     else loadFasta(file);
   };
 
+  const pdbAttached = upload.pdb.status === 'done' && Boolean(upload.pdb.file);
+
   const showVariants = () => {
-    if (!ready) return;
-    withViewTransition(() => setStep(2));
+    if (!ready || upload.pdb.status === 'loading') return;
+    if (pdbAttached) {
+      setStructureSource(null);
+      withViewTransition(() => setStep('structure'));
+      return;
+    }
+    setStructureSource('alphafold3');
+    withViewTransition(() => setStep('variants'));
+  };
+
+  const chooseStructure = (choice) => {
+    if (choice !== 'provided_pdb' && choice !== 'alphafold3') return;
+    setStructureSource(choice);
+    withViewTransition(() => setStep('variants'));
   };
 
   const setVariantButtonState = (index, alt) => {
@@ -345,7 +431,7 @@ export default function OnboardingFlow() {
   }, []);
 
   useEffect(() => {
-    if (step !== 2) return undefined;
+    if (step !== 'variants') return undefined;
     const tick = () => {
       showingMutantRef.current = !showingMutantRef.current;
       for (const variant of variantsRef.current.values()) {
@@ -370,24 +456,66 @@ export default function OnboardingFlow() {
 
   const submit = async () => {
     if (!ready || submitting) return;
+    const source = pdbAttached ? structureSource : 'alphafold3';
+    if (source !== 'provided_pdb' && source !== 'alphafold3') {
+      setState('error');
+      setError('Elige si se regenera la estructura antes de continuar.');
+      return;
+    }
     setState('submitting');
     setError('');
     setBlockedRun(null);
     try {
-      const protein = upload.fasta.status === 'done'
-        ? await createProtein({ fasta: upload.fasta.text, aliases: [] })
-        : await createProtein({ sequence, aliases: [] });
-      const uploadIds = [];
-      if (upload.fasta.file) uploadIds.push((await uploadInput(upload.fasta.file, 'fasta')).id);
-      if (upload.pdb.file) uploadIds.push((await uploadInput(upload.pdb.file, 'structure')).id);
       const variants = [...variantsRef.current.values()]
         .map(({ aa_position, aa_ref, aa_alt }) => ({ aa_position, aa_ref, aa_alt }))
         .sort((a, b) => a.aa_position - b.aa_position);
-      const run = await createRun({ protein_id: protein.id, variants, upload_ids: uploadIds });
-      window.location.assign(`/proteins/${encodeURIComponent(protein.id)}/progress/?run=${encodeURIComponent(run.id)}`);
+      const intent = {
+        sequence,
+        structure_source: source,
+        variants,
+        fasta: fileSignature(upload.fasta.file),
+        structure: fileSignature(upload.pdb.file),
+      };
+      let pending = pendingSubmissionRef.current;
+      if (!pending) pending = readPendingSubmission();
+      if (pending && !sameSubmissionIntent(pending.intent, intent)) {
+        pending = null;
+        clearStoredPendingSubmission();
+      }
+      if (!pending) {
+        const protein = upload.fasta.status === 'done'
+          ? await createProtein({ fasta: upload.fasta.text, aliases: [] })
+          : await createProtein({ sequence, aliases: [] });
+        const uploadIds = [];
+        if (upload.fasta.file) uploadIds.push((await uploadInput(upload.fasta.file, 'fasta')).id);
+        if (upload.pdb.file) uploadIds.push((await uploadInput(upload.pdb.file, 'structure')).id);
+        pending = {
+          intent,
+          idempotencyKey: newIdempotencyKey(),
+          request: {
+            protein_id: protein.id,
+            variants,
+            upload_ids: uploadIds,
+            structure_source: source,
+          },
+        };
+        writePendingSubmission(pending);
+      }
+      pendingSubmissionRef.current = pending;
+      idempotencyKeyRef.current = pending.idempotencyKey;
+      const run = await createRun(
+        pending.request,
+        pending.idempotencyKey,
+      );
+      clearPendingSubmission();
+      window.location.assign(`/proteins/${encodeURIComponent(pending.request.protein_id)}/progress/?run=${encodeURIComponent(run.id)}`);
     } catch (requestError) {
       setState('error');
-      if (requestError instanceof ApiError && requestError.status === 409) {
+      if (
+        requestError instanceof ApiError
+        && requestError.status === 409
+        && requestError.code === 'active_run_slot'
+      ) {
         setBlockedRun(
           requestError.activeRunId && requestError.activeProteinId
             ? { runId: requestError.activeRunId, proteinId: requestError.activeProteinId }
@@ -405,21 +533,37 @@ export default function OnboardingFlow() {
 
   return (
     <main class="auth-page onboarding-page" aria-label="Carga de proteína">
-      <h1 class={`onboarding-title${step === 1 ? '' : ' is-variants'}`}>{step === 1 ? '¡Ingresa tu proteína!' : 'Seleccionar variantes'}</h1>
-      {step === 1 ? (
+      <h1 class={`onboarding-title${step === 'variants' ? ' is-variants' : ''}${step === 'structure' ? ' structure-choice__title' : ''}`}>
+        {step === 'upload' && '¡Ingresa tu proteína!'}
+        {step === 'structure' && '¿Deseas volver a generar una estructura para tu proteína?'}
+        {step === 'variants' && 'Seleccionar variantes'}
+      </h1>
+      {step === 'upload' ? (
         <>
           <div class="upload-options">
             <UploadCard kind="pdb" label="PDB" icon="atom" accept=".pdb,.cif,.mmcif,chemical/x-pdb" state={upload.pdb} onFile={handleFile} />
             <UploadCard kind="fasta" label="FASTA" icon="dna" accept=".fasta,.fa,.faa,.fas,.fna,text/plain" state={upload.fasta} onFile={handleFile} />
           </div>
           {error && <StatusNotice kind="error">{error}</StatusNotice>}
-          <button class="auth-button onboarding-action" type="button" disabled={!ready} onClick={showVariants}>
+          <button class="auth-button onboarding-action" type="button" disabled={!ready || upload.pdb.status === 'loading'} onClick={showVariants}>
             ¡Estoy listo!
           </button>
         </>
+      ) : step === 'structure' ? (
+        <div class="structure-choice__actions">
+          <button class="auth-button structure-choice__button" type="button" onClick={() => chooseStructure('provided_pdb')}>No, usar mi PDB adjunto</button>
+          <button class="auth-button structure-choice__button" type="button" onClick={() => chooseStructure('alphafold3')}>Sí, regenerar estructura con AF3</button>
+        </div>
       ) : (
         <>
           <p class="onboarding-subtitle">Opcional · selecciona posiciones y cambia el aminoácido mutante. Los cambios persisten automáticamente.</p>
+
+          <section class="configuration-summary" aria-label="Resumen de la configuración">
+            <div><span>Entrada</span><strong>{upload.fasta.status === 'done' && pdbAttached ? 'FASTA + PDB' : pdbAttached ? 'PDB' : 'FASTA'}</strong></div>
+            <div><span>Fuente estructural</span><strong>{structureSource === 'provided_pdb' ? 'Usar PDB proporcionado' : 'Generar con AlphaFold 3'}</strong></div>
+            <div><span>Variantes</span><strong>{hasVariants ? `${variantsRef.current.size} seleccionada${variantsRef.current.size === 1 ? '' : 's'}` : 'Ninguna · stages dependientes omitidos'}</strong></div>
+            <p>El backend calculará el DAG científico real, sus prerrequisitos y las posibilidades de reuso antes de ejecutar.</p>
+          </section>
 
           <section class="variant-stage" aria-label="Cadena completa para seleccionar variantes">
             <header class="variant-sequence-head">

@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -23,12 +24,17 @@ class RunCreate(BaseModel):
     protein_id: str = Field(min_length=1, max_length=36)
     variants: list[VariantRequest] = Field(default_factory=list, max_length=10_000)
     upload_ids: list[str] = Field(default_factory=list, max_length=2)
+    structure_source: Literal["alphafold3", "provided_pdb"] | None = None
+    structure_chain: str | None = Field(default=None, min_length=1, max_length=8)
+    scientific_accession: str | None = Field(default=None, min_length=3, max_length=32)
+    scientific_parameters: dict[str, Any] = Field(default_factory=dict, max_length=100)
 
     @model_validator(mode="after")
     def reject_duplicate_positions(self):
         positions = [variant.aa_position for variant in self.variants]
         if len(positions) != len(set(positions)):
             raise ValueError("variant positions must be unique")
+        self.variants = sorted(self.variants, key=lambda variant: variant.aa_position)
         return self
 
     @field_validator("upload_ids")
@@ -36,7 +42,7 @@ class RunCreate(BaseModel):
     def reject_duplicate_uploads(cls, values: list[str]) -> list[str]:
         if len(values) != len(set(values)):
             raise ValueError("upload_ids must be unique")
-        return values
+        return sorted(values)
 
 
 class ArtifactRead(BaseModel):
@@ -56,6 +62,10 @@ class StageRead(BaseModel):
     optional: bool
     status: str
     stage_result_id: str | None = None
+    cache_key: str | None = None
+    cache_factors: dict[str, object] = Field(default_factory=dict)
+    reuse_reason: dict[str, object] | None = None
+    omission_reason: str | None = None
     slurm_job_id: str | None = None
     error_code: str | None = None
     error_message: str | None = None
@@ -74,6 +84,34 @@ class UploadRead(BaseModel):
     transfer_status: str
 
 
+class RunConfigurationRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    run_id: str
+    protein_id: str
+    sequence_sha256: str
+    scientific_accession: str | None = None
+    fasta_upload_id: str | None = None
+    fasta_sha256: str | None = None
+    structure_upload_id: str | None = None
+    structure_source: Literal["alphafold3", "provided_pdb"]
+    structure_sha256: str | None = None
+    structure_chain: str | None = None
+    structure_mapping: dict[str, object] = Field(default_factory=dict)
+    normalized_variants: list[dict[str, object]] = Field(default_factory=list)
+    selected_stage_ids: list[str] = Field(default_factory=list)
+    omitted_stages: list[dict[str, object]] = Field(default_factory=list)
+    scientific_parameters: dict[str, object] = Field(default_factory=dict)
+    prerequisites: dict[str, object] = Field(default_factory=dict)
+    versions: dict[str, object] = Field(default_factory=dict)
+    input_references: dict[str, object] = Field(default_factory=dict)
+    owner_id: str
+    project_id: str
+    confirmation_audit_id: str | None = None
+    confirmed_at: datetime | None = None
+
+
 class RunRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -81,6 +119,7 @@ class RunRead(BaseModel):
     protein_id: str
     status: str
     requested_variants: list[dict[str, object]]
+    configuration: RunConfigurationRead | None = None
     created_at: datetime | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None

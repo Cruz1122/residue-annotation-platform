@@ -21,6 +21,11 @@ from app.core.security import sanitize_error_message
 from app.features.annotations.models import ANNOTATION_TABLES
 from app.features.annotations.service import ANNOTATION_INSERT_BATCH_SIZE, insert_annotation_rows
 from app.features.artifacts.storage import ArtifactPathError, ArtifactStore
+from app.features.runs.cache import (
+    expected_artifact_types_for_stage,
+    find_verified_cache_hit,
+    planned_stage_cache_identity,
+)
 from app.features.runs.manifest import (
     ManifestError,
     normalize_remote_manifest_paths,
@@ -125,11 +130,24 @@ class SSHStageExecutor:
             ]
         )
 
-    def _pipeline_input_environment(self, run: Run, accession: str) -> dict[str, str]:
+    def _pipeline_input_environment(
+        self,
+        run: Run,
+        accession: str,
+        stage: RunStage | None = None,
+    ) -> dict[str, str]:
         environment: dict[str, str] = {}
         variables = {"fasta": "PIPELINE_SELECTED_FASTA", "structure": "PIPELINE_SELECTED_PDB"}
         for upload in run.uploads:
             if upload.transfer_status != "uploaded":
+                continue
+            if (
+                upload.input_type == "structure"
+                and run.configuration is not None
+                and run.configuration.structure_source != "provided_pdb"
+            ):
+                # The upload remains part of provenance, but an AF3-selected
+                # run must not silently consume an unused PDB.
                 continue
             try:
                 expected_path = remote_pipeline_input_path(
@@ -154,9 +172,64 @@ class SSHStageExecutor:
                     f"more than one uploaded {upload.input_type} input is attached"
                 )
             environment[variable] = expected_path
+        if run.configuration is not None:
+            configuration = run.configuration
+            manifest = {
+                "schema": "run-configuration-v1",
+                "configuration_id": configuration.id,
+                "run_id": run.id,
+                "protein_id": run.protein_id,
+                "sequence_sha256": configuration.sequence_sha256,
+                "scientific_accession": configuration.scientific_accession or accession,
+                "structure_source": configuration.structure_source,
+                "structure_upload_id": configuration.structure_upload_id,
+                "structure_sha256": configuration.structure_sha256,
+                "structure_chain": configuration.structure_chain,
+                "structure_mapping": configuration.structure_mapping or {},
+                "normalized_variants": configuration.normalized_variants or [],
+                "scientific_parameters": configuration.scientific_parameters or {},
+                "prerequisites": configuration.prerequisites or {},
+                "versions": configuration.versions or {},
+                "input_references": configuration.input_references or {},
+                "stage_id": stage.stage_id if stage is not None else None,
+                "cache_key": stage.cache_key if stage is not None else None,
+                "cache_factors": stage.cache_factors if stage is not None else {},
+            }
+            encoded = json.dumps(
+                manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            )
+            environment["PIPELINE_CONFIGURATION_JSON"] = encoded
+            environment["PIPELINE_CONFIGURATION_SHA256"] = hashlib.sha256(
+                encoded.encode("utf-8")
+            ).hexdigest()
+            environment["PIPELINE_SCIENTIFIC_PARAMETERS_JSON"] = json.dumps(
+                configuration.scientific_parameters or {},
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            environment["PIPELINE_STRUCTURE_MAPPING_JSON"] = json.dumps(
+                configuration.structure_mapping or {},
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            dependency_keys = (
+                (stage.cache_factors or {}).get("dependency_cache_keys", {})
+                if stage is not None
+                else {}
+            )
+            environment["PIPELINE_UPSTREAM_CACHE_KEYS_JSON"] = json.dumps(
+                dependency_keys,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
         return environment
 
     def _accession(self, run: Run) -> str:
+        if run.configuration is not None and run.configuration.scientific_accession:
+            return run.configuration.scientific_accession
         for identifier in run.protein.identifiers:
             source = identifier.source.lower()
             if source in {"uniprot", "uniprot_accession", "accession"}:
@@ -180,8 +253,18 @@ class SSHStageExecutor:
                 f"configured GPU budget is below the {stage.stage_id} contract"
             )
         run = stage.run
+        cache_key, _ = _validated_local_cache_plan(stage)
         accession = self._accession(run)
-        input_environment = self._pipeline_input_environment(run, accession)
+        input_environment = self._pipeline_input_environment(run, accession, stage)
+        input_environment["PIPELINE_CACHE_KEY"] = cache_key
+        if run.configuration is not None:
+            input_environment["PIPELINE_STRUCTURE_SOURCE"] = run.configuration.structure_source
+            input_environment["PIPELINE_VARIANTS_JSON"] = json.dumps(
+                run.configuration.normalized_variants or [],
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
         job_directory = self._job_directory(run.id)
         self.client.ensure_directory(job_directory)
         marker_path = self._marker_path(run.id, stage.stage_id)
@@ -274,6 +357,14 @@ class SSHStageExecutor:
                 RunStageStatus.REUSED if reused else RunStageStatus.SUCCESS,
             )
             stage.stage_result_id = result_id
+            if reused:
+                stage.reuse_reason = {
+                    "source_stage_result_id": result_id,
+                    "cache_key": stage.cache_key,
+                    "factors": stage.cache_factors or {},
+                    "authorization": "owner_or_project_scope",
+                    "artifact_integrity": "verified_size_and_sha256",
+                }
             self._commit_and_cleanup(session)
             return True
         if status.state == JobState.CANCELLED:
@@ -368,6 +459,8 @@ class SSHStageExecutor:
         stage: RunStage,
         cache_key: str,
         store: ArtifactStore,
+        *,
+        expected_artifact_types: set[str] | None = None,
     ) -> StageResult | None:
         """Return a verified prior result for the same scientific inputs.
 
@@ -376,12 +469,14 @@ class SSHStageExecutor:
         is purged before republishing.
         """
 
-        for result in self._candidate_results(session, stage, cache_key):
-            if not result.artifacts:
-                continue
-            if all(self._artifact_available(store, artifact) for artifact in result.artifacts):
-                return result
-        return None
+        return find_verified_cache_hit(
+            session,
+            stage,
+            cache_key,
+            store,
+            require_provenance=True,
+            expected_artifact_types=expected_artifact_types,
+        )
 
     def _candidate_results(
         self,
@@ -397,6 +492,10 @@ class SSHStageExecutor:
                 .where(StageResult.stage_id == stage.stage_id)
                 .where(StageResult.cache_key == cache_key)
                 .where(StageResult.status == "success")
+                .where(
+                    (StageResult.owner_id == stage.run.owner_id)
+                    | (StageResult.project_id == stage.run.project_id)
+                )
             )
         )
 
@@ -505,8 +604,32 @@ class SSHStageExecutor:
             raise RemoteStageExecutionError(str(exc)) from exc
 
         store = ArtifactStore(self.settings)
+        local_cache_key, local_cache_factors = _validated_local_cache_plan(stage)
         cache_key = str(manifest["cache_key"])
-        reusable = self._find_reusable_result(session, stage, cache_key, store)
+        if cache_key != local_cache_key:
+            raise RemoteStageExecutionError(
+                "remote cache key does not match the confirmed configuration"
+            )
+        manifest_artifact_names = {str(name) for name in manifest["artifacts"]}
+        expected_artifact_names = {
+            str(artifact_type) for artifact_type in STAGE_BY_ID[stage.stage_id].produced_artifacts
+        }
+        if "annotations" in manifest_artifact_names:
+            raise RemoteStageExecutionError(
+                "remote manifest reserves annotations for the annotations field"
+            )
+        if manifest_artifact_names != expected_artifact_names:
+            raise RemoteStageExecutionError(
+                "remote manifest does not satisfy the local stage artifact contract"
+            )
+        expected_artifact_types = expected_artifact_types_for_stage(stage.stage_id)
+        reusable = self._find_reusable_result(
+            session,
+            stage,
+            cache_key,
+            store,
+            expected_artifact_types=expected_artifact_types,
+        )
         if reusable is not None:
             return reusable.id, True
         stored_keys: list[str] = []
@@ -548,6 +671,11 @@ class SSHStageExecutor:
                 raise RemoteStageExecutionError("remote provenance is unreadable") from exc
             if not isinstance(provenance, dict):
                 raise RemoteStageExecutionError("remote provenance must be an object")
+            remote_binding = _validate_remote_provenance_binding(
+                stage,
+                cache_key,
+                provenance,
+            )
 
             # Each ingest attempt owns a distinct namespace. If a stale worker
             # loses a database race, its rollback cleanup cannot remove files that
@@ -582,6 +710,8 @@ class SSHStageExecutor:
                     "remote_run_id": PurePosixPath(run_dir).name,
                     "manifest_schema": manifest.get("schema"),
                     "remote_provenance": _redact_remote_paths(provenance, self.root),
+                    "remote_provenance_binding": _redact_remote_paths(remote_binding, self.root),
+                    "remote_provenance_verified": True,
                     "remote_directory_artifacts": sorted(
                         name
                         for name, entry in manifest["artifacts"].items()
@@ -593,6 +723,9 @@ class SSHStageExecutor:
                         for name, entry in manifest["artifacts"].items()
                         if entry.get("sha256") is None and entry.get("size") is not None
                     ),
+                    "cache_key": cache_key,
+                    "cache_factors": local_cache_factors,
+                    "required_artifacts": sorted(expected_artifact_types),
                 },
                 owner_id=stage.run.owner_id,
                 project_id=stage.run.project_id,
@@ -635,7 +768,7 @@ class SSHStageExecutor:
                 stored_keys.append(storage_key)
                 result.artifacts.append(
                     Artifact(
-                        artifact_type=_safe_artifact_type(str(name)),
+                        artifact_type=str(name),
                         storage_backend="filesystem",
                         storage_key=storage_key,
                         sha256=digest,
@@ -948,6 +1081,101 @@ def _media_type_for_path(path: str) -> str:
 
 def _is_directory_artifact(entry: Any) -> bool:
     return isinstance(entry, dict) and entry.get("sha256") is None and entry.get("size") is None
+
+
+def _validated_local_cache_plan(stage: RunStage) -> tuple[str, dict[str, object]]:
+    """Require the cache plan calculated locally before accepting remote bytes."""
+
+    configuration = stage.run.configuration
+    if configuration is None:
+        raise RemoteStageExecutionError("remote result requires a confirmed local cache plan")
+    if not isinstance(stage.cache_key, str) or not stage.cache_key:
+        raise RemoteStageExecutionError("remote result requires a locally planned cache key")
+    if not isinstance(stage.cache_factors, dict) or not stage.cache_factors:
+        raise RemoteStageExecutionError("remote result requires locally planned cache factors")
+    dependency_cache_keys = stage.cache_factors.get("dependency_cache_keys")
+    if not isinstance(dependency_cache_keys, dict) or any(
+        not isinstance(key, str) or not isinstance(value, str)
+        for key, value in dependency_cache_keys.items()
+    ):
+        raise RemoteStageExecutionError(
+            "remote result cache factors have no valid dependency identities"
+        )
+    missing_dependencies = set(STAGE_BY_ID[stage.stage_id].dependencies).difference(
+        dependency_cache_keys
+    )
+    if missing_dependencies:
+        raise RemoteStageExecutionError("remote result cache factors omit dependency identities")
+    try:
+        expected_cache_key, expected_factors = planned_stage_cache_identity(
+            stage,
+            configuration,
+            dependency_cache_keys,
+        )
+    except (KeyError, TypeError, ValueError, AssertionError) as exc:
+        raise RemoteStageExecutionError(
+            "remote result cache plan cannot be verified locally"
+        ) from exc
+    if stage.cache_key != expected_cache_key or stage.cache_factors != expected_factors:
+        raise RemoteStageExecutionError(
+            "remote result cache plan does not match the confirmed configuration"
+        )
+    return expected_cache_key, expected_factors
+
+
+def _expected_remote_provenance_binding(stage: RunStage, cache_key: str) -> dict[str, object]:
+    """Return the exact platform identity a remote result must acknowledge.
+
+    The result manifest proves which bytes were transferred. This second
+    binding proves that those bytes were produced for the confirmed scientific
+    configuration and the planned upstream cache identities. Keeping the
+    complete JSON values in the comparison makes accession, structure mapping,
+    variants, parameter, version, and dependency drift fail closed.
+    """
+
+    configuration = stage.run.configuration
+    if configuration is None:
+        raise RemoteStageExecutionError("remote execution requires a confirmed run configuration")
+    factors = stage.cache_factors if isinstance(stage.cache_factors, dict) else {}
+    dependency_cache_keys = factors.get("dependency_cache_keys", {})
+    return {
+        "schema": "platform-binding-v1",
+        "configuration_id": configuration.id,
+        "run_id": stage.run_id,
+        "protein_id": stage.run.protein_id,
+        "stage_id": stage.stage_id,
+        "cache_key": cache_key,
+        "sequence_sha256": configuration.sequence_sha256,
+        "scientific_accession": configuration.scientific_accession,
+        "structure_source": configuration.structure_source,
+        "structure_sha256": configuration.structure_sha256,
+        "structure_chain": configuration.structure_chain,
+        "structure_mapping": configuration.structure_mapping or {},
+        "normalized_variants": configuration.normalized_variants or [],
+        "scientific_parameters": configuration.scientific_parameters or {},
+        "prerequisites": configuration.prerequisites or {},
+        "versions": configuration.versions or {},
+        "cache_factors": factors,
+        "dependency_cache_keys": dependency_cache_keys,
+    }
+
+
+def _validate_remote_provenance_binding(
+    stage: RunStage,
+    cache_key: str,
+    provenance: dict[str, object],
+) -> dict[str, object]:
+    binding = provenance.get("platform_binding")
+    if not isinstance(binding, dict):
+        raise RemoteStageExecutionError(
+            "remote provenance lacks a platform binding to the confirmed configuration"
+        )
+    expected = _expected_remote_provenance_binding(stage, cache_key)
+    if binding != expected:
+        raise RemoteStageExecutionError(
+            "remote provenance does not match the confirmed run configuration"
+        )
+    return binding
 
 
 def _redact_remote_paths(value: Any, remote_root: str) -> Any:

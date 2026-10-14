@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 import threading
 from datetime import UTC, datetime, timedelta
@@ -13,7 +15,13 @@ from app.core.config import Settings, get_settings
 from app.core.observability import log_worker_event
 from app.core.security import sanitize_error_message
 from app.features.artifacts.storage import ArtifactPathError, ArtifactStore
-from app.features.runs.models import ActiveRunSlot, Run, RunStage, Upload
+from app.features.runs.cache import (
+    expected_artifact_types_for_stage,
+    find_verified_cache_hit,
+    planned_stage_cache_identity,
+)
+from app.features.runs.models import ActiveRunSlot, Run, RunStage, StageResult, Upload
+from app.features.runs.selection import dependency_is_satisfied
 from app.features.runs.service import transition_stage
 from app.features.runs.state import RunStageStatus, RunStatus
 from app.features.stages.registry import STAGE_BY_ID
@@ -55,17 +63,18 @@ def prepare_run_inputs(session: Session, run: Run, settings: Settings) -> None:
             "attached inputs require HPC_INPUT_TRANSFER_ENABLED=true for HPC execution"
         )
 
-    accession = None
-    for identifier in run.protein.identifiers:
-        source = identifier.source.lower()
-        if source in {"uniprot", "uniprot_accession", "accession"}:
-            accession = identifier.identifier
-            break
-        if source == "fasta_header":
-            match = re.search(r"(?:sp|tr)\|([^|]+)\|", identifier.identifier)
-            if match:
-                accession = match.group(1)
+    accession = run.configuration.scientific_accession if run.configuration else None
+    if not accession:
+        for identifier in run.protein.identifiers:
+            source = identifier.source.lower()
+            if source in {"uniprot", "uniprot_accession", "accession"}:
+                accession = identifier.identifier
                 break
+            if source == "fasta_header":
+                match = re.search(r"(?:sp|tr)\|([^|]+)\|", identifier.identifier)
+                if match:
+                    accession = match.group(1)
+                    break
     if not accession:
         raise InputTransferError("the protein needs a UniProt accession before input transfer")
 
@@ -189,7 +198,10 @@ def refresh_ready_states(session: Session, run_ids: set[str] | None = None) -> N
         return
     query = (
         select(RunStage)
-        .options(selectinload(RunStage.run))
+        .options(
+            selectinload(RunStage.run).selectinload(Run.stages),
+            selectinload(RunStage.run).selectinload(Run.configuration),
+        )
         .where(RunStage.status == RunStageStatus.PENDING)
     )
     if run_ids is not None:
@@ -202,19 +214,34 @@ def refresh_ready_states(session: Session, run_ids: set[str] | None = None) -> N
             sibling_states.get(dependency) for dependency in definition.dependencies
         ]
         if any(
-            dependency
-            in {
-                RunStageStatus.FAILED,
-                RunStageStatus.CANCELLED,
-                RunStageStatus.SKIPPED,
-            }
-            for dependency in dependency_states
+            state in {RunStageStatus.FAILED, RunStageStatus.CANCELLED}
+            or (
+                state == RunStageStatus.SKIPPED
+                and not dependency_is_satisfied(
+                    structure_source=(
+                        stage.run.configuration.structure_source
+                        if stage.run.configuration is not None
+                        else "alphafold3"
+                    ),
+                    dependency_id=dependency,
+                    status=str(state),
+                )
+            )
+            for dependency, state in zip(definition.dependencies, dependency_states, strict=False)
         ):
             transition_stage(session, stage, RunStageStatus.SKIPPED)
             stage.error_code = "dependency_unavailable"
             stage.error_message = "a dependency did not publish a usable result"
         elif all(
-            sibling_states.get(dependency) in {RunStageStatus.SUCCESS, RunStageStatus.REUSED}
+            dependency_is_satisfied(
+                structure_source=(
+                    stage.run.configuration.structure_source
+                    if stage.run.configuration is not None
+                    else "alphafold3"
+                ),
+                dependency_id=dependency,
+                status=str(sibling_states.get(dependency)),
+            )
             for dependency in definition.dependencies
         ):
             transition_stage(session, stage, RunStageStatus.READY)
@@ -225,7 +252,11 @@ def _claim_statement():
     return (
         select(RunStage)
         .join(Run, Run.id == RunStage.run_id)
-        .options(selectinload(RunStage.run))
+        .options(
+            selectinload(RunStage.run).selectinload(Run.stages),
+            selectinload(RunStage.run).selectinload(Run.configuration),
+            selectinload(RunStage.run).selectinload(Run.protein),
+        )
         .where(RunStage.status == RunStageStatus.READY)
         .where(Run.status.not_in([RunStatus.CANCEL_REQUESTED, RunStatus.CANCELLED]))
         .order_by(RunStage.created_at)
@@ -253,6 +284,91 @@ def claim_ready_stage(session: Session, settings: Settings) -> RunStage | None:
         status=str(stage.status),
     )
     return stage
+
+
+def _provided_structure_dependency_key(run: Run) -> str:
+    configuration = run.configuration
+    if configuration is None or not configuration.structure_sha256:
+        raise StageExecutionUnavailable("provided structure configuration is incomplete")
+    payload = {
+        "source": configuration.structure_source,
+        "sha256": configuration.structure_sha256,
+        "chain": configuration.structure_chain,
+        "mapping": configuration.structure_mapping or {},
+    }
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def plan_stage_cache(session: Session, stage: RunStage, settings: Settings) -> bool:
+    """Plan a stage key and link a verified hit before any execution submit."""
+
+    configuration = stage.run.configuration
+    if configuration is None:
+        raise StageExecutionUnavailable("run has no confirmed configuration")
+    dependency_keys: dict[str, str] = {}
+    for dependency_id in STAGE_BY_ID[stage.stage_id].dependencies:
+        dependency = next(
+            (candidate for candidate in stage.run.stages if candidate.stage_id == dependency_id),
+            None,
+        )
+        if dependency is None:
+            raise StageExecutionUnavailable(f"stage dependency {dependency_id} is missing")
+        if dependency.stage_result_id:
+            result = session.get(StageResult, dependency.stage_result_id)
+            if result is None or result.status != "success":
+                raise StageExecutionUnavailable(
+                    f"stage dependency {dependency_id} has no published result"
+                )
+            dependency_keys[dependency_id] = result.cache_key
+        elif (
+            configuration.structure_source == "provided_pdb"
+            and dependency_id == "structure_modeling"
+            and dependency.status == RunStageStatus.SKIPPED
+        ):
+            dependency_keys[dependency_id] = _provided_structure_dependency_key(stage.run)
+        else:
+            raise StageExecutionUnavailable(
+                f"stage dependency {dependency_id} has no cache identity"
+            )
+
+    cache_key, factors = planned_stage_cache_identity(stage, configuration, dependency_keys)
+    stage.cache_key = cache_key
+    stage.cache_factors = factors
+    session.flush()
+    hit = find_verified_cache_hit(
+        session,
+        stage,
+        cache_key,
+        ArtifactStore(settings),
+        require_provenance=True,
+        expected_artifact_types=expected_artifact_types_for_stage(stage.stage_id),
+    )
+    if hit is None:
+        session.commit()
+        return False
+    persisted = session.scalar(
+        select(RunStage.status).where(RunStage.id == stage.id).with_for_update()
+    )
+    if persisted not in {RunStageStatus.READY, RunStageStatus.QUEUED, RunStageStatus.RUNNING}:
+        session.commit()
+        return False
+    if persisted != RunStageStatus.READY:
+        stage.status = persisted
+    if stage.status == RunStageStatus.QUEUED:
+        transition_stage(session, stage, RunStageStatus.RUNNING)
+    transition_stage(session, stage, RunStageStatus.REUSED)
+    stage.stage_result_id = hit.id
+    stage.reuse_reason = {
+        "source_stage_result_id": hit.id,
+        "cache_key": cache_key,
+        "factors": factors,
+        "authorization": "owner_or_project_scope",
+        "artifact_integrity": "verified_size_and_sha256",
+    }
+    session.commit()
+    return True
 
 
 def finalize_run(session: Session, run: Run) -> None:
@@ -534,6 +650,10 @@ def _process_remote(session: Session, settings: Settings) -> bool:
             break
         processed = True
         try:
+            if plan_stage_cache(session, stage, settings):
+                refresh_ready_states(session, {stage.run_id})
+                _finalize_runs(session, {stage.run_id})
+                continue
             prepare_run_inputs(session, stage.run, settings)
             executor.submit_stage(session, stage)
             inflight_count += 1
@@ -584,6 +704,10 @@ def process_one(session: Session, executor: ScientificStageExecutor | None = Non
         return False
     executor = executor or ScientificStageExecutor()
     try:
+        if plan_stage_cache(session, stage, settings):
+            refresh_ready_states(session, {stage.run_id})
+            _finalize_runs(session, {stage.run_id})
+            return True
         prepare_run_inputs(session, stage.run, settings)
         transition_stage(session, stage, RunStageStatus.RUNNING)
         stage.lease_expires_at = _lease_deadline(settings, _utcnow())

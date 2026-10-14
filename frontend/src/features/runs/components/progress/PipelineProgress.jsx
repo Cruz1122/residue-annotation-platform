@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import LucideIcon from '@shared/components/icons/LucideIcon.jsx';
 import { ApiError, cancelRun, getActiveRun, getRun, subscribeRunEvents } from '@shared/api/client';
+import { presentRunStages, progressSummary } from '@features/runs/stage-visibility.js';
 import '@features/runs/styles/progress.css';
 
 const STATUS_ICON = {
@@ -22,9 +23,16 @@ const STATUS_TEXT = {
   failed: 'Falló',
   skipped: 'No aplica',
   cancelled: 'Cancelado',
+  disabled: 'Desactivado',
 };
 
-const TERMINAL = new Set(['success', 'reused', 'failed', 'skipped', 'cancelled']);
+const OMISSION_REASON_TEXT = {
+  provided_pdb_selected: 'se usó el PDB proporcionado',
+  variants_not_provided: 'no se confirmaron variantes válidas',
+  technical_prerequisite_not_provided: 'falta un prerrequisito técnico',
+  dependency_not_applicable: 'una dependencia no aplica',
+};
+
 const RUN_TERMINAL = new Set(['success', 'failed', 'cancelled']);
 const HALF_NODE_WIDTH = 124;
 
@@ -113,6 +121,10 @@ function buildEdges(stages, positions) {
 }
 
 function StageRuntime({ stage, now }) {
+  if (stage.status === 'disabled') return <span>Desactivado</span>;
+  if (stage.status === 'skipped' && stage.omission_reason) {
+    return <span>No aplica · {OMISSION_REASON_TEXT[stage.omission_reason] ?? stage.omission_reason}</span>;
+  }
   if (stage.status === 'running' && stage.started_at) {
     return <span>Lleva {formatElapsed(now - new Date(stage.started_at).getTime())}</span>;
   }
@@ -235,11 +247,20 @@ export default function PipelineProgress({ proteinId }) {
     return () => window.clearInterval(clock);
   }, []);
 
-  const layout = useMemo(() => stageLayout(run?.stages ?? []), [run?.stages]);
-  const edges = useMemo(() => buildEdges(run?.stages ?? [], layout.positions), [run?.stages, layout]);
-  const resolved = run?.stages.filter((stage) => TERMINAL.has(stage.status)).length ?? 0;
-  const total = run?.stages.length ?? 0;
-  const percent = total ? Math.round((resolved / total) * 100) : 0;
+  const stages = useMemo(() => {
+    if (!run?.stages?.length) return [];
+    try {
+      return presentRunStages(
+        run.stages,
+      );
+    } catch (visibilityError) {
+      console.error(visibilityError);
+      return run.stages;
+    }
+  }, [run]);
+  const layout = useMemo(() => stageLayout(stages), [stages]);
+  const edges = useMemo(() => buildEdges(stages, layout.positions), [stages, layout]);
+  const summary = progressSummary(stages);
 
   const setZoomAround = (nextZoom, clientPoint = null) => {
     const viewport = viewportRef.current;
@@ -286,7 +307,7 @@ export default function PipelineProgress({ proteinId }) {
           <span class="run-id">Run {run.id}</span>
         </div>
         <div class="progress-actions">
-          <div class="progress-counter"><strong>{resolved} de {total}</strong> etapas · {percent}% · {STATUS_TEXT[run.status] ?? run.status}</div>
+          <div class="progress-counter"><strong>{summary.completed} de {summary.enabled}</strong> activos · {summary.percentage}% · {STATUS_TEXT[run.status] ?? run.status}</div>
           {!['success', 'failed', 'cancelled'].includes(run.status) && <button class="cancel-run" type="button" onClick={cancel} disabled={cancelling}>{cancelling ? 'Cancelando…' : 'Cancelar'}</button>}
           <div class="progress-zoom" aria-label="Zoom del mapa">
             <button type="button" onClick={() => setZoomAround(zoom - .1)} aria-label="Alejar">−</button>
@@ -320,9 +341,9 @@ export default function PipelineProgress({ proteinId }) {
           <div class="pipeline-map" style={{ width: `${layout.width}px`, height: `${layout.height}px`, transform: `scale(${zoom})` }}>
             <svg class="pipeline-edges" viewBox={`0 0 ${layout.width} ${layout.height}`} aria-hidden="true">
               <defs><marker id="pipeline-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" /></marker></defs>
-              {edges.map((edge) => <path key={`${edge.from}-${edge.to}`} class={`pipeline-edge edge-${displayStatus(run.stages.find((stage) => stage.id === edge.to)?.status ?? 'pending')}`} d={edge.d} marker-end="url(#pipeline-arrow)" />)}
+              {edges.map((edge) => <path key={`${edge.from}-${edge.to}`} class={`pipeline-edge edge-${displayStatus(stages.find((stage) => stage.id === edge.to)?.status ?? 'pending')}`} d={edge.d} marker-end="url(#pipeline-arrow)" />)}
             </svg>
-            {run.stages.map((stage) => {
+            {stages.map((stage) => {
               const position = layout.positions.get(stage.id);
               const visualStatus = displayStatus(stage.status);
               return (
@@ -331,7 +352,7 @@ export default function PipelineProgress({ proteinId }) {
                   <div class="stage-content">
                     <div class="stage-title-row"><strong>{stage.title}</strong></div>
                     <div class="stage-time">{stage.legacy_id} · {stage.dependencies.length ? `${stage.dependencies.length} dependencia${stage.dependencies.length === 1 ? '' : 's'}` : 'Sin dependencias'}</div>
-                    <div class="stage-runtime"><LucideIcon name="clock" /><StageRuntime stage={stage} now={now} /></div>
+                    <div class="stage-runtime">{stage.status !== 'disabled' && <LucideIcon name="clock" />}<StageRuntime stage={stage} now={now} /></div>
                   </div>
                   <span class={`stage-status stage-status-${visualStatus}`} title={STATUS_TEXT[stage.status] ?? stage.status} aria-hidden="true">{STATUS_ICON[stage.status] && <LucideIcon name={STATUS_ICON[stage.status]} />}</span>
                 </a>

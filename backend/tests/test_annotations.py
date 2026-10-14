@@ -6,16 +6,42 @@ import pytest
 from app.core.config import Settings
 from app.features.annotations.service import insert_annotation_rows
 from app.features.artifacts.storage import ArtifactStore
+from app.features.runs.cache import expected_artifact_types_for_stage, planned_stage_cache_identity
 from app.features.runs.models import Artifact, Run, RunStage, StageResult
 from app.features.runs.remote_executor import (
     RemoteStageExecutionError,
     SSHStageExecutor,
+    _expected_remote_provenance_binding,
     _parse_annotation_rows,
 )
 from app.features.runs.state import RunStageStatus
+from app.features.stages.registry import STAGE_BY_ID
 from sqlalchemy import select
 
 SEQUENCE = "ACDEFGHIKLMNPQRSTVWY"
+
+
+def _remote_provenance(stage: RunStage, cache_key: str) -> str:
+    return json.dumps(
+        {
+            "tool": "verified-test",
+            "version": "1.0",
+            "platform_binding": _expected_remote_provenance_binding(stage, cache_key),
+        },
+        sort_keys=True,
+    )
+
+
+def _remote_artifacts(stage_id: str, payload: bytes) -> dict[str, dict[str, object]]:
+    digest = hashlib.sha256(payload).hexdigest()
+    return {
+        artifact_type: {
+            "path": f"{artifact_type}.bin",
+            "sha256": digest,
+            "size": len(payload),
+        }
+        for artifact_type in sorted(expected_artifact_types_for_stage(stage_id) - {"annotations"})
+    }
 
 
 def _create_run(client) -> str:
@@ -147,17 +173,33 @@ def _stage_for_consumer(
     run_id = client.post("/api/v1/runs", json={"protein_id": protein_id}).json()["id"]
     run = session.get(Run, run_id)
     stage = next(item for item in run.stages if item.stage_id == stage_id)
+    dependency_cache_keys = {
+        dependency: hashlib.sha256(f"test:{dependency}".encode()).hexdigest()
+        for dependency in STAGE_BY_ID[stage_id].dependencies
+    }
+    cache_key, cache_factors = planned_stage_cache_identity(
+        stage,
+        run.configuration,
+        dependency_cache_keys,
+    )
     result = StageResult(
         protein_id=protein_id,
         stage_id=stage_id,
-        cache_key=hashlib.sha256(stage_id.encode()).hexdigest(),
+        cache_key=cache_key,
         status="success",
-        provenance={"tool": "verified-test"},
+        provenance={
+            "tool": "verified-test",
+            "cache_key": cache_key,
+            "cache_factors": cache_factors,
+            "required_artifacts": sorted(expected_artifact_types_for_stage(stage_id)),
+        },
         owner_id=run.owner_id,
         project_id=run.project_id,
     )
     session.add(result)
     session.flush()
+    stage.cache_key = cache_key
+    stage.cache_factors = cache_factors
     stage.stage_result_id = result.id
     stage.status = RunStageStatus.SUCCESS
     session.commit()
@@ -245,16 +287,24 @@ def test_reusable_result_requires_existing_artifacts(client, session, tmp_path: 
     path = store.resolve(storage_key)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(b"data")
-    session.add(
-        Artifact(
-            stage_result_id=result.id,
-            artifact_type="annotations",
-            storage_backend="filesystem",
-            storage_key=storage_key,
-            sha256=hashlib.sha256(b"data").hexdigest(),
-            size=4,
+    for artifact_type in expected_artifact_types_for_stage(stage.stage_id):
+        payload = b"data" if artifact_type == "annotations" else b"model"
+        current_key = (
+            storage_key if artifact_type == "annotations" else f"remote/reuse/{artifact_type}.bin"
         )
-    )
+        current_path = store.resolve(current_key)
+        current_path.parent.mkdir(parents=True, exist_ok=True)
+        current_path.write_bytes(payload)
+        session.add(
+            Artifact(
+                stage_result_id=result.id,
+                artifact_type=artifact_type,
+                storage_backend="filesystem",
+                storage_key=current_key,
+                sha256=hashlib.sha256(payload).hexdigest(),
+                size=len(payload),
+            )
+        )
     session.commit()
     executor = SSHStageExecutor.__new__(SSHStageExecutor)
 
@@ -280,36 +330,50 @@ def test_ingest_result_reuses_existing_cache_entry(client, session, tmp_path: Pa
         hpc_remote_root="/gpfs/root",
     )
     store = ArtifactStore(settings)
-    storage_key = "remote/reuse/annotations.tsv"
-    path = store.resolve(storage_key)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(b"data")
-    session.add(
-        Artifact(
-            stage_result_id=result.id,
-            artifact_type="annotations",
-            storage_backend="filesystem",
-            storage_key=storage_key,
-            sha256=hashlib.sha256(b"data").hexdigest(),
-            size=4,
+    annotations_key = "remote/reuse/annotations.tsv"
+    artifact_payload = b"model"
+    for artifact_type in expected_artifact_types_for_stage(stage.stage_id):
+        payload = b"data" if artifact_type == "annotations" else artifact_payload
+        storage_key = (
+            annotations_key
+            if artifact_type == "annotations"
+            else f"remote/reuse/{artifact_type}.bin"
         )
-    )
+        path = store.resolve(storage_key)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payload)
+        session.add(
+            Artifact(
+                stage_result_id=result.id,
+                artifact_type=artifact_type,
+                storage_backend="filesystem",
+                storage_key=storage_key,
+                sha256=hashlib.sha256(payload).hexdigest(),
+                size=len(payload),
+            )
+        )
+    provenance_text = _remote_provenance(stage, result.cache_key)
+    result.provenance = {
+        **result.provenance,
+        "required_artifacts": sorted(expected_artifact_types_for_stage(stage.stage_id)),
+    }
     session.commit()
+    artifacts = _remote_artifacts(stage.stage_id, artifact_payload)
     manifest = {
         "schema": "stage-result-v1",
         "stage_id": "protein_identity",
         "status": "success",
         "cache_key": result.cache_key,
         "annotations": "rows.tsv",
-        "artifacts": {"model": {"path": "model.cif", "sha256": "b" * 64, "size": 4}},
+        "artifacts": artifacts,
         "file_integrity": {
             "annotations": {
                 "sha256": hashlib.sha256(b"data").hexdigest(),
                 "size": 4,
             },
             "provenance.json": {
-                "sha256": hashlib.sha256(b"{}").hexdigest(),
-                "size": 2,
+                "sha256": hashlib.sha256(provenance_text.encode()).hexdigest(),
+                "size": len(provenance_text.encode()),
             },
         },
     }
@@ -325,7 +389,7 @@ def test_ingest_result_reuses_existing_cache_entry(client, session, tmp_path: Pa
             if remote_path.endswith("result_manifest.json"):
                 return json.dumps(manifest)
             if remote_path.endswith("provenance.json"):
-                return "{}"
+                return provenance_text
             raise RuntimeError(f"unexpected read: {remote_path}")
 
     executor = SSHStageExecutor.__new__(SSHStageExecutor)
@@ -366,27 +430,22 @@ def test_stale_cache_entry_is_purged_and_republished(client, session, tmp_path: 
         f"{stage.run.protein_id}\t2\tC\tC\texposed\n"
     ).encode()
     artifact_payload = b"data"
+    provenance_text = _remote_provenance(stage, result.cache_key)
     manifest = {
         "schema": "stage-result-v1",
         "stage_id": "physicochemical_context",
         "status": "success",
         "cache_key": result.cache_key,
         "annotations": "rows.tsv",
-        "artifacts": {
-            "model": {
-                "path": "model.cif",
-                "sha256": hashlib.sha256(artifact_payload).hexdigest(),
-                "size": len(artifact_payload),
-            }
-        },
+        "artifacts": _remote_artifacts(stage.stage_id, artifact_payload),
         "file_integrity": {
             "annotations": {
                 "sha256": hashlib.sha256(annotations).hexdigest(),
                 "size": len(annotations),
             },
             "provenance.json": {
-                "sha256": hashlib.sha256(b"{}").hexdigest(),
-                "size": 2,
+                "sha256": hashlib.sha256(provenance_text.encode()).hexdigest(),
+                "size": len(provenance_text.encode()),
             },
         },
     }
@@ -402,7 +461,7 @@ def test_stale_cache_entry_is_purged_and_republished(client, session, tmp_path: 
             if remote_path.endswith("result_manifest.json"):
                 return json.dumps(manifest)
             if remote_path.endswith("provenance.json"):
-                return "{}"
+                return provenance_text
             raise RuntimeError(f"unexpected read: {remote_path}")
 
         def download_to(
@@ -461,7 +520,7 @@ def test_failed_republish_restores_stale_cache_row_and_files(
     )
     session.commit()
 
-    provenance_text = "{}"
+    provenance_text = _remote_provenance(stage, result.cache_key)
     provenance_record = {
         "sha256": hashlib.sha256(provenance_text.encode()).hexdigest(),
         "size": len(provenance_text.encode()),
@@ -488,13 +547,7 @@ def test_failed_republish_restores_stale_cache_row_and_files(
         "status": "success",
         "cache_key": result.cache_key,
         "annotations": "rows.tsv",
-        "artifacts": {
-            "model": {
-                "path": "model.cif",
-                "sha256": "b" * 64,
-                "size": 4,
-            }
-        },
+        "artifacts": _remote_artifacts(stage.stage_id, b"data"),
         "file_integrity": file_integrity,
     }
 

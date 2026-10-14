@@ -66,6 +66,10 @@
 .artifact-link:disabled { cursor: wait; opacity: .58; }
 .artifact-link .icon-slot { width: 14px; height: 14px; }
 .artifact-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.artifact-pending { color: var(--muted); font-size: 8px; font-weight: 600; white-space: nowrap; }
+.artifact-link.artifact-link-pending { grid-template-columns: 16px minmax(0, 1fr) auto; }
+.artifact-link[aria-disabled='true'] { cursor: not-allowed; }
+.artifact-link[aria-disabled='true']:hover { border-color: var(--line); background: #fff; }
 .artifact-download-error { margin: 2px 0 0; color: var(--danger); font-size: 9px; line-height: 1.4; }
 .variant-ddg-state { position: relative; }
 .variant-ddg-state > .info-stage-status { position: absolute; right: 14px; top: -45px; }

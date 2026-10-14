@@ -287,4 +287,4 @@ Las rutas son relativas a la raíz MN5 indicada al inicio:
 - `docs/stages/<stage>.md`: explicación operativa y limitaciones de cada etapa.
 - `tests/orchestration/` y `tests/<stage>/`: contratos, reglas y smoke tests disponibles.
 
-El estado de conectividad y el vínculo con el roadmap local están en [`mn5-current-state.md`](mn5-current-state.md). La aceptación de HPC y la implementación web siguen en estado parcial/pendiente en [`specs/changes/0009-hpc-gpfs/acceptance.md`](../specs/changes/0009-hpc-gpfs/acceptance.md) y [`specs/changes/0010-scientific-integration/acceptance.md`](../specs/changes/0010-scientific-integration/acceptance.md).
+El estado de conectividad y el vínculo con el roadmap local están en [`mn5-current-state.md`](mn5-current-state.md). La aceptación histórica de HPC y la implementación web siguen en estado parcial/pendiente en [`0009 acceptance`](specs-archive/2026-10-14/changes/0009-hpc-gpfs/acceptance.md) y [`0010 acceptance`](specs-archive/2026-10-14/changes/0010-scientific-integration/acceptance.md). El contrato funcional activo está en [`02 — Ejecución científica`](../specs/02-ejecucion-cientifica.md).

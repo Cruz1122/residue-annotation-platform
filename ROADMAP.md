@@ -1,6 +1,8 @@
 # Roadmap — Residue Annotation Platform, producto final
 
-**Estado:** implementación incremental en curso; no es todavía release científico validado. **Puertos locales:** frontend 4742 / backend 8742. **Destino:** release de producto científico operativo, no solamente un scaffold. **Política de inspección:** VPN+SSH por contraseña, solo lectura en GPFS autorizado.
+**Estado:** contexto histórico de implementación; la fuente de verdad funcional activa son las tres specs bajo `specs/`. No es todavía release científico validado. **Puertos locales:** frontend 4742 / backend 8742. **Destino:** release de producto científico operativo, no solamente un scaffold. **Política de inspección:** VPN+SSH por contraseña, solo lectura en GPFS autorizado.
+
+Las entregas activas son [`01 — Entrada y configuración`](specs/01-entrada-configuracion.md), [`02 — Ejecución científica en MareNostrum 5`](specs/02-ejecucion-cientifica.md) y [`03 — Seguimiento y resultados`](specs/03-seguimiento-resultados.md). La tabla de incrementos siguiente se conserva como historial; sus documentos viven en el [archivo de specs anteriores](docs/specs-archive/2026-10-14/changes/).
 
 ## 1. Qué significa «producto final»
 
@@ -45,26 +47,26 @@ flowchart LR
 
 La topología web/worker y el transporte a MN5 requieren ADR antes del despliegue. No se presupone ejecutar Docker Engine en nodos de cómputo.
 
-## 3. Incrementos especificados y gates
+## 3. Incrementos históricos y gates
 
 | ID | Entrega | Dependencias | Gate |
 | --- | --- | --- | --- |
-| [0001 — Scaffold](specs/changes/0001-repository-scaffold/spec.md) | Astro/FastAPI/Compose de **dos** servicios, health, README | — | Arranque limpio y health web real |
-| [0002 — Calidad](specs/changes/0002-repository-quality/spec.md) | pytest/Ruff/Astro check/CI, estándares | 0001 | Checks reproducibles, sin HPC |
-| [0003 — Spike visor](specs/changes/0003-structure-viewer/spec.md) | Benchmark de librerías y selección PDB/mmCIF aislada | 0002 | Selection mapping real y ADR |
-| [0004 — Proteínas](specs/changes/0004-protein-identity/spec.md) | PostgreSQL, Alembic, protein/aliases, FASTA/sha256 | 0002 | Duplicado resuelto a mismo protein_id |
-| [0005 — Runs/modelo](specs/changes/0005-run-domain/spec.md) | run/run_stage/stage_result/artifact, endpoints | 0004 | Run durable, status/FK y no bloqueo |
-| [0006 — Worker](specs/changes/0006-dag-worker/spec.md) | Entry point worker, pipeline, locks/leases, estados | 0005 | Reinicio y doble worker sin double-submit |
-| [0007 — Baseline científica](specs/changes/0007-science-baseline/spec.md) | Snapshot + contratos 18 stages; inspección remota **solo lectura** opcional | 0002 | Equivalencia/comparación de datos reales sin modificar MN5 |
-| [0008 — Caché/manifests](specs/changes/0008-cache-manifests/spec.md) | Claves, manifest final, validación y publicación | 0005, 0006, 0007 | Crash no publica success; cache correcto |
-| [0009 — Slurm/GPFS + inspección segura](specs/changes/0009-hpc-gpfs/spec.md) | HPCClient mock/ssh/native e inspector SFTP read-only, VPN host + contraseña | 0006, 0008 | Smoke HPC real autorizado, SFTP confinado sin writes y manifest corrupto rechazado |
-| [0010 — 18 stages](specs/changes/0010-scientific-integration/spec.md) | Migración científica por ramas / regresión | 0007, 0008, 0009 | Cada stage pasa golden smoke y provenance |
-| [0011 — REST/SSE](specs/changes/0011-incremental-api/spec.md) | Annotations parciales, events, downloads | 0005, 0006, 0008 | UI/API re-sincroniza tras fallo de SSE |
-| [0012 — Explorer integral](specs/changes/0012-residue-explorer/spec.md) | 3D+secuencia+tabla+tracks+QC/evidencia | 0003, 0010, 0011 | Selección bidireccional y mapping correcto |
-| [0013 — Seguridad](specs/changes/0013-security-access/spec.md) | Autenticación, autorización, cuotas, audit, control de inspección read-only | 0004, 0005, 0011 | IDOR, secretos, límites GPFS, cuotas HPC |
-| [0014 — Operación](specs/changes/0014-operations-deployment/spec.md) | Staging/prod, Linux/Windows, VPN host, recuperación, backups | 0010, 0011, 0013 | Restart/reconcile, VPN outage, restore y rollback |
-| [0015 — Release](specs/changes/0015-product-release/spec.md) | E2E científico real, performance, security, sign-off | 0012, 0013, 0014 | Release aprobado con trazabilidad total |
-| [0016 — Auth, inputs y concurrencia](specs/changes/0016-auth-account-security/spec.md) | Cuentas, sesiones, tokens, uploads pequeños y máximo una run activa por usuario | 0004, 0005, 0011 | Aceptación pending: PostgreSQL concurrente, proveedor email/SSO, secret scan, threat model y SCP autorizado |
+| [0001 — Scaffold](docs/specs-archive/2026-10-14/changes/0001-repository-scaffold/spec.md) | Astro/FastAPI/Compose de **dos** servicios, health, README | — | Arranque limpio y health web real |
+| [0002 — Calidad](docs/specs-archive/2026-10-14/changes/0002-repository-quality/spec.md) | pytest/Ruff/Astro check/CI, estándares | 0001 | Checks reproducibles, sin HPC |
+| [0003 — Spike visor](docs/specs-archive/2026-10-14/changes/0003-structure-viewer/spec.md) | Benchmark de librerías y selección PDB/mmCIF aislada | 0002 | Selection mapping real y ADR |
+| [0004 — Proteínas](docs/specs-archive/2026-10-14/changes/0004-protein-identity/spec.md) | PostgreSQL, Alembic, protein/aliases, FASTA/sha256 | 0002 | Duplicado resuelto a mismo protein_id |
+| [0005 — Runs/modelo](docs/specs-archive/2026-10-14/changes/0005-run-domain/spec.md) | run/run_stage/stage_result/artifact, endpoints | 0004 | Run durable, status/FK y no bloqueo |
+| [0006 — Worker](docs/specs-archive/2026-10-14/changes/0006-dag-worker/spec.md) | Entry point worker, pipeline, locks/leases, estados | 0005 | Reinicio y doble worker sin double-submit |
+| [0007 — Baseline científica](docs/specs-archive/2026-10-14/changes/0007-science-baseline/spec.md) | Snapshot + contratos 18 stages; inspección remota **solo lectura** opcional | 0002 | Equivalencia/comparación de datos reales sin modificar MN5 |
+| [0008 — Caché/manifests](docs/specs-archive/2026-10-14/changes/0008-cache-manifests/spec.md) | Claves, manifest final, validación y publicación | 0005, 0006, 0007 | Crash no publica success; cache correcto |
+| [0009 — Slurm/GPFS + inspección segura](docs/specs-archive/2026-10-14/changes/0009-hpc-gpfs/spec.md) | HPCClient mock/ssh/native e inspector SFTP read-only, VPN host + contraseña | 0006, 0008 | Smoke HPC real autorizado, SFTP confinado sin writes y manifest corrupto rechazado |
+| [0010 — 18 stages](docs/specs-archive/2026-10-14/changes/0010-scientific-integration/spec.md) | Migración científica por ramas / regresión | 0007, 0008, 0009 | Cada stage pasa golden smoke y provenance |
+| [0011 — REST/SSE](docs/specs-archive/2026-10-14/changes/0011-incremental-api/spec.md) | Annotations parciales, events, downloads | 0005, 0006, 0008 | UI/API re-sincroniza tras fallo de SSE |
+| [0012 — Explorer integral](docs/specs-archive/2026-10-14/changes/0012-residue-explorer/spec.md) | 3D+secuencia+tabla+tracks+QC/evidencia | 0003, 0010, 0011 | Selección bidireccional y mapping correcto |
+| [0013 — Seguridad](docs/specs-archive/2026-10-14/changes/0013-security-access/spec.md) | Autenticación, autorización, cuotas, audit, control de inspección read-only | 0004, 0005, 0011 | IDOR, secretos, límites GPFS, cuotas HPC |
+| [0014 — Operación](docs/specs-archive/2026-10-14/changes/0014-operations-deployment/spec.md) | Staging/prod, Linux/Windows, VPN host, recuperación, backups | 0010, 0011, 0013 | Restart/reconcile, VPN outage, restore y rollback |
+| [0015 — Release](docs/specs-archive/2026-10-14/changes/0015-product-release/spec.md) | E2E científico real, performance, security, sign-off | 0012, 0013, 0014 | Release aprobado con trazabilidad total |
+| [0016 — Auth, inputs y concurrencia](docs/specs-archive/2026-10-14/changes/0016-auth-account-security/spec.md) | Cuentas, sesiones, tokens, uploads pequeños y máximo una run activa por usuario | 0004, 0005, 0011 | Aceptación pending: PostgreSQL concurrente, proveedor email/SSO, secret scan, threat model y SCP autorizado |
 
 **La spec de cada ID contiene** propuesta, requisitos observables, diseño preliminar, tareas y aceptación con estado `NOT RUN`. Aprobación de un ID **no** autoriza ejecutar los siguientes.
 
@@ -87,11 +89,11 @@ No se asignan fechas ni presupuestos sin equipo, infraestructura, SLAs y políti
 - Evidencia topológica TM concluyente no se reemplaza con baja confianza local; las reglas de conflicto de `structural_regime` se preservan.
 - FoldX (kcal/mol) y RosettaMP (REU) no se suman/comparan como si fueran una misma energía.
 - Manifest y caché por stage no alteran los outputs; un refactor debe comparar ciencia real antes/después.
-- Todos los 18 stages tienen ficha en `specs/scientific-stages/`; `variant_ddg` es opcional.
+- Todos los 18 stages tienen ficha en el archivo histórico `docs/specs-archive/2026-10-14/scientific-stages/`; `variant_ddg` es opcional.
 
 ## 6. Riesgos bloqueantes antes de codificar features críticas
 
-Revisar [`specs/DECISIONS.md`](specs/DECISIONS.md) antes de 0007–0014: `reference_preparation` (PDF) frente a `protein_relaxation_energy` (pipeline documentado), `aa_annotations.tsv` frente a `annotations.tsv`, `legacy_id`, serialización de cache_key, autenticación y scopes, mapping PDB/mmCIF, transporte BSC y presupuesto de rendimiento.
+Revisar [`DECISIONS.md`](docs/specs-archive/2026-10-14/DECISIONS.md) como contexto histórico antes de estudiar los gates antiguos: `reference_preparation` (PDF) frente a `protein_relaxation_energy` (pipeline documentado), `aa_annotations.tsv` frente a `annotations.tsv`, `legacy_id`, serialización de cache_key, autenticación y scopes, mapping PDB/mmCIF, transporte BSC y presupuesto de rendimiento.
 
 No se resuelven por suposición. Hay que comparar con código/outputs y registrar ADR.
 
@@ -124,4 +126,4 @@ El uso de HPCClient para **submit/status/cancel** es distinto y solo se habilita
 | `ssh` / `ssh_sftp` | Linux/Windows local | vía VPN+SSH autorizados | SFTP con `open('rb')`, sin remote exec |
 | `native` | Infra BSC si se concede host persistente | Slurm local autorizado | GPFS montado con apertura read-only y permisos acotados |
 
-**Referencia transversal:** [`specs/contracts/mn5-readonly-inspection.md`](specs/contracts/mn5-readonly-inspection.md). **Matriz de 18 pruebas:** [`specs/tests/mn5-readonly-inspection-matrix.md`](specs/tests/mn5-readonly-inspection-matrix.md). El pipeline se describe bajo `new/` pero el límite de inspección es exactamente la ruta padre proporcionada por el usuario. Todas las pruebas reales `NOT RUN` hasta autorización y conectividad.
+**Referencia transversal histórica:** [`mn5-readonly-inspection.md`](docs/specs-archive/2026-10-14/contracts/mn5-readonly-inspection.md). **Matriz de 18 pruebas:** [`mn5-readonly-inspection-matrix.md`](docs/specs-archive/2026-10-14/tests/mn5-readonly-inspection-matrix.md). El pipeline se describe bajo `new/` pero el límite de inspección es exactamente la ruta padre proporcionada por el usuario. Todas las pruebas reales `NOT RUN` hasta autorización y conectividad.

@@ -6,9 +6,19 @@ from types import SimpleNamespace
 import pytest
 from app.core.config import Settings
 from app.features.annotations.models import ANNOTATION_TABLES
+from app.features.runs.cache import (
+    expected_artifact_types_for_stage,
+    planned_stage_cache_identity,
+)
 from app.features.runs.models import Artifact, Run, RunStage, StageResult
-from app.features.runs.remote_executor import RemoteStageExecutionError, SSHStageExecutor
+from app.features.runs.remote_executor import (
+    RemoteStageExecutionError,
+    SSHStageExecutor,
+    _expected_remote_provenance_binding,
+    _validated_local_cache_plan,
+)
 from app.features.runs.worker_service import claim_ready_stage
+from app.features.stages.registry import STAGE_BY_ID
 from app.infrastructure.hpc.base import (
     HPCConfigurationError,
     HPCTransportError,
@@ -22,6 +32,48 @@ from paramiko.ssh_exception import AuthenticationException, BadHostKeyException
 from sqlalchemy import select
 
 SEQUENCE = "ACDEFGHIKLMNPQRSTVWY"
+
+
+def _artifact_entries(stage_id: str, payload: bytes) -> dict[str, dict[str, object]]:
+    digest = hashlib.sha256(payload).hexdigest()
+    return {
+        artifact_type: {
+            "path": f"/gpfs/test/cache/{artifact_type}.json",
+            "external": True,
+            "sha256": digest,
+            "size": len(payload),
+        }
+        for artifact_type in sorted(expected_artifact_types_for_stage(stage_id) - {"annotations"})
+    }
+
+
+def _bind_remote(remote: object, stage: RunStage, cache_key: str) -> None:
+    binding = _expected_remote_provenance_binding(stage, cache_key)
+    remote.provenance = json.dumps(
+        {
+            "tool": "fake-pipeline",
+            "version": "1.0",
+            "platform_binding": binding,
+        },
+        sort_keys=True,
+    ).encode()
+
+
+def _prepare_remote(remote: object, stage: RunStage) -> str:
+    dependency_cache_keys = {
+        dependency: hashlib.sha256(f"test:{dependency}".encode()).hexdigest()
+        for dependency in STAGE_BY_ID[stage.stage_id].dependencies
+    }
+    cache_key, cache_factors = planned_stage_cache_identity(
+        stage,
+        stage.run.configuration,
+        dependency_cache_keys,
+    )
+    stage.cache_key = cache_key
+    stage.cache_factors = cache_factors
+    remote.cache_key = cache_key
+    _bind_remote(remote, stage, cache_key)
+    return cache_key
 
 
 class FakeCompletedRemote:
@@ -38,6 +90,7 @@ class FakeCompletedRemote:
         ).encode()
         self.summary = b'{"accession":"P00001","status":"verified"}\n'
         self.provenance = b'{"tool":"fake-pipeline","version":"1.0"}'
+        self.cache_key = "b" * 64
         self.remote_run = f"/gpfs/test/runs/{run_id}"
         self.result_directory = f"{self.remote_run}/results/protein_identity"
 
@@ -67,7 +120,7 @@ class FakeCompletedRemote:
                     "schema": "stage-result-v1",
                     "stage_id": "protein_identity",
                     "status": "success",
-                    "cache_key": "b" * 64,
+                    "cache_key": self.cache_key,
                     "annotations": "annotations.tsv",
                     "file_integrity": {
                         "annotations": {
@@ -79,14 +132,7 @@ class FakeCompletedRemote:
                             "size": len(self.provenance),
                         },
                     },
-                    "artifacts": {
-                        "summary": {
-                            "path": "/gpfs/test/cache/summary.json",
-                            "external": True,
-                            "sha256": hashlib.sha256(self.summary).hexdigest(),
-                            "size": len(self.summary),
-                        }
-                    },
+                    "artifacts": _artifact_entries("protein_identity", self.summary),
                 }
             )
         if remote_path.endswith("provenance.json"):
@@ -116,6 +162,7 @@ class FakeArtifactOnlyRemote(FakeCompletedRemote):
     def __init__(self, run_id: str):
         super().__init__(run_id)
         self.provenance = b'{"tool":"fake-structure-pipeline","version":"1.0"}'
+        self.cache_key = "c" * 64
         self.result_directory = f"{self.remote_run}/results/{self.stage_id}"
 
     def read_text(self, remote_path: str, max_bytes: int) -> str:
@@ -134,21 +181,14 @@ class FakeArtifactOnlyRemote(FakeCompletedRemote):
                     "stage_id": self.stage_id,
                     "status": "success",
                     "partial": False,
-                    "cache_key": "c" * 64,
+                    "cache_key": self.cache_key,
                     "file_integrity": {
                         "provenance.json": {
                             "sha256": hashlib.sha256(self.provenance).hexdigest(),
                             "size": len(self.provenance),
                         }
                     },
-                    "artifacts": {
-                        "ensemble": {
-                            "path": "/gpfs/test/cache/ensemble.tar.gz",
-                            "external": True,
-                            "sha256": hashlib.sha256(self.summary).hexdigest(),
-                            "size": len(self.summary),
-                        }
-                    },
+                    "artifacts": _artifact_entries(self.stage_id, self.summary),
                 }
             )
         if remote_path.endswith("provenance.json"):
@@ -160,8 +200,8 @@ class FakeDirectoryArtifactRemote(FakeArtifactOnlyRemote):
     def read_text(self, remote_path: str, max_bytes: int) -> str:
         if remote_path.endswith("result_manifest.json"):
             manifest = json.loads(super().read_text(remote_path, max_bytes))
-            manifest["artifacts"]["ensemble"] = {
-                "path": "ensemble",
+            manifest["artifacts"]["conformational_ensemble_final_dir"] = {
+                "path": "conformational_ensemble_final_dir",
                 "external": False,
                 "sha256": None,
                 "size": None,
@@ -176,7 +216,9 @@ class FakeDirectoryArtifactRemote(FakeArtifactOnlyRemote):
         max_bytes: int,
         max_entries: int,
     ) -> tuple[int, str]:
-        assert remote_path.endswith("/results/conformational_ensemble/ensemble")
+        assert remote_path.endswith(
+            "/results/conformational_ensemble/conformational_ensemble_final_dir"
+        )
         payload = b"deterministic-directory-archive"
         assert len(payload) <= max_bytes
         local_path.parent.mkdir(parents=True, exist_ok=True)
@@ -188,20 +230,38 @@ class FakeCollidingArtifactRemote(FakeCompletedRemote):
     def read_text(self, remote_path: str, max_bytes: int) -> str:
         if remote_path.endswith("result_manifest.json"):
             manifest = json.loads(super().read_text(remote_path, max_bytes))
-            manifest["artifacts"] = {
-                "model_a": {
-                    "path": "/gpfs/test/cache/a/model.cif",
-                    "external": True,
-                    "sha256": hashlib.sha256(self.summary).hexdigest(),
-                    "size": len(self.summary),
-                },
-                "model_b": {
-                    "path": "/gpfs/test/cache/b/model.cif",
-                    "external": True,
-                    "sha256": hashlib.sha256(self.summary).hexdigest(),
-                    "size": len(self.summary),
-                },
+            manifest["artifacts"]["canonical_fasta"] = {
+                "path": "/gpfs/test/cache/a/model.cif",
+                "external": True,
+                "sha256": hashlib.sha256(self.summary).hexdigest(),
+                "size": len(self.summary),
             }
+            manifest["artifacts"]["protein_identity"] = {
+                "path": "/gpfs/test/cache/b/model.cif",
+                "external": True,
+                "sha256": hashlib.sha256(self.summary).hexdigest(),
+                "size": len(self.summary),
+            }
+            return json.dumps(manifest)
+        return super().read_text(remote_path, max_bytes)
+
+
+class FakeNonCanonicalArtifactRemote(FakeCompletedRemote):
+    def read_text(self, remote_path: str, max_bytes: int) -> str:
+        if remote_path.endswith("result_manifest.json"):
+            manifest = json.loads(super().read_text(remote_path, max_bytes))
+            manifest["artifacts"]["protein/identity"] = manifest["artifacts"].pop(
+                "protein_identity"
+            )
+            return json.dumps(manifest)
+        return super().read_text(remote_path, max_bytes)
+
+
+class FakeReservedAnnotationsArtifactRemote(FakeCompletedRemote):
+    def read_text(self, remote_path: str, max_bytes: int) -> str:
+        if remote_path.endswith("result_manifest.json"):
+            manifest = json.loads(super().read_text(remote_path, max_bytes))
+            manifest["artifacts"]["annotations"] = manifest["artifacts"]["canonical_fasta"]
             return json.dumps(manifest)
         return super().read_text(remote_path, max_bytes)
 
@@ -335,6 +395,7 @@ def test_remote_transport_outage_keeps_accepted_stage_retryable(
     stage = claim_ready_stage(session, settings)
     assert stage is not None
     remote = remote_type(created_run.json()["id"])
+    _prepare_remote(remote, stage)
     executor = SSHStageExecutor.__new__(SSHStageExecutor)
     executor.settings = settings
     executor.client = remote
@@ -380,9 +441,11 @@ def test_non_retryable_hpc_status_errors_are_audited(
     )
     stage = claim_ready_stage(session, settings)
     assert stage is not None
+    remote = remote_type(created_run.json()["id"])
+    _prepare_remote(remote, stage)
     executor = SSHStageExecutor.__new__(SSHStageExecutor)
     executor.settings = settings
-    executor.client = remote_type(created_run.json()["id"])
+    executor.client = remote
 
     executor.submit_stage(session, stage)
     assert executor.poll_stage(session, stage) is True
@@ -430,9 +493,11 @@ def test_non_retryable_hpc_result_errors_are_audited(
     )
     stage = claim_ready_stage(session, settings)
     assert stage is not None
+    remote = remote_type(created_run.json()["id"])
+    _prepare_remote(remote, stage)
     executor = SSHStageExecutor.__new__(SSHStageExecutor)
     executor.settings = settings
-    executor.client = remote_type(created_run.json()["id"])
+    executor.client = remote
 
     executor.submit_stage(session, stage)
     assert executor.poll_stage(session, stage) is True
@@ -494,6 +559,7 @@ def test_remote_annotations_require_identity_and_complete_coverage(
     executor.settings = settings
     executor.client = remote
 
+    _prepare_remote(remote, stage)
     executor.submit_stage(session, stage)
     assert executor.poll_stage(session, stage) is True
 
@@ -536,6 +602,7 @@ def test_submit_poll_and_ingest_persist_a_linked_stage_result(client, session, t
     executor.settings = settings
     executor.client = remote
 
+    _prepare_remote(remote, stage)
     executor.submit_stage(session, stage)
     assert stage.slurm_job_id == remote.job_id
     assert len(remote.requests) == 1
@@ -569,7 +636,9 @@ def test_submit_poll_and_ingest_persist_a_linked_stage_result(client, session, t
     assert result.status == "success"
 
     artifacts = list(session.scalars(select(Artifact).where(Artifact.stage_result_id == result.id)))
-    assert {artifact.artifact_type for artifact in artifacts} == {"annotations", "summary"}
+    assert {artifact.artifact_type for artifact in artifacts} == expected_artifact_types_for_stage(
+        "protein_identity"
+    )
     artifact_namespaces = {"/".join(artifact.storage_key.split("/")[:4]) for artifact in artifacts}
     assert len(artifact_namespaces) == 1
     assert all((settings.artifact_root / artifact.storage_key).is_file() for artifact in artifacts)
@@ -602,7 +671,7 @@ def test_submit_poll_and_ingest_persist_a_linked_stage_result(client, session, t
     assert annotations_response.json()["truncated"] is True
 
     summary_artifact = next(
-        artifact for artifact in artifacts if artifact.artifact_type == "summary"
+        artifact for artifact in artifacts if artifact.artifact_type == "protein_identity"
     )
     artifact_response = client.get(f"/api/v1/artifacts/{summary_artifact.id}")
     assert artifact_response.status_code == 200
@@ -639,7 +708,9 @@ def test_artifact_only_remote_stage_ingests_without_annotations(client, session,
     )
     executor = SSHStageExecutor.__new__(SSHStageExecutor)
     executor.settings = settings
-    executor.client = FakeDirectoryArtifactRemote(run.id)
+    remote = FakeDirectoryArtifactRemote(run.id)
+    executor.client = remote
+    _prepare_remote(remote, stage)
 
     result_id, reused = executor._ingest_result(session, stage)
     session.commit()
@@ -647,11 +718,17 @@ def test_artifact_only_remote_stage_ingests_without_annotations(client, session,
     assert reused is False
     result = session.get(StageResult, result_id)
     assert result is not None
-    assert {artifact.artifact_type for artifact in result.artifacts} == {"ensemble"}
-    artifact = result.artifacts[0]
+    assert {artifact.artifact_type for artifact in result.artifacts} == (
+        expected_artifact_types_for_stage(stage.stage_id)
+    )
+    artifact = next(
+        item
+        for item in result.artifacts
+        if item.artifact_type == "conformational_ensemble_final_dir"
+    )
     assert artifact.media_type == "application/x-tar"
-    assert artifact.storage_key.endswith("/ensemble.tar")
-    assert result.provenance["remote_directory_artifacts"] == ["ensemble"]
+    assert artifact.storage_key.endswith("/conformational_ensemble_final_dir.tar")
+    assert result.provenance["remote_directory_artifacts"] == ["conformational_ensemble_final_dir"]
     assert not result.provenance["remote_provenance"].get("annotations")
 
 
@@ -677,7 +754,9 @@ def test_remote_artifacts_with_same_basename_get_distinct_storage_keys(
     )
     executor = SSHStageExecutor.__new__(SSHStageExecutor)
     executor.settings = settings
-    executor.client = FakeCollidingArtifactRemote(run.id)
+    remote = FakeCollidingArtifactRemote(run.id)
+    executor.client = remote
+    _prepare_remote(remote, stage)
 
     result_id, reused = executor._ingest_result(session, stage)
     session.commit()
@@ -686,11 +765,46 @@ def test_remote_artifacts_with_same_basename_get_distinct_storage_keys(
     result = session.get(StageResult, result_id)
     assert result is not None
     artifacts = {artifact.artifact_type: artifact for artifact in result.artifacts}
-    assert set(artifacts) == {"annotations", "model_a", "model_b"}
-    assert artifacts["model_a"].storage_key != artifacts["model_b"].storage_key
+    assert set(artifacts) == expected_artifact_types_for_stage(stage.stage_id)
+    assert artifacts["canonical_fasta"].storage_key != artifacts["protein_identity"].storage_key
     assert all(
         (settings.artifact_root / artifact.storage_key).is_file() for artifact in artifacts.values()
     )
+
+
+@pytest.mark.parametrize(
+    ("remote_type", "error_message"),
+    [
+        (FakeNonCanonicalArtifactRemote, "artifact contract"),
+        (FakeReservedAnnotationsArtifactRemote, "reserves annotations"),
+    ],
+)
+def test_remote_manifest_requires_exact_registry_artifact_names(
+    client, session, tmp_path: Path, remote_type, error_message: str
+):
+    protein = client.post("/api/v1/proteins", json={"sequence": SEQUENCE})
+    assert protein.status_code == 201
+    created_run = client.post("/api/v1/runs", json={"protein_id": protein.json()["id"]})
+    assert created_run.status_code == 201
+    run = session.get(Run, created_run.json()["id"])
+    assert run is not None
+    stage = next(item for item in run.stages if item.stage_id == "protein_identity")
+    settings = Settings(
+        app_env="test",
+        database_url="sqlite://",
+        artifact_root=tmp_path / "artifacts",
+        hpc_remote_root="/gpfs/test",
+    )
+    remote = remote_type(run.id)
+    _prepare_remote(remote, stage)
+    executor = SSHStageExecutor.__new__(SSHStageExecutor)
+    executor.settings = settings
+    executor.client = remote
+
+    with pytest.raises(RemoteStageExecutionError, match=error_message):
+        executor._ingest_result(session, stage)
+
+    assert session.scalar(select(StageResult)) is None
 
 
 def test_remote_submit_selects_transferred_pipeline_inputs(client, session, tmp_path: Path):
@@ -738,9 +852,18 @@ def test_remote_submit_selects_transferred_pipeline_inputs(client, session, tmp_
     executor.settings = settings
     executor.client = remote
 
+    _prepare_remote(remote, stage)
     executor.submit_stage(session, stage)
 
     assert remote.requests[0].environment["PIPELINE_SELECTED_FASTA"] == attached.remote_path
+    configuration_manifest = json.loads(
+        remote.requests[0].environment["PIPELINE_CONFIGURATION_JSON"]
+    )
+    assert configuration_manifest["configuration_id"] == run.configuration.id
+    assert configuration_manifest["sequence_sha256"] == run.configuration.sequence_sha256
+    assert configuration_manifest["versions"] == run.configuration.versions
+    assert "PIPELINE_STRUCTURE_MAPPING_JSON" in remote.requests[0].environment
+    assert "PIPELINE_UPSTREAM_CACHE_KEYS_JSON" in remote.requests[0].environment
 
 
 def test_truncated_remote_manifest_fails_stage_without_publishing(client, session, tmp_path: Path):
@@ -771,6 +894,7 @@ def test_truncated_remote_manifest_fails_stage_without_publishing(client, sessio
     executor.settings = settings
     executor.client = remote
 
+    _prepare_remote(remote, stage)
     executor.submit_stage(session, stage)
     assert executor.poll_stage(session, stage) is True
     session.expire_all()
@@ -806,8 +930,133 @@ def test_tampered_remote_provenance_fails_before_publishing(client, session, tmp
     executor = SSHStageExecutor.__new__(SSHStageExecutor)
     executor.settings = settings
     executor.client = remote
+    _prepare_remote(remote, stage)
 
     with pytest.raises(RemoteStageExecutionError, match="provenance does not match its manifest"):
         executor._ingest_result(session, stage)
 
     assert session.scalar(select(StageResult)) is None
+
+
+def test_remote_provenance_binding_must_match_confirmed_configuration(
+    client, session, tmp_path: Path
+):
+    protein = client.post("/api/v1/proteins", json={"sequence": SEQUENCE})
+    assert protein.status_code == 201
+    created_run = client.post("/api/v1/runs", json={"protein_id": protein.json()["id"]})
+    assert created_run.status_code == 201
+
+    settings = Settings(
+        app_env="test",
+        database_url="sqlite://",
+        artifact_root=tmp_path / "artifacts",
+        hpc_remote_root="/gpfs/test",
+    )
+    stage = claim_ready_stage(session, settings)
+    assert stage is not None
+    remote = FakeCompletedRemote(created_run.json()["id"])
+    _prepare_remote(remote, stage)
+    payload = json.loads(remote.provenance)
+    payload["platform_binding"]["sequence_sha256"] = "f" * 64
+    remote.provenance = json.dumps(payload, sort_keys=True).encode()
+    executor = SSHStageExecutor.__new__(SSHStageExecutor)
+    executor.settings = settings
+    executor.client = remote
+
+    with pytest.raises(RemoteStageExecutionError, match="confirmed run configuration"):
+        executor._ingest_result(session, stage)
+
+    assert session.scalar(select(StageResult)) is None
+
+
+def test_remote_ingest_requires_a_locally_planned_cache_identity(client, session, tmp_path: Path):
+    protein = client.post("/api/v1/proteins", json={"sequence": SEQUENCE})
+    assert protein.status_code == 201
+    created_run = client.post("/api/v1/runs", json={"protein_id": protein.json()["id"]})
+    assert created_run.status_code == 201
+    settings = Settings(
+        app_env="test",
+        database_url="sqlite://",
+        artifact_root=tmp_path / "artifacts",
+        hpc_remote_root="/gpfs/test",
+    )
+    stage = claim_ready_stage(session, settings)
+    assert stage is not None
+    remote = FakeCompletedRemote(created_run.json()["id"])
+    executor = SSHStageExecutor.__new__(SSHStageExecutor)
+    executor.settings = settings
+    executor.client = remote
+
+    with pytest.raises(RemoteStageExecutionError, match="locally planned cache key"):
+        executor._ingest_result(session, stage)
+
+    assert session.scalar(select(StageResult)) is None
+
+
+def test_remote_submit_requires_a_locally_planned_cache_identity(client, session, tmp_path: Path):
+    protein = client.post("/api/v1/proteins", json={"sequence": SEQUENCE})
+    assert protein.status_code == 201
+    created_run = client.post("/api/v1/runs", json={"protein_id": protein.json()["id"]})
+    assert created_run.status_code == 201
+    settings = Settings(
+        app_env="test",
+        database_url="sqlite://",
+        artifact_root=tmp_path / "artifacts",
+        hpc_remote_root="/gpfs/test",
+    )
+    stage = claim_ready_stage(session, settings)
+    assert stage is not None
+    remote = FakeCompletedRemote(created_run.json()["id"])
+    executor = SSHStageExecutor.__new__(SSHStageExecutor)
+    executor.settings = settings
+    executor.client = remote
+
+    with pytest.raises(RemoteStageExecutionError, match="locally planned cache key"):
+        executor.submit_stage(session, stage)
+
+    assert remote.requests == []
+    assert stage.slurm_job_id is None
+
+
+def test_remote_ingest_rejects_cache_factor_drift(client, session, tmp_path: Path):
+    protein = client.post("/api/v1/proteins", json={"sequence": SEQUENCE})
+    assert protein.status_code == 201
+    created_run = client.post("/api/v1/runs", json={"protein_id": protein.json()["id"]})
+    assert created_run.status_code == 201
+    settings = Settings(
+        app_env="test",
+        database_url="sqlite://",
+        artifact_root=tmp_path / "artifacts",
+        hpc_remote_root="/gpfs/test",
+    )
+    stage = claim_ready_stage(session, settings)
+    assert stage is not None
+    remote = FakeCompletedRemote(created_run.json()["id"])
+    _prepare_remote(remote, stage)
+    stage.cache_factors = {**stage.cache_factors, "sequence_sha256": "f" * 64}
+    executor = SSHStageExecutor.__new__(SSHStageExecutor)
+    executor.settings = settings
+    executor.client = remote
+
+    with pytest.raises(
+        RemoteStageExecutionError, match="does not match the confirmed configuration"
+    ):
+        executor._ingest_result(session, stage)
+
+    assert session.scalar(select(StageResult)) is None
+
+
+def test_cache_plan_requires_every_declared_dependency(client, session):
+    protein = client.post("/api/v1/proteins", json={"sequence": SEQUENCE})
+    assert protein.status_code == 201
+    created_run = client.post("/api/v1/runs", json={"protein_id": protein.json()["id"]})
+    assert created_run.status_code == 201
+    run = session.get(Run, created_run.json()["id"])
+    assert run is not None
+    stage = next(item for item in run.stages if item.stage_id == "structural_regime")
+    cache_key, factors = planned_stage_cache_identity(stage, run.configuration, {})
+    stage.cache_key = cache_key
+    stage.cache_factors = factors
+
+    with pytest.raises(RemoteStageExecutionError, match="omit dependency identities"):
+        _validated_local_cache_plan(stage)

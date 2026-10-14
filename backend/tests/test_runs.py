@@ -223,9 +223,15 @@ def test_ready_states_require_all_dependencies(client, session):
 
     refresh_ready_states(session, {run_id})
     states = {stage.stage_id: RunStageStatus(stage.status) for stage in run.stages}
+    selected_stage_ids = set(run.configuration.selected_stage_ids)
     for definition in STAGE_DEFINITIONS:
         if definition.dependencies == ("protein_identity",):
-            assert states[definition.id] == RunStageStatus.READY
+            expected = (
+                RunStageStatus.READY
+                if definition.id in selected_stage_ids
+                else RunStageStatus.SKIPPED
+            )
+            assert states[definition.id] == expected
         elif (
             definition.id != "protein_identity" and states[definition.id] != RunStageStatus.SKIPPED
         ):

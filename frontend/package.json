@@ -9,6 +9,7 @@
   "scripts": {
     "dev": "astro dev",
     "check": "astro check",
+    "test": "node --test src/features/annotations/viewer-colors.test.js src/features/runs/stage-visibility.test.js",
     "build": "astro build",
     "preview": "astro preview"
   },

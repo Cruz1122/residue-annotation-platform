@@ -2,13 +2,14 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.auth import Principal, get_principal
 from app.core.config import Settings, get_settings
 from app.core.db import get_db
+from app.features.runs.models import Run, RunStage, StageResult
 from app.features.runs.schemas import AnnotationsResponse, RunCreate, RunRead, StageRead
 from app.features.runs.service import (
     create_run,
@@ -25,11 +26,49 @@ router = APIRouter(prefix="/runs", tags=["runs"])
 def create_run_endpoint(
     payload: RunCreate,
     request: Request,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     session: Session = Depends(get_db),
     principal: Principal = Depends(get_principal),
+    settings: Settings = Depends(get_settings),
 ) -> RunRead:
     client_ip = request.client.host if request.client else None
-    return serialize_run(create_run(session, payload, principal, client_ip=client_ip))
+    return serialize_run(
+        create_run(
+            session,
+            payload,
+            principal,
+            client_ip=client_ip,
+            idempotency_key=idempotency_key,
+            settings=settings,
+        )
+    )
+
+
+@router.get("", response_model=list[RunRead])
+def list_runs(
+    limit: int = Query(default=50, ge=1, le=200),
+    session: Session = Depends(get_db),
+    principal: Principal = Depends(get_principal),
+) -> list[RunRead]:
+    """Return the owner's run history without collapsing shared proteins."""
+
+    from sqlalchemy import select
+    from sqlalchemy.orm import selectinload
+
+    runs = session.scalars(
+        select(Run)
+        .options(
+            selectinload(Run.configuration),
+            selectinload(Run.stages)
+            .selectinload(RunStage.stage_result)
+            .selectinload(StageResult.artifacts),
+            selectinload(Run.uploads),
+        )
+        .where((Run.owner_id == principal.user_id) | (Run.project_id == principal.project_id))
+        .order_by(Run.created_at.desc())
+        .limit(limit)
+    )
+    return [serialize_run(run) for run in runs]
 
 
 @router.get("/active", response_model=RunRead)

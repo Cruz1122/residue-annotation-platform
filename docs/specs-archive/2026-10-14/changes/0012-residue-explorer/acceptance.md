@@ -1,0 +1,12 @@
+# 0012 — Explorer 3D + secuencia + anotaciones
+
+**Estado:** PARTIAL / NOT RUN. La experiencia está conectada a las respuestas reales de proteins, runs, annotations y artifacts; se ejecutó un smoke browser autenticado con un mmCIF real asociado como upload a una run temporal, pero no un E2E con una run científica validada.
+
+| REQ | Comprobación | Estado | Evidencia |
+| --- | --- | --- | --- |
+| UX-001 | Run validada → estructura → selección → anotación | PARTIAL | El snapshot read-only de `structure_modeling` verificó siete archivos explícitos, incluido el mmCIF `data_p01130` de 569,213 bytes con hash coincidente y annotations `1..860` con `aa_ref` concordante. El parser backend corregido acepta ese archivo en `POST /api/v1/uploads` real (`201`, tamaño/hash coincidentes); el 2026-10-14 el browser autenticado abrió la run temporal, mostró `Visor molecular Mol*`, la cadena A con 860 residuos, seleccionó el residuo 1 y mostró el panel de anotaciones con `Sin dato` explícito. Esto prueba la frontera de upload/visor, no una publicación `StageResult` científica real vía worker/API; no se modificó la UI existente. |
+| UX-002 | Selección bidireccional con mapping | PARTIAL (código) | Secuencia y selección estructural se muestran por separado cuando no existe mapping; no se afirma correspondencia canónica sin evidencia |
+| UX-003 | NA, cero, pending, failed y unidades | PARTIAL (código + smoke browser) | Info/viewer consumen filas y units reales; en el runtime Compose la vista mostró `No hay evidencia publicada`/`Sin artefactos disponibles` y `No aplica` para la run fallida, sin convertir ausencia en cero; falta una run científica con valores y unidades reales |
+| UX-004 | Teclado, accesibilidad y benchmark | PARTIAL (código + smoke AX/WebGL) | El árbol de accesibilidad del navegador en `http://localhost:4742/proteins/` confirmó navegación, buscador, estado vacío y enlace de registro; al pulsar `Tab` desde el buscador el foco cayó en `Registrar proteína`. En el smoke autenticado el visor real mostró la estructura Mol*, expuso la cadena A y 860 botones de residuo, permitió seleccionar el residuo 1 y cambiar a `Conservación evolutiva`; faltan auditoría A11Y formal, benchmark reproducible y métricas aprobadas de WebGL |
+
+Se eliminaron la secuencia embebida, las anotaciones calculadas localmente, el progreso temporal, los enlaces estáticos y la sesión de navegador. Esto deja la pantalla sin datos hasta que el backend publique evidencia, como exige la spec.

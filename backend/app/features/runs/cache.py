@@ -2,7 +2,28 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session, selectinload
+
+from app.features.runs.models import RunStage, StageResult
+from app.features.runs.selection import cache_factors_for_stage
+from app.features.stages.registry import STAGE_BY_ID
+
+if TYPE_CHECKING:
+    from app.features.artifacts.storage import ArtifactStore
+    from app.features.runs.models import RunConfiguration
+
+
+def expected_artifact_types_for_stage(stage_id: str) -> set[str]:
+    """Return the complete local artifact contract for one registry stage."""
+
+    definition = STAGE_BY_ID[stage_id]
+    expected = {str(artifact_type) for artifact_type in definition.produced_artifacts}
+    if definition.produced_annotations:
+        expected.add("annotations")
+    return expected
 
 
 def canonical_cache_key(
@@ -31,8 +52,9 @@ def canonical_cache_key(
     """
 
     ignored_parameters = {"log_level", "log_format", "verbosity"}
-    scientific = scientific_parameters or {
-        key: value for key, value in parameters.items() if key not in ignored_parameters
+    source_parameters = scientific_parameters if scientific_parameters is not None else parameters
+    scientific = {
+        key: value for key, value in source_parameters.items() if key not in ignored_parameters
     }
     payload = {
         "schema": "stage-cache-v2",
@@ -51,3 +73,145 @@ def canonical_cache_key(
         payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode()
     return hashlib.sha256(encoded).hexdigest()
+
+
+def planned_stage_cache_identity(
+    stage: RunStage,
+    configuration: RunConfiguration,
+    dependency_cache_keys: dict[str, str],
+) -> tuple[str, dict[str, object]]:
+    """Build the cache identity from the confirmed run configuration.
+
+    This is intentionally callable before a remote submission.  Dependency
+    keys are empty only for a root stage; downstream stages are planned after
+    their upstream results are linked, so an upstream result key is never
+    approximated by protein identity alone.
+    """
+
+    definition = STAGE_BY_ID[stage.stage_id]
+    factors = cache_factors_for_stage(
+        definition,
+        sequence_sha256=configuration.sequence_sha256,
+        structure_source=configuration.structure_source,
+        structure_sha256=configuration.structure_sha256,
+        structure_chain=configuration.structure_chain,
+        structure_mapping=configuration.structure_mapping or {},
+        normalized_variants=configuration.normalized_variants or [],
+        scientific_accession=configuration.scientific_accession,
+        scientific_parameters=configuration.scientific_parameters or {},
+        prerequisites=configuration.prerequisites or {},
+        versions=configuration.versions or {},
+        dependency_cache_keys=dependency_cache_keys,
+    )
+    resource_identity = factors["resource_identity"]
+    assert isinstance(resource_identity, dict)
+    scientific_parameters = factors["scientific_parameters"]
+    assert isinstance(scientific_parameters, dict)
+    # The complete factor set is nested into the scientific parameters so
+    # mapping, source, and variant changes cannot accidentally collide.
+    key = canonical_cache_key(
+        protein_sha256=configuration.sequence_sha256,
+        stage_id=stage.stage_id,
+        stage_version=definition.stage_version,
+        parameters={"configuration_factors": factors},
+        resources=resource_identity,
+        code_sha256=str(resource_identity.get("stage_code_sha256", definition.stage_version)),
+        dependency_cache_keys=dependency_cache_keys,
+        query_sequence_sha256=configuration.sequence_sha256,
+        reference_sequence_sha256=(
+            configuration.structure_sha256
+            if configuration.structure_source == "provided_pdb"
+            else None
+        ),
+        contract_version=str(
+            configuration.versions.get("contract_version", "run-configuration-v1")
+        ),
+        stage_code_sha256=str(resource_identity.get("stage_code_sha256", definition.stage_version)),
+        resource_identity=resource_identity,
+        scientific_parameters=scientific_parameters | {"configuration_factors": factors},
+    )
+    return key, factors
+
+
+def find_verified_cache_hit(
+    session: Session,
+    stage: RunStage,
+    cache_key: str,
+    store: ArtifactStore,
+    *,
+    require_provenance: bool = False,
+    expected_artifact_types: set[str] | None = None,
+) -> StageResult | None:
+    """Find a same-scope, successful result whose artifacts are intact.
+
+    Pre-submit planning and remote ingestion pass ``require_provenance=True``
+    so a result cannot become a scientific hit merely because its database key
+    happens to match. The factors and declared artifact set must be complete
+    and equal to the stage plan; a missing or approximate manifest is therefore
+    a miss and remains eligible for normal execution/publication.
+    """
+
+    candidates = session.scalars(
+        select(StageResult)
+        .options(selectinload(StageResult.artifacts))
+        .where(StageResult.protein_id == stage.run.protein_id)
+        .where(StageResult.stage_id == stage.stage_id)
+        .where(StageResult.cache_key == cache_key)
+        .where(StageResult.status == "success")
+        .where(
+            (StageResult.owner_id == stage.run.owner_id)
+            | (StageResult.project_id == stage.run.project_id)
+        )
+    )
+    for result in candidates:
+        if not result.artifacts:
+            continue
+        provenance = result.provenance if isinstance(result.provenance, dict) else {}
+        if require_provenance:
+            if provenance.get("cache_key") != cache_key:
+                continue
+            if (
+                provenance.get("source") == "mn5-slurm"
+                and provenance.get("remote_provenance_verified") is not True
+            ):
+                continue
+            expected_factors = stage.cache_factors if isinstance(stage.cache_factors, dict) else {}
+            actual_factors = provenance.get("cache_factors")
+            if not expected_factors or not isinstance(actual_factors, dict):
+                continue
+            if actual_factors != expected_factors:
+                continue
+            definition = STAGE_BY_ID.get(stage.stage_id)
+            if definition is not None and any(
+                requirement.startswith(("external_", "homology_", "mavedb_", "msa_cache"))
+                for requirement in definition.technical_requirements
+            ):
+                versions = actual_factors.get("versions")
+                if (
+                    not isinstance(versions, dict)
+                    or not versions.get("external_snapshots")
+                    or versions.get("reproducibility_status") != "external_snapshots_verified"
+                ):
+                    continue
+        required_artifacts = provenance.get("required_artifacts")
+        available_types = {artifact.artifact_type for artifact in result.artifacts}
+        if require_provenance:
+            if not isinstance(required_artifacts, list) or not required_artifacts:
+                continue
+            declared_types = {str(artifact_type) for artifact_type in required_artifacts}
+            if declared_types != available_types:
+                continue
+            if expected_artifact_types is not None and available_types != expected_artifact_types:
+                continue
+        elif isinstance(required_artifacts, list):
+            if not set(map(str, required_artifacts)).issubset(available_types):
+                continue
+        try:
+            if all(
+                store.metadata(artifact.storage_key) == (artifact.size, artifact.sha256)
+                for artifact in result.artifacts
+            ):
+                return result
+        except (OSError, ValueError):
+            continue
+    return None

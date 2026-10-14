@@ -263,7 +263,7 @@ La siguiente información no está verificada y no debe presentarse como disponi
 - ejecución real de `HPCClient` contra Slurm/MN5, incluido el SCP de uploads pequeños;
 - aceptación de un `ReadOnlyMN5Inspector` contra el entorno autorizado y la matriz completa de casos.
 
-La matriz [MN5 read-only](../specs/tests/mn5-readonly-inspection-matrix.md) conserva en `NOT RUN` los casos de aceptación formal del inspector porque el smoke anterior no cubre todos los escenarios ni constituye aprobación institucional. El checkout implementa drivers local/native, SFTP y mock con límites de lectura; `build_read_only_inspector` exige habilitación explícita y no hace fallback entre perfiles. Los casos mutadores se prueban únicamente en un laboratorio aislado y nunca sobre datos reales.
+La matriz [MN5 read-only](specs-archive/2026-10-14/tests/mn5-readonly-inspection-matrix.md) conserva en `NOT RUN` los casos de aceptación formal del inspector porque el smoke anterior no cubre todos los escenarios ni constituye aprobación institucional. El checkout implementa drivers local/native, SFTP y mock con límites de lectura; `build_read_only_inspector` exige habilitación explícita y no hace fallback entre perfiles. Los casos mutadores se prueban únicamente en un laboratorio aislado y nunca sobre datos reales.
 
 ## Próximo límite de implementación
 
@@ -277,8 +277,8 @@ Este documento no autoriza jobs ni inspección remota; solo registra el perfil r
 ## Referencias del plan
 
 - [Roadmap del producto](../ROADMAP.md)
-- [Contrato de inspección MN5 read-only](../specs/contracts/mn5-readonly-inspection.md)
-- [Runbook de acceso read-only](../specs/runbooks/mn5-readonly-access.md)
-- [Contrato HPC, manifests y caché](../specs/contracts/hpc-manifest-cache.md)
+- [Contrato de inspección MN5 read-only](specs-archive/2026-10-14/contracts/mn5-readonly-inspection.md)
+- [Runbook de acceso read-only](specs-archive/2026-10-14/runbooks/mn5-readonly-access.md)
+- [Contrato HPC, manifests y caché](specs-archive/2026-10-14/contracts/hpc-manifest-cache.md)
 - [Inventario del código de stages observado en MN5](mn5-stage-code-inventory.md)
-- [Decisiones abiertas](../specs/DECISIONS.md)
+- [Decisiones abiertas](specs-archive/2026-10-14/DECISIONS.md)

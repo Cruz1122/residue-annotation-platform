@@ -40,6 +40,10 @@ export interface CreateRunInput {
   protein_id: string;
   variants: VariantRequest[];
   upload_ids?: string[];
+  structure_source?: 'alphafold3' | 'provided_pdb';
+  structure_chain?: string;
+  scientific_accession?: string;
+  scientific_parameters?: Record<string, unknown>;
 }
 
 export interface Upload {
@@ -69,6 +73,10 @@ export interface RunStage {
   optional: boolean;
   status: StageStatus;
   stage_result_id: string | null;
+  cache_key: string | null;
+  cache_factors: Record<string, unknown>;
+  reuse_reason: Record<string, unknown> | null;
+  omission_reason: string | null;
   slurm_job_id: string | null;
   error_code: string | null;
   error_message: string | null;
@@ -77,11 +85,38 @@ export interface RunStage {
   artifacts: Artifact[];
 }
 
+export interface RunConfiguration {
+  id: string;
+  run_id: string;
+  protein_id: string;
+  sequence_sha256: string;
+  scientific_accession: string | null;
+  fasta_upload_id: string | null;
+  fasta_sha256: string | null;
+  structure_upload_id: string | null;
+  structure_source: 'alphafold3' | 'provided_pdb';
+  structure_sha256: string | null;
+  structure_chain: string | null;
+  structure_mapping: Record<string, unknown>;
+  normalized_variants: VariantRequest[];
+  selected_stage_ids: string[];
+  omitted_stages: Array<Record<string, unknown>>;
+  scientific_parameters: Record<string, unknown>;
+  prerequisites: Record<string, unknown>;
+  versions: Record<string, unknown>;
+  input_references: Record<string, unknown>;
+  owner_id: string;
+  project_id: string;
+  confirmation_audit_id: string | null;
+  confirmed_at: string | null;
+}
+
 export interface Run {
   id: string;
   protein_id: string;
   status: 'pending' | 'running' | 'success' | 'failed' | 'cancel_requested' | 'cancelled';
   requested_variants: VariantRequest[];
+  configuration: RunConfiguration | null;
   created_at: string | null;
   started_at: string | null;
   finished_at: string | null;

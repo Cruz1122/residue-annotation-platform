@@ -31,12 +31,14 @@ export class ApiError extends Error {
   readonly retryAfter: number | null;
   readonly activeRunId: string | null;
   readonly activeProteinId: string | null;
+  readonly code: string | null;
 
   constructor(
     message: string,
     status: number,
     retryAfter: number | null = null,
     activeRun: { runId: string; proteinId: string } | null = null,
+    code: string | null = null,
   ) {
     super(message);
     this.name = 'ApiError';
@@ -44,6 +46,7 @@ export class ApiError extends Error {
     this.retryAfter = retryAfter;
     this.activeRunId = activeRun?.runId ?? null;
     this.activeProteinId = activeRun?.proteinId ?? null;
+    this.code = code;
   }
 }
 
@@ -94,11 +97,13 @@ async function errorFromResponse(response: Response): Promise<ApiError> {
     const message = typeof detail.message === 'string' ? detail.message : `HTTP ${response.status}`;
     const runId = typeof detail.run_id === 'string' ? detail.run_id : '';
     const proteinId = typeof detail.protein_id === 'string' ? detail.protein_id : '';
+    const code = typeof detail.code === 'string' ? detail.code : null;
     return new ApiError(
       message,
       response.status,
       parseRetryAfter(response),
       runId && proteinId ? { runId, proteinId } : null,
+      code,
     );
   }
   const message = typeof detail === 'string'
@@ -375,8 +380,12 @@ export function createProtein(input: CreateProteinInput): Promise<Protein> {
   return request<Protein>('/proteins', { method: 'POST', json: input });
 }
 
-export function createRun(input: CreateRunInput): Promise<Run> {
-  return request<Run>('/runs', { method: 'POST', json: input });
+export function createRun(input: CreateRunInput, idempotencyKey?: string): Promise<Run> {
+  return request<Run>('/runs', {
+    method: 'POST',
+    json: input,
+    headers: idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : undefined,
+  });
 }
 
 export function uploadInput(file: File, inputType: 'fasta' | 'structure'): Promise<Upload> {

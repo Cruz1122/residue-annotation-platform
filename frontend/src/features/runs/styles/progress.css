@@ -75,6 +75,7 @@
 .pipeline-edge.edge-ok { stroke: var(--green); }
 .pipeline-edge.edge-failed { stroke: #d62828; }
 .pipeline-edge.edge-skipped { stroke: #9aa0a8; stroke-dasharray: 4 5; }
+.pipeline-edge.edge-disabled { stroke: #c5c9ce; }
 @keyframes edge-flow { to { stroke-dashoffset: -10; } }
 .pipeline-node {
   position: absolute;
@@ -130,6 +131,7 @@
 .stage-status-ok { color: #328c57; }
 .stage-status-failed { color: #c51f2e; }
 .stage-status-skipped { color: #9198a1; }
+.stage-status-disabled { color: #9198a1; }
 .stage-time { color: #7a8088; font-size: 8.5px; line-height: 1.25; min-height: 20px; }
 .stage-runtime {
   position: relative;
@@ -150,6 +152,8 @@
 .status-ok { border-color: rgba(81,171,117,.62); }
 .status-failed { border-color: rgba(214,40,40,.52); }
 .status-skipped { opacity: .72; }
+.status-disabled { opacity: .46; }
+.pipeline-node.status-disabled:hover { transform: translate(-50%, -50%); box-shadow: none; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 @media (max-width: 760px) {

@@ -5,13 +5,24 @@ import { ApiError, getAnnotations, getArtifactObjectUrl, getProtein, getRun, get
 import {
   AA_NAMES,
   ANNOTATION_GROUPS,
+  MISSING_COLOR,
   MODE_INFO,
+  MODE_SCALE_COPY,
+  VISUALIZATION_MODES,
+  annotationForResidue,
+  assignCanonicalPositions,
   canonicalChain,
-  displayColor,
+  colorForValues,
+  finiteAnnotationValue,
+  formatScaleNumber,
+  hexToColorInt,
+  normalizeValue,
   oneLetter,
   readableValue,
+  relativeDomain,
+  residueDisplayColor,
   residueKey,
-} from '@features/annotations/data/viewer-presentation.js';
+} from '@features/annotations/viewer-presentation.js';
 import 'molstar/build/viewer/molstar.css';
 import '@features/annotations/styles/viewer.css';
 
@@ -136,6 +147,36 @@ function buildResidueLociCache(structure, structureLib, OrderedSet) {
   return residueLoci;
 }
 
+function ContinuousLegend({ mode, domain, value, residueSelected }) {
+  const spec = VISUALIZATION_MODES[mode];
+  const copy = MODE_SCALE_COPY[mode];
+  const t = domain ? normalizeValue(value, domain.min, domain.max) : null;
+  const background = `linear-gradient(90deg, ${spec.colors[0]} 0%, ${spec.colors[1]} 50%, ${spec.colors[2]} 100%)`;
+  const midpoint = domain ? (domain.min + domain.max) / 2 : null;
+  return (
+    <div class="continuous-legend" aria-label={`${copy.magnitude}. ${copy.note}`}>
+      <p class="continuous-legend__note">{copy.magnitude}. {copy.note}</p>
+      <div class={`continuous-legend__track ${domain ? '' : 'is-empty'}`} style={domain ? { background } : undefined}>
+        {t !== null && (
+          <span
+            class="continuous-legend__marker"
+            style={{ left: `${t * 100}%` }}
+            title={`Residuo seleccionado: ${formatScaleNumber(value)}`}
+          />
+        )}
+      </div>
+      {domain && (
+        <div class="continuous-legend__labels">
+          <span>{formatScaleNumber(domain.min)} · {copy.low}</span>
+          <span title="Punto medio visual">{formatScaleNumber(midpoint)}</span>
+          <span>{formatScaleNumber(domain.max)} · {copy.high}</span>
+        </div>
+      )}
+      {(!domain || (residueSelected && t === null)) && <span class="continuous-legend__missing">Sin dato</span>}
+    </div>
+  );
+}
+
 const ResidueButton = memo(function ResidueButton({ residue, index, inRange, active, color }) {
   return (
     <button
@@ -158,6 +199,7 @@ export default function ProteinViewer({ proteinId }) {
   const orderedSetRef = useRef(null);
   const structureRef = useRef(null);
   const residueLociRef = useRef(new Map());
+  const sequenceRef = useRef('');
   const rangeLociRef = useRef(new Map());
   const themeNamesRef = useRef({});
   const colorMapRef = useRef(new Map());
@@ -192,6 +234,7 @@ export default function ProteinViewer({ proteinId }) {
       .then(async ([proteinData, runData]) => {
         const annotationData = runData ? await getAnnotations(runData.id) : null;
         if (!active) return;
+        sequenceRef.current = proteinData.sequence;
         const nextChains = canonicalChain(proteinData.sequence);
         setProtein(proteinData);
         setAnnotations(annotationData?.rows ?? []);
@@ -217,12 +260,15 @@ export default function ProteinViewer({ proteinId }) {
     for (const row of annotations) rows.set(row.aa_position, row);
     return rows;
   }, [annotations]);
+  const domain = useMemo(() => relativeDomain(mode, annotations), [mode, annotations]);
   const colors = useMemo(
-    () => residues.map((residue, index) => displayColor(index, mode, residue, annotationByPosition.get(residue.authSeqId)?.values)),
-    [residues, mode, annotationByPosition],
+    () => residues.map((residue) => residueDisplayColor(mode, residue, annotationForResidue(residue, annotationByPosition), domain)),
+    [residues, mode, annotationByPosition, domain],
   );
   const activeResidue = selection.active === null ? null : residues[selection.active] ?? null;
-  const activeAnnotation = activeResidue ? annotationByPosition.get(activeResidue.authSeqId) ?? null : null;
+  const activeAnnotation = activeResidue ? annotationForResidue(activeResidue, annotationByPosition) : null;
+  const activeMeasurement = finiteAnnotationValue(activeAnnotation?.values?.[VISUALIZATION_MODES[mode].field]);
+  const regimeMissing = mode === 'regime' && activeResidue && !colorForValues(mode, activeAnnotation?.values, null);
 
   const applyTheme = async (nextMode) => {
     const viewer = viewerRef.current;
@@ -242,14 +288,14 @@ export default function ProteinViewer({ proteinId }) {
   useEffect(() => {
     const next = new Map();
     for (const chain of chains) {
-      for (const [index, residue] of chain.residues.entries()) {
-        const color = displayColor(index, mode, residue, annotationByPosition.get(residue.authSeqId)?.values);
-        next.set(residueKey(residue), Number.parseInt(color.slice(1), 16));
+      for (const residue of chain.residues) {
+        const color = residueDisplayColor(mode, residue, annotationForResidue(residue, annotationByPosition), domain);
+        next.set(residueKey(residue), hexToColorInt(color));
       }
     }
     colorMapRef.current = next;
     applyTheme(mode);
-  }, [chains, mode, annotationByPosition]);
+  }, [chains, mode, annotationByPosition, domain]);
 
   useEffect(() => {
     if (!structureRequest || !hostRef.current) return undefined;
@@ -303,8 +349,9 @@ export default function ProteinViewer({ proteinId }) {
           const parsedResidues = parsed.flatMap((chain) => chain.residues);
           const hasKnownResidues = parsedResidues.some((residue) => AA_NAMES[residue.compId]);
           if (parsed.length && hasKnownResidues) {
-            setChains(parsed);
-            setChainId(parsed[0].id);
+            const aligned = assignCanonicalPositions(parsed, sequenceRef.current);
+            setChains(aligned);
+            setChainId(aligned[0].id);
           }
         }
         const registry = viewer.plugin.representation.structure.themes.colorThemeRegistry;
@@ -317,13 +364,13 @@ export default function ProteinViewer({ proteinId }) {
             description: info.title,
             color: (location) => {
               try {
-                if (!structureLib.StructureElement.Location.is(location)) return 0xb8bec5;
+                if (!structureLib.StructureElement.Location.is(location)) return hexToColorInt(MISSING_COLOR);
                 const chain = String(structureLib.StructureProperties.chain.auth_asym_id(location) || structureLib.StructureProperties.chain.label_asym_id(location) || 'A');
                 const authSeqId = Number(structureLib.StructureProperties.residue.auth_seq_id(location) || structureLib.StructureProperties.residue.label_seq_id(location));
                 const insCode = String(structureLib.StructureProperties.residue.pdbx_PDB_ins_code?.(location) || '').trim();
-                return colorMapRef.current.get(`${chain}|${authSeqId}|${insCode}`) ?? 0xb8bec5;
+                return colorMapRef.current.get(`${chain}|${authSeqId}|${insCode}`) ?? hexToColorInt(MISSING_COLOR);
               } catch {
-                return 0xb8bec5;
+                return hexToColorInt(MISSING_COLOR);
               }
             },
           });
@@ -597,11 +644,16 @@ export default function ProteinViewer({ proteinId }) {
               </button>
             ))}
           </div>
-          <div class="viewer-mode-info">
+          <div class={`viewer-mode-info ${mode === 'regime' ? '' : 'is-continuous'}`}>
             <span class="viewer-mode-title">{MODE_INFO[mode].title}</span>
-            <span class="viewer-mode-legend">
-              {MODE_INFO[mode].legend.map(([label, color]) => <span key={label} class="viewer-legend-item"><i style={{ background: color }} />{label}</span>)}
-            </span>
+            {mode === 'regime' ? (
+              <span class="viewer-mode-legend">
+                {MODE_INFO.regime.legend.map(([label, color]) => <span key={label} class="viewer-legend-item"><i style={{ background: color }} />{label}</span>)}
+                {regimeMissing && <span class="continuous-legend__missing">Sin dato</span>}
+              </span>
+            ) : (
+              <ContinuousLegend mode={mode} domain={domain} value={activeMeasurement} residueSelected={Boolean(activeResidue)} />
+            )}
           </div>
         </div>
       </div>

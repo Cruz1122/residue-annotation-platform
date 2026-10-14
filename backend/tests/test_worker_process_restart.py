@@ -10,7 +10,7 @@ from pathlib import Path
 
 from app.core.db import Base
 from app.features.proteins.models import Protein
-from app.features.runs.models import ActiveRunSlot, Run, RunStage
+from app.features.runs.models import ActiveRunSlot, Run, RunConfiguration, RunStage
 from app.features.runs.state import RunStageStatus, RunStatus
 from app.features.stages.registry import STAGE_DEFINITIONS
 from sqlalchemy import create_engine, select
@@ -32,12 +32,29 @@ def _seed_database(database_path: Path) -> tuple[object, str, str]:
             owner_id="restart-user",
             project_id="restart-project",
         )
+        session.add(protein)
+        session.flush()
         run = Run(
             protein=protein,
             owner_id="restart-user",
             project_id="restart-project",
             status=RunStatus.PENDING,
             requested_variants=[],
+        )
+        run.configuration = RunConfiguration(
+            protein_id=protein.id,
+            sequence_sha256=protein.sequence_sha256,
+            structure_source="alphafold3",
+            structure_mapping={},
+            normalized_variants=[],
+            selected_stage_ids=[definition.id for definition in STAGE_DEFINITIONS],
+            omitted_stages=[],
+            scientific_parameters={},
+            prerequisites={},
+            versions={"contract_version": "run-configuration-v1"},
+            input_references={"protein": {"protein_id": protein.id}},
+            owner_id=run.owner_id,
+            project_id=run.project_id,
         )
         run.stages.extend(
             RunStage(

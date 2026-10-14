@@ -1,12 +1,27 @@
 import { useEffect, useMemo, useState } from 'preact/hooks';
 import LucideIcon from '@shared/components/icons/LucideIcon.jsx';
 import { ApiError, getAnnotations, getArtifactBlob, getRun } from '@shared/api/client';
+import { presentRunStages } from '@features/runs/stage-visibility.js';
 import '@features/stages/styles/info.css';
 
 const STATUS_TEXT = {
   pending: 'Pendiente', ready: 'Listo', queued: 'En cola', running: 'En ejecución',
   success: 'Completado', reused: 'Reutilizado', failed: 'Falló', skipped: 'No aplica', cancelled: 'Cancelado',
+  disabled: 'Desactivado',
 };
+
+const OMISSION_REASON_TEXT = {
+  provided_pdb_selected: 'se usó el PDB proporcionado',
+  variants_not_provided: 'no se confirmaron variantes válidas',
+  technical_prerequisite_not_provided: 'falta un prerrequisito técnico',
+  dependency_not_applicable: 'una dependencia no aplica',
+};
+
+const FULL_RESULTS = [
+  { id: 'full_bundle', label: 'Resultados completos', suffix: 'results.zip' },
+  { id: 'annotations_tsv', label: 'Anotaciones consolidadas', suffix: 'annotations.tsv' },
+  { id: 'run_summary', label: 'Resumen de corrida', suffix: 'run_summary.json' },
+];
 
 function valueText(value) {
   if (value === null || value === undefined) return 'NA';
@@ -96,6 +111,18 @@ export default function InformationView({ proteinId }) {
     return () => { active = false; };
   }, [runId]);
 
+  const stages = useMemo(() => {
+    if (!run?.stages?.length) return [];
+    try {
+      return presentRunStages(
+        run.stages,
+      );
+    } catch (visibilityError) {
+      console.error(visibilityError);
+      return run.stages;
+    }
+  }, [run]);
+
   const rowsByStage = useMemo(() => {
     const grouped = new Map();
     for (const row of annotations?.rows ?? []) grouped.set(row.stage_id, [...(grouped.get(row.stage_id) ?? []), row]);
@@ -115,14 +142,38 @@ export default function InformationView({ proteinId }) {
       <div class="info-body">
         <div class="info-notice">Los valores se muestran únicamente cuando el backend ha publicado filas de anotación o artefactos. Ausencia de filas no equivale a cero.</div>
         <div class="info-stages">
-          {run.stages.map((stage, index) => {
+          <article class="info-stage" id="resultados-completos">
+            <header class="info-stage-head">
+              <span class="info-stage-icon"><LucideIcon name="folder" /></span>
+              <div class="info-stage-title"><strong>Resultados completos</strong><span>Descargas de la corrida</span></div>
+            </header>
+            <div class="info-pane">
+              <div class="artifact-list">
+                {FULL_RESULTS.map((item) => (
+                  <a
+                    key={item.id}
+                    class="artifact-link artifact-link-pending"
+                    href="#resultados-completos"
+                    aria-disabled="true"
+                    title={`${run.id}_${item.suffix}`}
+                    onClick={(event) => event.preventDefault()}
+                  >
+                    <LucideIcon name="file-text" />
+                    <span class="artifact-name">{item.label}</span>
+                    <span class="artifact-pending">Aún no disponible</span>
+                  </a>
+                ))}
+              </div>
+            </div>
+          </article>
+          {stages.map((stage, index) => {
             const rows = rowsByStage.get(stage.id) ?? [];
             return (
               <article class="info-stage" id={`stage-${stage.id}`} data-info-stage={stage.id} key={stage.id}>
                 <header class="info-stage-head">
                   <span class="info-stage-icon"><LucideIcon name="workflow" /></span>
                   <div class="info-stage-title"><strong>{index + 1}. {stage.title}</strong><span>{stage.id} · {stage.legacy_id}{stage.optional ? ' · opcional' : ''}</span></div>
-                  <span class={`info-stage-status ${stage.status === 'failed' ? 'status-failed-text' : stage.status === 'skipped' ? 'optional' : ''}`}><LucideIcon name={stage.status === 'failed' ? 'circle-x' : stage.status === 'skipped' ? 'circle-dot' : 'circle-check'} />{STATUS_TEXT[stage.status] ?? stage.status}</span>
+                  <span class={`info-stage-status ${stage.status === 'failed' ? 'status-failed-text' : stage.status === 'skipped' || stage.status === 'disabled' ? 'optional' : ''}`}><LucideIcon name={stage.status === 'failed' ? 'circle-x' : stage.status === 'skipped' ? 'circle-dot' : stage.status === 'disabled' ? 'circle-slash' : 'circle-check'} />{STATUS_TEXT[stage.status] ?? stage.status}{stage.status === 'skipped' && stage.omission_reason ? ` · ${OMISSION_REASON_TEXT[stage.omission_reason] ?? stage.omission_reason}` : ''}</span>
                 </header>
                 <div class="info-stage-grid">
                   <section class="info-pane"><h2 class="info-pane-title">Anotaciones</h2><AnnotationRows rows={rows} /></section>

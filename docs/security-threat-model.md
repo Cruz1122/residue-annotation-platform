@@ -77,4 +77,4 @@ The main trust boundaries are:
 5. Scientific baseline and end-to-end evidence for every published stage.
 
 Until those approvals and executions exist, the related specifications remain
-`PARTIAL`, `NOT RUN` or `BLOCKED` as recorded in `specs/changes/*/acceptance.md`.
+`PARTIAL`, `NOT RUN` or `BLOCKED` as recorded in `docs/specs-archive/2026-10-14/changes/*/acceptance.md`. The active functional requirements are the three documents under `specs/`.
