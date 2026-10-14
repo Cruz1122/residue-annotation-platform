@@ -78,6 +78,11 @@ not GPFS paths for public consumption. A reference-only bundle is still
 useful for a storage-provider snapshot, but it cannot be restored by this
 script until an artifact snapshot is present.
 
+Artifact and upload downloads verify size and SHA-256 before opening the HTTP
+stream and then stream that same open descriptor. This keeps a path replacement
+between verification and response delivery from bypassing the recorded
+integrity check; Linux uses `O_NOFOLLOW` for the final file component.
+
 Restore only into an isolated PostgreSQL database and an empty artifact
 directory that have been selected by the operator:
 
