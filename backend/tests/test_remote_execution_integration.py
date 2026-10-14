@@ -586,6 +586,31 @@ def test_submit_poll_and_ingest_persist_a_linked_stage_result(client, session, t
     assert annotations[0]["aa_ref"] == "A"
     assert annotations[0]["values"] == {"gene": "GENE1", "accession": "P00001"}
 
+    run_response = client.get(f"/api/v1/runs/{created_run.json()['id']}")
+    assert run_response.status_code == 200
+    assert any(
+        item["id"] == "protein_identity" and item["status"] == "success"
+        for item in run_response.json()["stages"]
+    )
+
+    annotations_response = client.get(
+        f"/api/v1/runs/{created_run.json()['id']}/annotations?limit=2"
+    )
+    assert annotations_response.status_code == 200
+    assert annotations_response.json()["rows"][0]["stage_id"] == "protein_identity"
+    assert annotations_response.json()["rows"][0]["aa_ref"] == "A"
+    assert annotations_response.json()["truncated"] is True
+
+    summary_artifact = next(
+        artifact for artifact in artifacts if artifact.artifact_type == "summary"
+    )
+    artifact_response = client.get(f"/api/v1/artifacts/{summary_artifact.id}")
+    assert artifact_response.status_code == 200
+    assert artifact_response.json()["sha256"] == summary_artifact.sha256
+    artifact_content = client.get(f"/api/v1/artifacts/{summary_artifact.id}/content")
+    assert artifact_content.status_code == 200
+    assert artifact_content.content == remote.summary
+
 
 def test_artifact_only_remote_stage_ingests_without_annotations(client, session, tmp_path: Path):
     protein = client.post(

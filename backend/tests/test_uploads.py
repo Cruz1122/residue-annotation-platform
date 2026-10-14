@@ -503,6 +503,8 @@ class _FakeTransferSFTP:
         except KeyError as exc:
             error = OSError(errno.ENOENT, "missing")
             raise error from exc
+        if isinstance(mode, SimpleNamespace):
+            return mode
         return SimpleNamespace(st_mode=mode)
 
     def mkdir(self, path: str, mode: int):
@@ -512,6 +514,12 @@ class _FakeTransferSFTP:
 
     def close(self):
         self.closed = True
+
+    def rename(self, source: str, destination: str):
+        self.entries[destination] = self.entries.pop(source)
+
+    def remove(self, path: str):
+        self.entries.pop(path, None)
 
 
 class _FakeTransferSSH:
@@ -526,12 +534,17 @@ class _FakeTransferSSH:
 
 
 class _FakeTransferSCP:
-    def __init__(self):
+    def __init__(self, sftp: _FakeTransferSFTP):
+        self.sftp = sftp
         self.calls: list[tuple[str, str]] = []
 
     def put(self, local_path: str, remote_path: str, preserve_times: bool):
         assert preserve_times is False
         self.calls.append((local_path, remote_path))
+        self.sftp.entries[remote_path] = SimpleNamespace(
+            st_mode=stat.S_IFREG | 0o600,
+            st_size=Path(local_path).stat().st_size,
+        )
 
 
 def _configured_transfer(tmp_path: Path, sftp: _FakeTransferSFTP):
@@ -553,7 +566,7 @@ def _configured_transfer(tmp_path: Path, sftp: _FakeTransferSFTP):
         )
     )
     transfer.client = _FakeTransferSSH(sftp)
-    transfer.scp = _FakeTransferSCP()
+    transfer.scp = _FakeTransferSCP(sftp)
     return transfer, local_file
 
 
@@ -571,12 +584,12 @@ def test_scp_input_transfer_creates_verified_components_without_remote_shell(tmp
         "/gpfs/project/root/uploads/run-1",
         "/gpfs/project/root/uploads/run-1/pdb",
     ]
-    assert transfer.scp.calls == [
-        (
-            str(local_file),
-            "/gpfs/project/root/uploads/run-1/pdb/upload-1.pdb",
-        )
-    ]
+    assert len(transfer.scp.calls) == 1
+    assert transfer.scp.calls[0][0] == str(local_file)
+    assert transfer.scp.calls[0][1].startswith(
+        "/gpfs/project/root/uploads/run-1/pdb/.upload-1.pdb.tmp-"
+    )
+    assert "/gpfs/project/root/uploads/run-1/pdb/upload-1.pdb" in sftp.entries
 
 
 def test_scp_input_transfer_rejects_symlinked_parent_before_put(tmp_path: Path):

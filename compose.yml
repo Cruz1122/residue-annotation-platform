@@ -150,6 +150,18 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8742"]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; response = urllib.request.urlopen('http://127.0.0.1:8742/api/v1/health', timeout=3); raise SystemExit(0 if response.status == 200 else 1)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
 
   worker-vpn:
     <<: *worker-common
@@ -295,7 +307,8 @@ services:
     environment:
       PUBLIC_API_BASE_URL: ${PUBLIC_API_BASE_URL:-http://localhost:8742/api/v1}
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:

@@ -5,6 +5,7 @@ import os
 import shutil
 import stat
 from pathlib import Path, PurePosixPath
+from uuid import uuid4
 
 import paramiko
 from scp import SCPClient
@@ -194,10 +195,73 @@ class SCPInputTransfer:
         _remote_path_under(root_remote, remote)
         self._ensure_remote_directory(root_remote, remote.parent)
         self._assert_destination_absent(remote)
+        temporary = remote.with_name(f".{remote.name}.tmp-{uuid4().hex}")
+        _remote_path_under(root_remote, temporary)
+        self._assert_destination_absent(temporary)
+        expected_size = resolved.stat().st_size
         try:
-            self.scp.put(str(resolved), remote_path, preserve_times=False)
+            # SCP writes only to a private temporary name. The final path is
+            # exposed after a bounded SFTP verification and an in-directory
+            # rename, so a failed transfer cannot look like a valid input.
+            self.scp.put(str(resolved), str(temporary), preserve_times=False)
+            self._publish_temporary(temporary, remote, expected_size)
         except Exception as exc:
+            self._remove_temporary(temporary)
             raise InputTransferError("SCP input transfer failed") from exc
+
+    def _publish_temporary(
+        self,
+        temporary: PurePosixPath,
+        destination: PurePosixPath,
+        expected_size: int,
+    ) -> None:
+        if self.client is None:
+            raise InputTransferError("SCP transfer is not connected")
+        try:
+            sftp = self.client.open_sftp()
+        except Exception as exc:
+            raise InputTransferError("could not verify the SCP temporary file") from exc
+        try:
+            attributes = sftp.lstat(str(temporary))
+            if stat.S_ISLNK(attributes.st_mode or 0) or not stat.S_ISREG(attributes.st_mode or 0):
+                raise InputTransferError("SCP temporary file is not a regular file")
+            if attributes.st_size != expected_size:
+                raise InputTransferError("SCP temporary file has an unexpected size")
+            try:
+                sftp.lstat(str(destination))
+            except OSError as exc:
+                if getattr(exc, "errno", None) != errno.ENOENT:
+                    raise InputTransferError("remote input destination is unavailable") from exc
+            else:
+                raise InputTransferError("remote input destination already exists")
+            sftp.rename(str(temporary), str(destination))
+            published = sftp.lstat(str(destination))
+            if stat.S_ISLNK(published.st_mode or 0) or not stat.S_ISREG(published.st_mode or 0):
+                raise InputTransferError("published input is not a regular file")
+            if published.st_size != expected_size:
+                raise InputTransferError("published input has an unexpected size")
+        except InputTransferError:
+            raise
+        except Exception as exc:
+            raise InputTransferError("could not publish the SCP input") from exc
+        finally:
+            sftp.close()
+
+    def _remove_temporary(self, temporary: PurePosixPath) -> None:
+        if self.client is None:
+            return
+        try:
+            sftp = self.client.open_sftp()
+            try:
+                attributes = sftp.lstat(str(temporary))
+                if stat.S_ISREG(attributes.st_mode or 0) or stat.S_ISLNK(attributes.st_mode or 0):
+                    sftp.remove(str(temporary))
+            finally:
+                sftp.close()
+        except Exception:
+            # The original transfer/publish error is more useful than cleanup
+            # failure. A later operator can remove only this generated name.
+            return
 
     def _ensure_remote_directory(self, root: PurePosixPath, target: PurePosixPath) -> None:
         """Create missing parents one component at a time without remote shell.
