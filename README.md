@@ -11,7 +11,7 @@ Los puertos de desarrollo definidos para este proyecto son deliberadamente:
 - frontend: `4742`
 - backend: `8742`
 
-`docker compose up --build -d` levanta PostgreSQL, las migraciones Alembic, la API, el frontend, la VPN y el worker. La VPN tiene un healthcheck contra el endpoint SSH de MareNostrum; el worker no arranca hasta que el túnel y la ruta remota están disponibles. Después, una run validada por la API se transfiere y se envía automáticamente a Slurm. Todos los servicios usan `restart: unless-stopped`, por lo que el stack vuelve a levantarse cuando el daemon de Docker arranca de nuevo.
+`compose.yml` soporta dos perfiles de ejecución HPC; se debe activar uno según dónde corre el stack. `vpn` es el modo de workstation: levanta la VPN, espera el endpoint SSH de MareNostrum y usa SSH/SCP para transferir y enviar automáticamente las runs validadas a Slurm. `mn5` es el modo directo: se ejecuta dentro de MareNostrum, no levanta VPN ni usa SSH y llama al Slurm local sobre el GPFS montado. PostgreSQL, migraciones, API y frontend son comunes a ambos perfiles. Todos los servicios persistentes usan `restart: unless-stopped`, por lo que el stack vuelve a levantarse cuando el daemon de Docker arranca de nuevo.
 
 ```text
 residue-annotation-platform/
@@ -24,7 +24,7 @@ residue-annotation-platform/
 ├── frontend/
 │   ├── src/features/             # superficies por dominio
 │   └── src/shared/api/           # cliente tipado de FastAPI
-├── compose.yml                   # Postgres, migraciones, API, worker y frontend
+├── compose.yml                   # Perfiles VPN/MN5, Postgres, API, workers y frontend
 ├── infra/mn5-vpn/                # cliente VPN aislado y pinentry sin logs
 ├── scripts/validate_specs.py     # validación documental estática
 └── specs/
@@ -59,7 +59,7 @@ docker compose config --services
 # db
 # migrate
 # backend
-# worker
+# worker-vpn
 # frontend
 ```
 
@@ -80,7 +80,22 @@ HPC_KNOWN_HOSTS_FILE=/ruta/local/known_hosts \
 docker compose up --build -d
 ```
 
-El password de VPN puede vivir en un archivo de una sola línea con permisos `0600`, o en un archivo de configuración `openfortivpn` protegido. El servicio `vpn` es el único que recibe `NET_ADMIN`; además, `vpn` y `worker` reciben únicamente `DAC_READ_SEARCH` para poder leer secretos `0600` propiedad del usuario del host cuando Docker local conserva sus UID, sin capacidad de escritura. El backend, frontend y worker nunca reciben `NET_ADMIN`, no tienen red directa al host y sólo el worker monta, en modo lectura, el password SSH y `known_hosts`; no se monta `.env` ni el filesystem del host.
+El password de VPN puede vivir en un archivo de una sola línea con permisos `0600`, o en un archivo de configuración `openfortivpn` protegido. El servicio `vpn` es el único que recibe `NET_ADMIN`; además, `vpn` y `worker-vpn` reciben únicamente `DAC_READ_SEARCH` para poder leer secretos `0600` propiedad del usuario del host cuando Docker local conserva sus UID, sin capacidad de escritura. El backend, frontend y `worker-vpn` nunca reciben `NET_ADMIN`, no tienen red directa al host y sólo `worker-vpn` monta, en modo lectura, el password SSH y `known_hosts`; no se monta `.env` ni el filesystem del host.
+
+### Ejecución directa en MareNostrum
+
+El perfil `mn5` se usa en el host de MareNostrum donde ya están disponibles Docker, el GPFS y la autenticación local de Slurm. El worker nativo debe usar una imagen previamente preparada en MN5 con la aplicación, sus dependencias Python y los clientes `sbatch`, `squeue`, `sacct` y `scancel`. El perfil monta el root GPFS, `/etc/slurm` y `/run/munge` de forma explícita; si alguno falta, el worker termina sin intentar una ejecución incompleta.
+
+```bash
+# Ejecutar en MareNostrum; activar sólo este perfil.
+COMPOSE_PROFILES=mn5 \
+HPC_NATIVE_WORKER_IMAGE=residue-annotation-platform-worker-native \
+HPC_NATIVE_UID=<uid-de-la-cuenta-mn5> \
+HPC_NATIVE_GID=<gid-de-la-cuenta-mn5> \
+docker compose up --build -d
+```
+
+En este modo no se configuran `HPC_VPN_*`, `HPC_SSH_*`, archivos de passwords ni `known_hosts`. El worker fija `HPC_EXECUTION_MODE=native` y ejecuta `sbatch --wrap` directamente en el entorno local de Slurm; la aplicación no crea ni deja un archivo `.sbatch` local. En el modo `vpn`, el worker fija `HPC_EXECUTION_MODE=ssh` y el túnel VPN es una dependencia de salud; no se deben activar ambos perfiles a la vez.
 
 ## Desarrollo sin Docker
 
@@ -193,7 +208,7 @@ La autenticación de cuenta usa Bearer tokens en producción; el fallback por he
 
 - Los 18 stages están registrados con dependencias, recursos y columnas; no hay adapters científicos ejecutables aprobados en este checkout.
 - El worker falla de forma auditable cuando no existe un executor real; no crea anotaciones ni artefactos sintéticos.
-- La integración SSH/native y el inspector SFTP tienen fronteras de seguridad; el stack ya tiene el camino automático de VPN → SSH/SCP → Slurm, pero la regresión científica y la comparación contra un baseline siguen requiriendo evidencia de resultados reales.
+- La integración SSH/native y el inspector SFTP tienen fronteras de seguridad; el stack ya tiene los caminos automáticos VPN → SSH/SCP → Slurm y ejecución native → Slurm/GPFS local, pero la regresión científica y la comparación contra un baseline siguen requiriendo evidencia de resultados reales.
 - El visor no infiere `aa_position` canónica a partir de un número de residuo estructural; requiere mapping publicado por el pipeline.
 - El release final, backup/restore, cuotas completas, auditoría de producción y E2E científico están pendientes según las acceptance de cada change.
 - La suite de autenticación y el adaptador Resend están implementados localmente, pero la spec 0016 permanece `PENDING`: entrega real de email, SSO, IDOR independiente con dos principals PostgreSQL, threat model y SCP autorizado aún requieren evidencia externa. Los tests de concurrencia PostgreSQL están implementados y pasan contra PostgreSQL 16 aislado; el secret scan local pasa, pero su ejecución en el proveedor CI sigue pendiente.

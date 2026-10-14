@@ -1,5 +1,21 @@
+x-worker-common: &worker-common
+  init: true
+  restart: unless-stopped
+  user: "0:0"
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  read_only: true
+  tmpfs:
+    - /tmp:mode=1777
+  volumes:
+    - residue-artifacts:/app/data/artifacts
+  command: ["python", "-m", "app.worker"]
+
 services:
   vpn:
+    profiles: ["vpn"]
     build:
       context: ./infra/mn5-vpn
     init: true
@@ -110,26 +126,18 @@ services:
     restart: unless-stopped
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8742"]
 
-  worker:
+  worker-vpn:
+    <<: *worker-common
+    profiles: ["vpn"]
     build:
       context: ./backend
-    init: true
-    restart: unless-stopped
     # The worker needs to read the SSH secret, but it receives no host mounts,
     # no NET_ADMIN capability, and no direct host network access. Its
     # DAC_READ_SEARCH capability is read-only and scoped to these secret
     # mounts. It shares only the isolated VPN namespace below.
     network_mode: service:vpn
-    user: "0:0"
-    cap_drop:
-      - ALL
     cap_add:
       - DAC_READ_SEARCH
-    security_opt:
-      - no-new-privileges:true
-    read_only: true
-    tmpfs:
-      - /tmp:mode=1777
     environment:
       APP_ENV: ${APP_ENV:-development}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:4742}
@@ -175,7 +183,88 @@ services:
         condition: service_completed_successfully
       vpn:
         condition: service_healthy
-    command: ["python", "-m", "app.worker"]
+
+  worker-mn5:
+    <<: *worker-common
+    profiles: ["mn5"]
+    # The MN5 image is provisioned on the cluster and must already contain
+    # the application, Python dependencies and Slurm client/auth tooling.
+    # This service intentionally has no build context: the workstation image
+    # has no sbatch/squeue/sacct/scancel client and cannot submit native jobs.
+    image: ${HPC_NATIVE_WORKER_IMAGE:-residue-annotation-platform-worker-native}
+    # This profile is deployed on a MareNostrum host. It executes sbatch,
+    # squeue, sacct and scancel locally and never starts a VPN or SSH client.
+    # The selected image must contain the MN5 Slurm client and its auth setup.
+    user: "${HPC_NATIVE_UID:-999}:${HPC_NATIVE_GID:-999}"
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:4742}
+      DATABASE_URL: postgresql+psycopg://residue:${POSTGRES_PASSWORD:-residue-dev}@db:5432/residue_annotation
+      DATABASE_AUTO_CREATE: "false"
+      ARTIFACT_ROOT: ${ARTIFACT_ROOT:-./data/artifacts}
+      MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-5242880}
+      AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:-development-only-change-this-secret-before-production}
+      AUTH_TRUSTED_HEADERS_ENABLED: ${AUTH_TRUSTED_HEADERS_ENABLED:-false}
+      HPC_EXECUTION_MODE: native
+      HPC_INPUT_TRANSFER_ENABLED: "true"
+      HPC_INPUT_REMOTE_SUBDIR: ${HPC_INPUT_REMOTE_SUBDIR:-uploads}
+      HPC_REMOTE_ROOT: ${HPC_REMOTE_ROOT:-/gpfs/projects/bsc08/bsc001997/vcfs_1000geno/hilo_integrado_anotacion}
+      HPC_SLURM_ACCOUNT: ${HPC_SLURM_ACCOUNT:-}
+      HPC_SLURM_PARTITION: ${HPC_SLURM_PARTITION:-}
+      HPC_SLURM_QOS: ${HPC_SLURM_QOS:-}
+      HPC_SLURM_TIME: ${HPC_SLURM_TIME:-00:30:00}
+      HPC_PIPELINE_PYTHON: ${HPC_PIPELINE_PYTHON:-python}
+      HPC_PIPELINE_MAIN: ${HPC_PIPELINE_MAIN:-main.py}
+      HPC_PIPELINE_MAX_PARALLEL: ${HPC_PIPELINE_MAX_PARALLEL:-1}
+      HPC_PIPELINE_CPU_BUDGET: ${HPC_PIPELINE_CPU_BUDGET:-32}
+      HPC_PIPELINE_GPU_BUDGET: ${HPC_PIPELINE_GPU_BUDGET:-1}
+      HPC_MAX_RESULT_BYTES: ${HPC_MAX_RESULT_BYTES:-268435456}
+      MN5_INSPECTION_ENABLED: ${MN5_INSPECTION_ENABLED:-false}
+      MN5_INSPECTION_MODE: ${MN5_INSPECTION_MODE:-disabled}
+      MN5_ROOT: ${MN5_ROOT:-/gpfs/projects/bsc08/bsc001997/vcfs_1000geno/hilo_integrado_anotacion}
+      MN5_MAX_ENTRIES: ${MN5_MAX_ENTRIES:-100}
+      MN5_MAX_PREVIEW_BYTES: ${MN5_MAX_PREVIEW_BYTES:-64000}
+      PATH: ${HPC_NATIVE_PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}
+    volumes:
+      - residue-artifacts:/app/data/artifacts
+      - type: bind
+        source: ${HPC_NATIVE_ROOT:-/gpfs/projects/bsc08/bsc001997/vcfs_1000geno/hilo_integrado_anotacion}
+        target: ${HPC_REMOTE_ROOT:-/gpfs/projects/bsc08/bsc001997/vcfs_1000geno/hilo_integrado_anotacion}
+        read_only: false
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${HPC_NATIVE_SLURM_CONFIG_DIR:-/etc/slurm}
+        target: /etc/slurm
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${HPC_NATIVE_MUNGE_DIR:-/run/munge}
+        target: /run/munge
+        read_only: true
+        bind:
+          create_host_path: false
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        for executable in sbatch squeue sacct scancel; do
+          command -v "$$executable" >/dev/null || {
+            echo "native MN5 worker requires $$executable in HPC_NATIVE_WORKER_IMAGE" >&2
+            exit 78
+          }
+        done
+        test -d "$$HPC_REMOTE_ROOT" || {
+          echo "native MN5 worker requires the mounted GPFS root" >&2
+          exit 78
+        }
+        exec python -m app.worker
 
   frontend:
     build:

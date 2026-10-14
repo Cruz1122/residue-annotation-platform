@@ -59,7 +59,7 @@ flowchart LR
 
 Reglas de frontera:
 
-- La VPN se administra en el host, fuera de FastAPI y fuera del frontend.
+- En el perfil Compose `vpn`, la VPN vive en un contenedor aislado fuera de FastAPI y del frontend; en el perfil `mn5` no se inicia VPN porque el worker ya está dentro de MareNostrum.
 - El inspector read-only no tiene shell remoto, `exec`, `sbatch`, `scancel` ni operaciones SFTP de escritura.
 - El frontend nunca recibe credenciales, rutas GPFS absolutas ni comandos Slurm.
 - La contraseña SSH no convierte por sí sola a una cuenta personal en una cuenta read-only a nivel del sistema operativo; esa garantía requiere ACL, cuenta de servicio o controles BSC aprobados.
@@ -74,9 +74,9 @@ La inspección local del código confirma el siguiente alcance:
 | API FastAPI | `backend/app/main.py`, `backend/app/features/*/router.py` | Expone catálogo, runs, SSE, artifacts, auth y uploads; no dispara por sí sola una ejecución científica real |
 | Frontend Astro/Preact | `frontend/src/` | Onboarding y progreso conectados a la API; no contiene fixtures científicos de producto |
 | Progreso del pipeline | `frontend/src/features/runs/components/progress/PipelineProgress.jsx` | Consulta la API/SSE persistida; no afirma que un stage tenga resultado sin `StageResult` |
-| Compose | `compose.yml`, `compose.ssh.yml` | `docker compose up` levanta PostgreSQL, migraciones, API, worker y frontend. El overlay SSH monta secretos sólo cuando se pide. VPN/SFTP/Slurm siguen fuera de Compose |
+| Compose | `compose.yml` | El perfil `vpn` levanta VPN, PostgreSQL, migraciones, API, `worker-vpn` y frontend; el perfil `mn5` sustituye el worker por `worker-mn5`, que usa Slurm/GPFS locales sin VPN ni SSH |
 | Datos científicos locales | No se versionan fixtures de producto | El frontend no contiene artefactos científicos simulados; los resultados sólo llegan por el backend y los outputs MN5 aún no están publicados |
-| Cliente HPC | `backend/app/infrastructure/hpc/{base,disabled,offline,ssh,native}.py` | Implementado como frontera local; submit/status/cancel real y smoke MN5 siguen pendientes |
+| Cliente HPC | `backend/app/infrastructure/hpc/{base,disabled,offline,ssh,native}.py` | Implementado como frontera local; el perfil `vpn` usa SSH/SCP y el perfil `mn5` usa Slurm local; el smoke de envío real sigue pendiente |
 | Inspector read-only | `backend/app/infrastructure/hpc/readonly.py` | Implementado con paths confinados; smoke remoto y matriz completa siguen pendientes |
 | Código científico remoto | raíz MN5 autorizada | Inspeccionado por SFTP: 19 paquetes de stage, 18 en el registro, documentación y tests; no ejecutado |
 
