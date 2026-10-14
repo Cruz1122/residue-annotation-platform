@@ -131,15 +131,12 @@ def download_upload(
     upload = _owned_upload(session, upload_id, principal)
     store = ArtifactStore(settings)
     try:
-        path = store.resolve(upload.storage_key)
-        stat = path.stat()
-        if not path.is_file():
-            raise FileNotFoundError(path)
+        actual_size, actual_sha256 = store.metadata(upload.storage_key)
     except (ArtifactPathError, FileNotFoundError, OSError) as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Upload content unavailable"
         ) from exc
-    if stat.st_size != upload.size:
+    if actual_size != upload.size or actual_sha256 != upload.sha256:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Upload content does not match its record",

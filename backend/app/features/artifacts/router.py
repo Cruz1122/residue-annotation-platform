@@ -62,15 +62,12 @@ def download_artifact(
         )
     store = ArtifactStore(settings)
     try:
-        path = store.resolve(artifact.storage_key)
-        stat = path.stat()
-        if not path.is_file():
-            raise FileNotFoundError(path)
+        actual_size, actual_sha256 = store.metadata(artifact.storage_key)
     except (ArtifactPathError, FileNotFoundError, OSError) as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Artifact content unavailable"
         ) from exc
-    if stat.st_size != artifact.size:
+    if actual_size != artifact.size or actual_sha256 != artifact.sha256:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Artifact content does not match its record",

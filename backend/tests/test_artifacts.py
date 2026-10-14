@@ -43,7 +43,7 @@ def _artifact_with_recorded_size(client, session, size: int) -> str:
         artifact_type="annotations",
         storage_backend="filesystem",
         storage_key="artifact/content.bin",
-        sha256="e" * 64,
+        sha256=hashlib.sha256(b"data").hexdigest(),
         size=size,
     )
     session.add(artifact)
@@ -65,6 +65,18 @@ def test_artifact_size_mismatch_returns_409(client, session, tmp_path):
     stored = tmp_path / "artifacts" / "artifact" / "content.bin"
     stored.parent.mkdir(parents=True, exist_ok=True)
     stored.write_bytes(b"12345")
+
+    response = client.get(f"/api/v1/artifacts/{artifact_id}/content", headers=HEADERS)
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Artifact content does not match its record"
+
+
+def test_artifact_digest_mismatch_returns_409(client, session, tmp_path):
+    artifact_id = _artifact_with_recorded_size(client, session, size=4)
+    stored = tmp_path / "artifacts" / "artifact" / "content.bin"
+    stored.parent.mkdir(parents=True, exist_ok=True)
+    stored.write_bytes(b"tamp")
 
     response = client.get(f"/api/v1/artifacts/{artifact_id}/content", headers=HEADERS)
 

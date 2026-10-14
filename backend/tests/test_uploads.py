@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 from app.features.auth.models import AuditEvent
-from app.features.runs.models import Run
+from app.features.runs.models import Run, Upload
 from app.features.runs.state import RunStatus
 from app.features.runs.worker_service import finalize_run
 from app.features.uploads.service import UploadValidationError, validate_upload_bytes
@@ -128,6 +128,27 @@ def test_structure_upload_content_is_limited_to_the_owner(client):
         headers={"X-User-Id": "other-user", "X-Project-Id": "other-project"},
     )
     assert foreign.status_code == 404
+
+
+def test_upload_digest_mismatch_returns_409(client, session, tmp_path):
+    payload = (
+        b"ATOM      1  N   ALA A   1      11.104  13.207  14.456  1.00 20.00           N  \nEND\n"
+    )
+    created = client.post(
+        "/api/v1/uploads",
+        files={"file": ("model.pdb", payload, "chemical/x-pdb")},
+        data={"input_type": "structure"},
+    )
+    assert created.status_code == 201
+    upload = session.get(Upload, created.json()["id"])
+    assert upload is not None
+    stored = tmp_path / "artifacts" / upload.storage_key
+    stored.write_bytes(b"X" * len(payload))
+
+    response = client.get(f"/api/v1/uploads/{upload.id}/content")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Upload content does not match its record"
 
 
 def test_user_can_have_only_one_active_run_and_slot_is_released(client, session):
