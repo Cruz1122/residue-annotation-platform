@@ -97,6 +97,13 @@ El 2026-10-10 se completó el siguiente preflight y una inspección SFTP acotada
 - No se ejecutó shell remota, Slurm, GPFS mutador, ningún stage ni smoke científico. No se validaron resultados, binarios, cuotas, GPUs o licencias.
 - El fichero local ignorado `run/secrets/hpc_ssh_password` quedó con modo `0600`. El contenido no se leyó ni se registró.
 
+El 2026-10-14 se ejecutó además el `SFTPReadOnlyInspector` del backend contra
+la misma raíz autorizada, con `list` (55 entradas), `stat` y preview acotado de
+`benchmarks/multinode_baseline_47265106/summary.tsv` (81 bytes). El smoke pasó
+sin abrir shell, ejecutar Slurm ni escribir SFTP. Esto valida el transporte y
+los límites del adaptador de aplicación; no sustituye la matriz completa ni
+una ejecución científica.
+
 Esta inspección es evidencia de conectividad, permisos de lectura y estructura de código en la raíz observada. No es evidencia de ejecución científica, de permisos de escritura ni de aceptación operativa del pipeline.
 
 ## Manejo de secretos
@@ -121,7 +128,7 @@ La siguiente información no está verificada y no debe presentarse como disponi
 - ejecución real de `HPCClient` contra Slurm/MN5, incluido el SCP de uploads pequeños;
 - aceptación de un `ReadOnlyMN5Inspector` contra el entorno autorizado y la matriz completa de casos.
 
-La matriz [MN5 read-only](../specs/tests/mn5-readonly-inspection-matrix.md) conserva en `NOT RUN` los casos de aceptación del inspector porque todavía no se ha ejecutado contra el entorno autorizado. El checkout sí implementa la interfaz local/SFTP con límites de lectura; los casos mutadores se prueban únicamente en un laboratorio aislado y nunca sobre datos reales.
+La matriz [MN5 read-only](../specs/tests/mn5-readonly-inspection-matrix.md) conserva en `NOT RUN` los casos de aceptación formal del inspector porque el smoke anterior no cubre todos los escenarios ni constituye aprobación institucional. El checkout sí implementa la interfaz local/SFTP con límites de lectura; los casos mutadores se prueban únicamente en un laboratorio aislado y nunca sobre datos reales.
 
 ## Próximo límite de implementación
 

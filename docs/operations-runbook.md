@@ -84,6 +84,13 @@ limited to the configured project root and uses SFTP with a verified
 write, rename, or execute remote commands. Slurm submit/status/cancel is a
 separate `HPCClient` boundary and requires independent BSC authorization.
 
+Read previews are deliberately narrower than metadata inspection. Only
+scientific/text suffixes (`.pdb`, `.cif`, `.mmcif`, `.tsv`, `.csv`, `.json`,
+`.fasta`, `.fa`, `.faa`, `.txt`, `.log`, `.md`) are accepted; dotfiles,
+secret-like names, binary files, special files, symlinks, traversal, backslash,
+percent-encoded, control-character, and duplicated-separator paths are
+rejected before any remote file is opened.
+
 For Windows development, validate the host VPN route and whether Docker/WSL2
 can reach the approved SSH endpoint before enabling the SSH Compose overlay.
 If the VPN route is unavailable from the container, report a preflight block;

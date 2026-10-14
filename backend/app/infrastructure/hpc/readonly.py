@@ -16,14 +16,60 @@ class InspectionError(RuntimeError):
 
 
 AUTHORIZED_MN5_ROOT = "/gpfs/projects/bsc08/bsc001997/vcfs_1000geno/hilo_integrado_anotacion"
+_PREVIEW_SUFFIXES = frozenset(
+    {
+        ".pdb",
+        ".cif",
+        ".mmcif",
+        ".tsv",
+        ".csv",
+        ".json",
+        ".fasta",
+        ".fa",
+        ".faa",
+        ".txt",
+        ".log",
+        ".md",
+    }
+)
+_SENSITIVE_NAME_MARKERS = (
+    "password",
+    "passwd",
+    "secret",
+    "credential",
+    "private",
+    "id_rsa",
+    "id_ed25519",
+    "authorized_keys",
+    "known_hosts",
+)
 
 
 def validate_relative_path(relative_path: str) -> PurePosixPath:
+    if (
+        "\\" in relative_path
+        or "%" in relative_path
+        or any(ord(character) < 32 for character in relative_path)
+    ):
+        raise InspectionError("path contains unsafe characters")
+    raw_parts = relative_path.split("/")
+    if any(part in {"", ".", ".."} for part in raw_parts):
+        raise InspectionError("path must use normalized non-empty components")
     path = PurePosixPath(relative_path)
     if path.is_absolute() or not relative_path or ".." in path.parts:
         raise InspectionError("path must be relative and confined to the inspection root")
     if any(not part or part.startswith(".") for part in path.parts):
         raise InspectionError("hidden and empty path components are not allowed")
+    return path
+
+
+def _validate_preview_path(relative_path: str) -> PurePosixPath:
+    path = validate_relative_path(relative_path)
+    filename = path.name.lower()
+    if any(marker in filename for marker in _SENSITIVE_NAME_MARKERS):
+        raise InspectionError("sensitive files cannot be previewed")
+    if path.suffix.lower() not in _PREVIEW_SUFFIXES:
+        raise InspectionError("file type is not allowed for preview")
     return path
 
 
@@ -66,9 +112,12 @@ class LocalReadOnlyInspector:
         for child in sorted(directory.iterdir(), key=lambda item: item.name):
             if child.is_symlink() or child.name.startswith("."):
                 continue
+            is_directory = child.is_dir()
+            if not is_directory and not child.is_file():
+                continue
             entries.append(
                 InspectionEntry(
-                    str(child.relative_to(self.root)), child.stat().st_size, child.is_dir()
+                    str(child.relative_to(self.root)), child.stat().st_size, is_directory
                 )
             )
         return entries
@@ -76,12 +125,14 @@ class LocalReadOnlyInspector:
     def stat(self, relative_path: str) -> InspectionEntry:
         path = self._resolve(relative_path)
         item = path.stat()
+        if not item.is_dir() and not item.is_file():
+            raise InspectionError("special files are not supported")
         return InspectionEntry(str(path.relative_to(self.root)), item.st_size, path.is_dir())
 
     def read_preview(self, relative_path: str, limit: int) -> bytes:
         if limit < 1:
             raise InspectionError("preview limit must be positive")
-        path = self._resolve(relative_path)
+        path = self._resolve(str(_validate_preview_path(relative_path)))
         if not path.is_file():
             raise InspectionError("not a regular file")
         with path.open("rb") as stream:
@@ -172,6 +223,8 @@ class SFTPReadOnlyInspector:
                 if stat.S_ISLNK(attr.st_mode):
                     continue
                 is_directory = stat.S_ISDIR(attr.st_mode)
+                if not is_directory and not stat.S_ISREG(attr.st_mode):
+                    continue
                 path = (
                     str(PurePosixPath(relative_dir) / attr.filename)
                     if relative_dir
@@ -195,6 +248,8 @@ class SFTPReadOnlyInspector:
             attr = sftp.lstat(remote_path)
             if stat.S_ISLNK(attr.st_mode):
                 raise InspectionError("symlinks are not allowed")
+            if not stat.S_ISDIR(attr.st_mode) and not stat.S_ISREG(attr.st_mode):
+                raise InspectionError("special files are not supported")
             return InspectionEntry(relative_path, attr.st_size, stat.S_ISDIR(attr.st_mode))
         except InspectionError:
             raise
@@ -207,9 +262,10 @@ class SFTPReadOnlyInspector:
     def read_preview(self, relative_path: str, limit: int) -> bytes:
         if limit < 1 or limit > self.settings.mn5_max_preview_bytes:
             raise InspectionError("preview exceeds configured limit")
+        relative = _validate_preview_path(relative_path)
         client, sftp = self._connect()
         try:
-            remote_path = self._remote(relative_path)
+            remote_path = self._remote(str(relative))
             self._assert_safe(sftp, str(self.root), remote_path)
             attr = sftp.lstat(remote_path)
             if stat.S_ISLNK(attr.st_mode) or not stat.S_ISREG(attr.st_mode):
@@ -250,5 +306,6 @@ class InMemoryReadOnlyInspector:
     def read_preview(self, relative_path: str, limit: int) -> bytes:
         if limit < 1:
             raise InspectionError("preview limit must be positive")
+        _validate_preview_path(relative_path)
         self.stat(relative_path)
         return self.files[relative_path][:limit]

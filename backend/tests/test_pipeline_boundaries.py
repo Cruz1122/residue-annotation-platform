@@ -114,9 +114,34 @@ def test_read_only_inspector_rejects_escape_and_symlink(tmp_path: Path):
         inspector.stat("link.txt")
 
 
+@pytest.mark.parametrize("relative_path", ["payload.bin", "private-key.txt", "password.txt"])
+def test_read_only_inspector_rejects_binary_and_sensitive_previews(
+    tmp_path: Path, relative_path: str
+):
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / relative_path).write_bytes(b"not for preview")
+    inspector = LocalReadOnlyInspector(root)
+
+    with pytest.raises(InspectionError):
+        inspector.read_preview(relative_path, 4)
+
+
 @pytest.mark.parametrize(
     "relative_path",
-    ["../secret", "/etc/passwd", ".hidden", "nested/../secret", "nested/.secret", ""],
+    [
+        "../secret",
+        "/etc/passwd",
+        ".hidden",
+        "nested/../secret",
+        "nested/.secret",
+        "",
+        r"nested\\secret",
+        "%2e%2e/secret",
+        "%252e%252e/secret",
+        "nested//secret",
+        "nested/./secret",
+    ],
 )
 def test_read_only_path_validation_rejects_escape_and_hidden_components(relative_path: str):
     with pytest.raises(InspectionError):
@@ -233,6 +258,8 @@ def test_sftp_read_only_inspector_rejects_symlink_and_preview_over_limit(
         inspector.stat("link.txt")
     with pytest.raises(InspectionError):
         inspector.read_preview("docs.txt", settings.mn5_max_preview_bytes + 1)
+    with pytest.raises(InspectionError):
+        inspector.read_preview("payload.bin", 4)
 
 
 def test_sftp_read_only_inspector_sanitizes_remote_io_errors(tmp_path: Path, monkeypatch):
