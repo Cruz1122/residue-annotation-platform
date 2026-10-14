@@ -68,3 +68,14 @@ jobs:
         with:
           python-version: "3.12"
       - run: python scripts/secret_scan.py
+
+  compose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate offline Compose configuration
+        run: docker compose --env-file .env.example config --quiet
+      - name: Validate VPN Compose profile
+        run: docker compose --env-file .env.example --profile vpn config --quiet
+      - name: Validate native MN5 Compose profile
+        run: docker compose --env-file .env.example --profile mn5 config --quiet
