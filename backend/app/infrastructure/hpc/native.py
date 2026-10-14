@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import os
 import re
 import shlex
 import stat
@@ -9,6 +10,7 @@ import subprocess
 from pathlib import Path, PurePosixPath
 
 from app.core.config import Settings
+from app.infrastructure.hpc.archive import ArchiveError, BoundedTarWriter
 from app.infrastructure.hpc.base import (
     HPCConfigurationError,
     HPCTransportError,
@@ -79,6 +81,8 @@ class NativeSlurmClient:
 
     def _confined_path(self, remote_path: str) -> Path:
         root = self._root_path()
+        if any(part in {".", ".."} for part in remote_path.split("/")):
+            raise RuntimeError("native HPC path contains an unsafe component")
         candidate = PurePosixPath(remote_path)
         if not candidate.is_absolute():
             raise RuntimeError("native HPC path must be absolute")
@@ -164,6 +168,98 @@ class NativeSlurmClient:
         except Exception as exc:
             _rethrow_native_transport_error(exc)
             raise
+
+    def download_directory_to(
+        self,
+        remote_path: str,
+        local_path: Path,
+        max_bytes: int,
+        max_entries: int,
+    ) -> tuple[int, str]:
+        """Archive a confined native GPFS directory with bounded traversal."""
+
+        if max_bytes < 1 or max_entries < 1:
+            raise ValueError("archive limits must be positive")
+        writer: BoundedTarWriter | None = None
+        root_fd: int | None = None
+        try:
+            directory = self._confined_path(remote_path)
+            attributes = directory.lstat()
+            if stat.S_ISLNK(attributes.st_mode) or not stat.S_ISDIR(attributes.st_mode):
+                raise RuntimeError("native HPC result is not a directory")
+            if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
+                raise RuntimeError("native HPC directory traversal needs no-follow support")
+
+            archive_root = directory.name
+            writer = BoundedTarWriter(
+                local_path,
+                max_bytes=max_bytes,
+                max_entries=max_entries,
+            )
+            writer.add_directory(archive_root)
+
+            directory_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY
+            file_flags = os.O_RDONLY | os.O_NOFOLLOW
+            root_fd = os.open(directory, directory_flags)
+            if not stat.S_ISDIR(os.fstat(root_fd).st_mode):
+                raise RuntimeError("native HPC result is not a directory")
+
+            def walk(current_fd: int, archive_directory: str) -> None:
+                entries = []
+                with os.scandir(current_fd) as iterator:
+                    for entry in iterator:
+                        entries.append(entry)
+                        if len(entries) > max_entries:
+                            raise ArchiveError("remote artifact contains too many entries")
+                entries.sort(key=lambda item: item.name)
+                for entry in entries:
+                    name = entry.name
+                    if not name or PurePosixPath(name).name != name or name in {".", ".."}:
+                        raise RuntimeError("native HPC result contains an unsafe directory entry")
+                    entry_attributes = entry.stat(follow_symlinks=False)
+                    if stat.S_ISLNK(entry_attributes.st_mode):
+                        raise RuntimeError("native HPC result contains a symlink")
+                    archive_child = f"{archive_directory}/{name}"
+                    try:
+                        child_fd = os.open(name, directory_flags, dir_fd=current_fd)
+                    except OSError as open_directory_error:
+                        if open_directory_error.errno != errno.ENOTDIR:
+                            if open_directory_error.errno == errno.ELOOP:
+                                raise RuntimeError(
+                                    "native HPC result contains a symlink"
+                                ) from open_directory_error
+                            raise
+                        child_fd = None
+                    if child_fd is not None:
+                        writer.add_directory(archive_child)
+                        try:
+                            walk(child_fd, archive_child)
+                        finally:
+                            os.close(child_fd)
+                        continue
+                    file_fd = os.open(name, file_flags, dir_fd=current_fd)
+                    try:
+                        file_attributes = os.fstat(file_fd)
+                        if not stat.S_ISREG(file_attributes.st_mode):
+                            raise RuntimeError("native HPC result contains a non-regular entry")
+                        size = file_attributes.st_size
+                        with os.fdopen(file_fd, "rb", closefd=False) as source:
+                            writer.add_file(archive_child, source, size)
+                        if os.fstat(file_fd).st_size != size:
+                            raise RuntimeError("native HPC result changed while it was being read")
+                    finally:
+                        os.close(file_fd)
+
+            walk(root_fd, archive_root)
+            return writer.close()
+        except Exception as exc:
+            if writer is not None:
+                writer.abort()
+            _rethrow_native_transport_error(exc)
+            raise
+        finally:
+            if root_fd is not None:
+                os.close(root_fd)
 
     def _run(self, args: list[str]) -> str:
         try:

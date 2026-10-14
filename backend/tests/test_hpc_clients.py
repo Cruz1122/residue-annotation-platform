@@ -1,9 +1,14 @@
 import errno
+import io
+import stat
 import subprocess
+import tarfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from app.core.config import Settings
+from app.infrastructure.hpc.archive import ArchiveError, BoundedTarWriter
 from app.infrastructure.hpc.base import (
     HPCConfigurationError,
     HPCTransportError,
@@ -344,6 +349,209 @@ def test_native_slurm_reads_and_downloads_only_confined_regular_files(tmp_path):
         client.read_text(str(outside / "manifest.json"), 1_000)
 
 
+def test_bounded_tar_writer_is_deterministic_and_enforces_limits(tmp_path):
+    archive = tmp_path / "artifacts" / "bundle.tar"
+    writer = BoundedTarWriter(archive, max_bytes=32_768, max_entries=4)
+    writer.add_directory("bundle")
+    writer.add_file("bundle/result.txt", source=io.BytesIO(b"result"), size=6)
+    size, digest = writer.close()
+
+    assert size == archive.stat().st_size
+    assert len(digest) == 64
+    with tarfile.open(archive, "r") as stream:
+        assert stream.getnames() == ["bundle", "bundle/result.txt"]
+        assert stream.extractfile("bundle/result.txt").read() == b"result"
+
+    second_archive = tmp_path / "artifacts" / "bundle-second.tar"
+    second = BoundedTarWriter(second_archive, max_bytes=32_768, max_entries=4)
+    second.add_directory("bundle")
+    second.add_file("bundle/result.txt", source=io.BytesIO(b"result"), size=6)
+    second_size, second_digest = second.close()
+    assert second_size == size
+    assert second_digest == digest
+    assert second_archive.read_bytes() == archive.read_bytes()
+
+    limited = BoundedTarWriter(tmp_path / "limited.tar", max_bytes=4_096, max_entries=1)
+    limited.add_directory("bundle")
+    with pytest.raises(ArchiveError, match="too many entries"):
+        limited.add_file("bundle/result.txt", source=io.BytesIO(b"x"), size=1)
+    limited.abort()
+
+    invalid = BoundedTarWriter(tmp_path / "invalid.tar", max_bytes=32_768, max_entries=4)
+    with pytest.raises(ArchiveError, match="unsafe archive path"):
+        invalid.add_file("bundle//escape", source=io.BytesIO(b"x"), size=1)
+    invalid.abort()
+
+
+def test_native_slurm_archives_confined_directory_without_symlinks(tmp_path):
+    root = tmp_path / "hpc-root"
+    root.mkdir()
+    client = NativeSlurmClient(_settings(root))
+    bundle = root / "jobs" / "bundle"
+    client.ensure_directory(str(bundle / "nested"))
+    (bundle / "result.txt").write_text("result", encoding="utf-8")
+    (bundle / "nested" / "metrics.json").write_text("{}\n", encoding="utf-8")
+
+    archive = tmp_path / "artifacts" / "bundle.tar"
+    size, digest = client.download_directory_to(str(bundle), archive, 32_768, 10)
+
+    assert size == archive.stat().st_size
+    assert len(digest) == 64
+    with tarfile.open(archive, "r") as stream:
+        assert stream.getnames() == [
+            "bundle",
+            "bundle/nested",
+            "bundle/nested/metrics.json",
+            "bundle/result.txt",
+        ]
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (bundle / "escape").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(RuntimeError, match="symlink"):
+        client.download_directory_to(str(bundle), tmp_path / "artifacts" / "unsafe.tar", 32_768, 10)
+
+    many = root / "jobs" / "many"
+    client.ensure_directory(str(many))
+    for index in range(10):
+        (many / f"file-{index}").write_bytes(b"x")
+    bounded_archive = tmp_path / "artifacts" / "bounded.tar"
+    with pytest.raises(ArchiveError, match="too many entries"):
+        client.download_directory_to(str(many), bounded_archive, 32_768, 3)
+    assert not bounded_archive.exists()
+
+
+class _FakeArchiveSFTP:
+    def __init__(self, root: str, directories: set[str], files: dict[str, bytes]):
+        self.root = root
+        self.directories = directories
+        self.files = files
+        self.symlinks: set[str] = set()
+        self.iterated = 0
+
+    def lstat(self, path: str):
+        if path in self.symlinks:
+            return SimpleNamespace(
+                st_mode=stat.S_IFLNK | 0o777,
+                st_size=0,
+                st_mtime=1,
+                st_uid=1000,
+                st_gid=1000,
+            )
+        if path in self.directories:
+            return SimpleNamespace(
+                st_mode=stat.S_IFDIR | 0o755,
+                st_size=0,
+                st_mtime=1,
+                st_uid=1000,
+                st_gid=1000,
+            )
+        if path in self.files:
+            return SimpleNamespace(
+                st_mode=stat.S_IFREG | 0o600,
+                st_size=len(self.files[path]),
+                st_mtime=1,
+                st_uid=1000,
+                st_gid=1000,
+            )
+        raise FileNotFoundError(path)
+
+    def listdir_iter(self, path: str, read_aheads: int):
+        assert read_aheads == 16
+        prefix = f"{path.rstrip('/')}/"
+        children = set()
+        for candidate in (*self.directories, *self.files, *self.symlinks):
+            if candidate.startswith(prefix):
+                name = candidate[len(prefix) :].split("/", 1)[0]
+                if name:
+                    children.add(name)
+        for name in sorted(children):
+            self.iterated += 1
+            child = f"{prefix}{name}"
+            attributes = self.lstat(child)
+            yield SimpleNamespace(filename=name, **attributes.__dict__)
+
+    def open(self, path: str, _mode: str):
+        return io.BytesIO(self.files[path])
+
+    def close(self):
+        return None
+
+
+class _FakeArchiveSSH:
+    def __init__(self, sftp: _FakeArchiveSFTP):
+        self.sftp = sftp
+
+    def open_sftp(self):
+        return self.sftp
+
+    def close(self):
+        return None
+
+
+def _ssh_archive_client(tmp_path: Path, sftp: _FakeArchiveSFTP) -> SSHSlurmClient:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    password_path = tmp_path / "password"
+    password_path.write_text("secret\n", encoding="utf-8")
+    password_path.chmod(0o600)
+    client = SSHSlurmClient(
+        Settings(
+            app_env="test",
+            database_url="sqlite://",
+            hpc_ssh_host="mn5.example",
+            hpc_ssh_username="runner",
+            hpc_ssh_password_file=password_path,
+            hpc_remote_root=sftp.root,
+        )
+    )
+    client._connect = lambda: _FakeArchiveSSH(sftp)
+    return client
+
+
+def test_ssh_slurm_archives_confined_directory_and_bounds_listing(tmp_path):
+    root = "/gpfs/project/root"
+    bundle = f"{root}/bundle"
+    nested = f"{bundle}/nested"
+    sftp = _FakeArchiveSFTP(
+        root,
+        {root, bundle, nested},
+        {
+            f"{bundle}/result.txt": b"result",
+            f"{nested}/metrics.json": b"{}\n",
+        },
+    )
+    client = _ssh_archive_client(tmp_path, sftp)
+    archive = tmp_path / "artifacts" / "bundle.tar"
+
+    size, digest = client.download_directory_to(bundle, archive, 32_768, 10)
+
+    assert size == archive.stat().st_size
+    assert len(digest) == 64
+    with tarfile.open(archive, "r") as stream:
+        assert stream.getnames() == [
+            "bundle",
+            "bundle/nested",
+            "bundle/nested/metrics.json",
+            "bundle/result.txt",
+        ]
+
+    sftp.symlinks.add(f"{bundle}/escape")
+    with pytest.raises(RuntimeError, match="symlink"):
+        client.download_directory_to(bundle, tmp_path / "artifacts" / "unsafe.tar", 32_768, 10)
+
+    many_files = {f"{bundle}/file-{index}": b"x" for index in range(10)}
+    bounded_sftp = _FakeArchiveSFTP(root, {root, bundle}, many_files)
+    bounded_client = _ssh_archive_client(tmp_path / "bounded", bounded_sftp)
+    with pytest.raises(ArchiveError, match="too many entries"):
+        bounded_client.download_directory_to(
+            bundle,
+            tmp_path / "artifacts" / "bounded.tar",
+            32_768,
+            3,
+        )
+    assert bounded_sftp.iterated == 4
+
+
 def test_native_slurm_rejects_job_paths_outside_root(tmp_path):
     root = tmp_path / "hpc-root"
     root.mkdir()
@@ -356,6 +564,31 @@ def test_native_slurm_rejects_job_paths_outside_root(tmp_path):
 
     with pytest.raises(RuntimeError, match="outside"):
         client.submit(request)
+
+
+def test_native_slurm_rejects_dot_segments_at_every_file_boundary(tmp_path):
+    root = tmp_path / "hpc-root"
+    root.mkdir()
+    client = NativeSlurmClient(_settings(root))
+    unsafe = f"{root}/jobs/../outside/result"
+    target = tmp_path / "artifacts" / "result"
+
+    with pytest.raises(RuntimeError, match="unsafe component"):
+        client.read_text(unsafe, 1_000)
+    with pytest.raises(RuntimeError, match="unsafe component"):
+        client.download_to(unsafe, target, 1_000)
+    with pytest.raises(RuntimeError, match="unsafe component"):
+        client.download_directory_to(unsafe, target, 32_768, 10)
+    with pytest.raises(RuntimeError, match="unsafe component"):
+        client.ensure_directory(unsafe)
+    with pytest.raises(RuntimeError, match="unsafe component"):
+        client.submit(
+            JobRequest(
+                stage_id="protein_identity",
+                command=("python", "main.py"),
+                working_directory=unsafe,
+            )
+        )
 
 
 def test_native_stage_executor_selects_native_client(tmp_path):

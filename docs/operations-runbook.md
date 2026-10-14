@@ -33,6 +33,34 @@ deterministic result-validation failure and is recorded as such. This does not
 replace a real VPN/Slurm outage drill; the local regression tests cover the
 state-preservation contract only.
 
+### Remote result artifacts
+
+The MN5 pipeline may publish either regular files or directory artifacts. A
+regular file is transferred only when its manifest size and SHA-256 match. A
+directory artifact is traversed through the confined SFTP/native adapter; the
+native adapter uses descriptor-relative no-follow opens, while SFTP validates
+stable entry metadata and fails closed when a tree changes during traversal.
+Both reject symlinks and special files, create a deterministic `.tar` archive,
+and apply both limits below before the artifact is published:
+
+```text
+HPC_MAX_RESULT_BYTES       maximum bytes for each downloaded result/archive
+HPC_MAX_ARTIFACT_ENTRIES   maximum files and directories in one archive
+```
+
+The default entry limit is `10000`. Lower it for a constrained deployment when
+the stage contracts permit it; increasing it does not make an unapproved
+scientific output safe to publish. Directory artifacts have no producer-side
+file hash in the observed `stage-result-v1` contract, so the backend records a
+local archive hash and marks the artifact media type as `application/x-tar`.
+External annotation paths are rejected until MN5 supplies the same bound
+integrity record for them; ordinary annotation tables must remain inside the
+stage result directory. The result tree must be immutable after `DONE`; SFTP
+does not provide an atomic `openat` equivalent, so that infrastructure
+guarantee is part of the authorized deployment gate.
+This is an integration boundary, not a substitute for a real authorized stage
+smoke on MN5.
+
 ## Backup and restore
 
 `scripts/backup_restore.py` creates a custom-format PostgreSQL dump and an

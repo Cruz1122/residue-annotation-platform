@@ -108,6 +108,104 @@ class FakeCompletedRemote:
         return len(payload), hashlib.sha256(payload).hexdigest()
 
 
+class FakeArtifactOnlyRemote(FakeCompletedRemote):
+    """Remote stage result whose contract publishes artifacts but no table."""
+
+    stage_id = "conformational_ensemble"
+
+    def __init__(self, run_id: str):
+        super().__init__(run_id)
+        self.provenance = b'{"tool":"fake-structure-pipeline","version":"1.0"}'
+        self.result_directory = f"{self.remote_run}/results/{self.stage_id}"
+
+    def read_text(self, remote_path: str, max_bytes: int) -> str:
+        if remote_path.endswith(f"{self.stage_id}.result"):
+            return self.remote_run
+        if remote_path.endswith("run_context.json"):
+            return json.dumps(
+                {"stage_results": {self.stage_id: {"result_dir": self.result_directory}}}
+            )
+        if remote_path.endswith("DONE"):
+            return "OK\n"
+        if remote_path.endswith("result_manifest.json"):
+            return json.dumps(
+                {
+                    "schema": "stage-result-v1",
+                    "stage_id": self.stage_id,
+                    "status": "success",
+                    "partial": False,
+                    "cache_key": "c" * 64,
+                    "file_integrity": {
+                        "provenance.json": {
+                            "sha256": hashlib.sha256(self.provenance).hexdigest(),
+                            "size": len(self.provenance),
+                        }
+                    },
+                    "artifacts": {
+                        "ensemble": {
+                            "path": "/gpfs/test/cache/ensemble.tar.gz",
+                            "external": True,
+                            "sha256": hashlib.sha256(self.summary).hexdigest(),
+                            "size": len(self.summary),
+                        }
+                    },
+                }
+            )
+        if remote_path.endswith("provenance.json"):
+            return self.provenance.decode("utf-8")
+        raise AssertionError(f"unexpected remote read: {remote_path}")
+
+
+class FakeDirectoryArtifactRemote(FakeArtifactOnlyRemote):
+    def read_text(self, remote_path: str, max_bytes: int) -> str:
+        if remote_path.endswith("result_manifest.json"):
+            manifest = json.loads(super().read_text(remote_path, max_bytes))
+            manifest["artifacts"]["ensemble"] = {
+                "path": "ensemble",
+                "external": False,
+                "sha256": None,
+                "size": None,
+            }
+            return json.dumps(manifest)
+        return super().read_text(remote_path, max_bytes)
+
+    def download_directory_to(
+        self,
+        remote_path: str,
+        local_path: Path,
+        max_bytes: int,
+        max_entries: int,
+    ) -> tuple[int, str]:
+        assert remote_path.endswith("/results/conformational_ensemble/ensemble")
+        payload = b"deterministic-directory-archive"
+        assert len(payload) <= max_bytes
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        local_path.write_bytes(payload)
+        return len(payload), hashlib.sha256(payload).hexdigest()
+
+
+class FakeCollidingArtifactRemote(FakeCompletedRemote):
+    def read_text(self, remote_path: str, max_bytes: int) -> str:
+        if remote_path.endswith("result_manifest.json"):
+            manifest = json.loads(super().read_text(remote_path, max_bytes))
+            manifest["artifacts"] = {
+                "model_a": {
+                    "path": "/gpfs/test/cache/a/model.cif",
+                    "external": True,
+                    "sha256": hashlib.sha256(self.summary).hexdigest(),
+                    "size": len(self.summary),
+                },
+                "model_b": {
+                    "path": "/gpfs/test/cache/b/model.cif",
+                    "external": True,
+                    "sha256": hashlib.sha256(self.summary).hexdigest(),
+                    "size": len(self.summary),
+                },
+            }
+            return json.dumps(manifest)
+        return super().read_text(remote_path, max_bytes)
+
+
 class FakeTruncatedManifestRemote(FakeCompletedRemote):
     def read_text(self, remote_path: str, max_bytes: int) -> str:
         if remote_path.endswith("result_manifest.json"):
@@ -483,6 +581,87 @@ def test_submit_poll_and_ingest_persist_a_linked_stage_result(client, session, t
     assert annotations[0]["aa_position"] == 1
     assert annotations[0]["aa_ref"] == "A"
     assert annotations[0]["values"] == {"gene": "GENE1", "accession": "P00001"}
+
+
+def test_artifact_only_remote_stage_ingests_without_annotations(client, session, tmp_path: Path):
+    protein = client.post(
+        "/api/v1/proteins",
+        json={
+            "sequence": SEQUENCE,
+            "aliases": [{"source": "uniprot", "identifier": "P00001"}],
+        },
+    )
+    assert protein.status_code == 201
+    created_run = client.post(
+        "/api/v1/runs",
+        json={"protein_id": protein.json()["id"]},
+    )
+    assert created_run.status_code == 201
+
+    run = session.get(Run, created_run.json()["id"])
+    assert run is not None
+    stage = next(item for item in run.stages if item.stage_id == "conformational_ensemble")
+
+    settings = Settings(
+        app_env="test",
+        database_url="sqlite://",
+        artifact_root=tmp_path / "artifacts",
+        hpc_remote_root="/gpfs/test",
+    )
+    executor = SSHStageExecutor.__new__(SSHStageExecutor)
+    executor.settings = settings
+    executor.client = FakeDirectoryArtifactRemote(run.id)
+
+    result_id, reused = executor._ingest_result(session, stage)
+    session.commit()
+
+    assert reused is False
+    result = session.get(StageResult, result_id)
+    assert result is not None
+    assert {artifact.artifact_type for artifact in result.artifacts} == {"ensemble"}
+    artifact = result.artifacts[0]
+    assert artifact.media_type == "application/x-tar"
+    assert artifact.storage_key.endswith("/ensemble.tar")
+    assert result.provenance["remote_directory_artifacts"] == ["ensemble"]
+    assert not result.provenance["remote_provenance"].get("annotations")
+
+
+def test_remote_artifacts_with_same_basename_get_distinct_storage_keys(
+    client, session, tmp_path: Path
+):
+    protein = client.post(
+        "/api/v1/proteins",
+        json={"sequence": SEQUENCE, "aliases": [{"source": "uniprot", "identifier": "P00001"}]},
+    )
+    assert protein.status_code == 201
+    created_run = client.post("/api/v1/runs", json={"protein_id": protein.json()["id"]})
+    assert created_run.status_code == 201
+
+    run = session.get(Run, created_run.json()["id"])
+    assert run is not None
+    stage = next(item for item in run.stages if item.stage_id == "protein_identity")
+    settings = Settings(
+        app_env="test",
+        database_url="sqlite://",
+        artifact_root=tmp_path / "artifacts",
+        hpc_remote_root="/gpfs/test",
+    )
+    executor = SSHStageExecutor.__new__(SSHStageExecutor)
+    executor.settings = settings
+    executor.client = FakeCollidingArtifactRemote(run.id)
+
+    result_id, reused = executor._ingest_result(session, stage)
+    session.commit()
+
+    assert reused is False
+    result = session.get(StageResult, result_id)
+    assert result is not None
+    artifacts = {artifact.artifact_type: artifact for artifact in result.artifacts}
+    assert set(artifacts) == {"annotations", "model_a", "model_b"}
+    assert artifacts["model_a"].storage_key != artifacts["model_b"].storage_key
+    assert all(
+        (settings.artifact_root / artifact.storage_key).is_file() for artifact in artifacts.values()
+    )
 
 
 def test_remote_submit_selects_transferred_pipeline_inputs(client, session, tmp_path: Path):

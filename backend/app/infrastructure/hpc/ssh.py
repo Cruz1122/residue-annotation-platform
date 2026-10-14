@@ -16,6 +16,7 @@ from paramiko.ssh_exception import (
 )
 
 from app.core.config import Settings
+from app.infrastructure.hpc.archive import ArchiveError, BoundedTarWriter
 from app.infrastructure.hpc.base import (
     HPCConfigurationError,
     HPCTransportError,
@@ -43,6 +44,8 @@ def _read_password(path: Path) -> str:
 
 
 def _remote_path_under(root: str, candidate: str) -> str:
+    if any(part in {".", ".."} for part in candidate.split("/")):
+        raise SSHConfigurationError("remote working directory contains an unsafe component")
     root_path = PurePosixPath(root)
     candidate_path = PurePosixPath(candidate)
     if not candidate_path.is_absolute() or any(
@@ -129,6 +132,22 @@ def assert_no_symlink_components(
             raise RuntimeError("remote path component is unavailable") from exc
         if stat.S_ISLNK(attributes.st_mode or 0):
             raise RuntimeError("remote path uses a symlinked component")
+
+
+def _remote_entry_identity(attributes: paramiko.SFTPAttributes) -> tuple[object, ...]:
+    """Return the stable metadata available from SFTP for race detection."""
+
+    mode = getattr(attributes, "st_mode", None)
+    mtime = getattr(attributes, "st_mtime", None)
+    if not isinstance(mode, int) or mtime is None:
+        raise RuntimeError("remote result lacks stable entry metadata")
+    return (
+        stat.S_IFMT(mode),
+        getattr(attributes, "st_size", None),
+        mtime,
+        getattr(attributes, "st_uid", None),
+        getattr(attributes, "st_gid", None),
+    )
 
 
 def _ensure_remote_directory(
@@ -329,6 +348,122 @@ class SSHSlurmClient:
             except Exception as exc:
                 _rethrow_transport_error(exc)
                 raise
+        finally:
+            client.close()
+
+    def download_directory_to(
+        self,
+        remote_path: str,
+        local_path: Path,
+        max_bytes: int,
+        max_entries: int,
+    ) -> tuple[int, str]:
+        """Archive a confined remote directory without using a remote shell."""
+
+        path = _remote_path_under(self.settings.hpc_remote_root, remote_path)
+        if max_bytes < 1 or max_entries < 1:
+            raise ValueError("archive limits must be positive")
+        client = self._connect()
+        writer: BoundedTarWriter | None = None
+        try:
+            try:
+                sftp = client.open_sftp()
+                try:
+                    assert_no_symlink_components(sftp, self.settings.hpc_remote_root, path)
+                    attributes = sftp.lstat(path)
+                    if stat.S_ISLNK(attributes.st_mode or 0) or not stat.S_ISDIR(
+                        attributes.st_mode or 0
+                    ):
+                        raise RuntimeError("remote result is not a directory")
+
+                    archive_root = PurePosixPath(path).name
+                    writer = BoundedTarWriter(
+                        local_path,
+                        max_bytes=max_bytes,
+                        max_entries=max_entries,
+                    )
+                    writer.add_directory(archive_root)
+
+                    def walk(remote_directory: str, archive_directory: str) -> None:
+                        directory_attributes = sftp.lstat(remote_directory)
+                        if stat.S_ISLNK(directory_attributes.st_mode or 0) or not stat.S_ISDIR(
+                            directory_attributes.st_mode or 0
+                        ):
+                            raise RuntimeError("remote result directory changed to a non-directory")
+                        directory_identity = _remote_entry_identity(directory_attributes)
+                        entries = []
+                        try:
+                            for entry in sftp.listdir_iter(remote_directory, read_aheads=16):
+                                entries.append(entry)
+                                if len(entries) > max_entries:
+                                    raise ArchiveError("remote artifact contains too many entries")
+                        except OSError as exc:
+                            _rethrow_transport_error(exc)
+                            raise
+                        current_directory_attributes = sftp.lstat(remote_directory)
+                        if (
+                            _remote_entry_identity(current_directory_attributes)
+                            != directory_identity
+                        ):
+                            raise RuntimeError(
+                                "remote result directory changed while it was listed"
+                            )
+                        entries.sort(key=lambda item: item.filename or "")
+                        for entry in entries:
+                            name = entry.filename
+                            if (
+                                not isinstance(name, str)
+                                or not name
+                                or PurePosixPath(name).name != name
+                                or name in {".", ".."}
+                            ):
+                                raise RuntimeError(
+                                    "remote result contains an unsafe directory entry"
+                                )
+                            remote_child = str(PurePosixPath(remote_directory) / name)
+                            assert_no_symlink_components(
+                                sftp,
+                                self.settings.hpc_remote_root,
+                                remote_child,
+                            )
+                            try:
+                                child_attributes = sftp.lstat(remote_child)
+                            except OSError as exc:
+                                _rethrow_transport_error(exc)
+                                raise
+                            child_identity = _remote_entry_identity(child_attributes)
+                            archive_child = f"{archive_directory}/{name}"
+                            if stat.S_ISDIR(child_attributes.st_mode or 0):
+                                writer.add_directory(archive_child)
+                                walk(remote_child, archive_child)
+                                current = sftp.lstat(remote_child)
+                                if _remote_entry_identity(current) != child_identity:
+                                    raise RuntimeError(
+                                        "remote result directory changed while it was read"
+                                    )
+                                continue
+                            if not stat.S_ISREG(child_attributes.st_mode or 0):
+                                raise RuntimeError("remote result contains a non-regular entry")
+                            size = child_attributes.st_size
+                            if size is None:
+                                raise RuntimeError("remote result file has no size")
+                            with sftp.open(remote_child, "rb") as source:
+                                writer.add_file(archive_child, source, size)
+                            current = sftp.lstat(remote_child)
+                            if _remote_entry_identity(current) != child_identity:
+                                raise RuntimeError("remote result changed while it was being read")
+
+                    walk(path, archive_root)
+                    return writer.close()
+                finally:
+                    sftp.close()
+            except Exception as exc:
+                _rethrow_transport_error(exc)
+                raise
+        except Exception:
+            if writer is not None:
+                writer.abort()
+            raise
         finally:
             client.close()
 

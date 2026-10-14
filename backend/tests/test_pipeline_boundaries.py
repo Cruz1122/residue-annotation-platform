@@ -535,6 +535,40 @@ def test_remote_manifest_requires_integrity_for_annotations_and_provenance():
         validate_remote_manifest(manifest, "protein_identity")
 
 
+def test_remote_manifest_rejects_external_annotations_until_integrity_is_bound():
+    manifest = _remote_manifest(1)
+    manifest["annotations_external"] = True
+
+    with pytest.raises(ManifestError, match="external remote annotations"):
+        validate_remote_manifest(manifest, "protein_identity")
+
+
+def test_remote_manifest_accepts_observed_large_unhashed_files():
+    manifest = _remote_manifest(5_000_001)
+    manifest["artifacts"]["structure"]["sha256"] = None
+    manifest["file_integrity"].pop("annotations")
+
+    validate_remote_manifest(manifest, "protein_identity")
+
+
+def test_remote_manifest_allows_artifact_only_stage_without_annotations():
+    manifest = _remote_manifest(1)
+    manifest["stage_id"] = "conformational_ensemble"
+    manifest.pop("annotations")
+    manifest["file_integrity"].pop("annotations")
+    manifest["artifacts"]["structure"]["sha256"] = None
+    manifest["artifacts"]["structure"]["size"] = None
+
+    validate_remote_manifest(
+        manifest,
+        "conformational_ensemble",
+        annotations_required=False,
+    )
+
+    with pytest.raises(ManifestError, match="annotations path is missing"):
+        validate_remote_manifest(manifest, "conformational_ensemble")
+
+
 def test_remote_manifest_normalizes_in_root_absolute_artifact_paths():
     remote = _remote_manifest(1)
     remote["artifacts"]["structure"]["path"] = (

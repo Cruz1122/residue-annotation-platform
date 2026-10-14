@@ -15,6 +15,7 @@ class ManifestError(ValueError):
 
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_REMOTE_HASH_MAX_BYTES = 5_000_000
 
 
 def _valid_size(value: Any) -> bool:
@@ -57,8 +58,20 @@ def validate_manifest(manifest: dict[str, Any], expected_stage_id: str) -> None:
         raise ManifestError("manifest provenance is incomplete")
 
 
-def validate_remote_manifest(manifest: dict[str, Any], expected_stage_id: str) -> None:
-    """Validate the stage-result-v1 manifest emitted by the MN5 pipeline."""
+def validate_remote_manifest(
+    manifest: dict[str, Any],
+    expected_stage_id: str,
+    *,
+    annotations_required: bool = True,
+) -> None:
+    """Validate the stage-result-v1 manifest emitted by the MN5 pipeline.
+
+    Most stages publish a canonical ``annotations.tsv`` table, but stages that
+    only produce structural/operational artifacts are allowed to omit it. The
+    caller supplies that requirement from the local stage contract so a
+    missing table cannot silently bypass validation for annotation-producing
+    stages.
+    """
 
     if manifest.get("schema") != "stage-result-v1":
         raise ManifestError("unsupported remote manifest schema")
@@ -73,11 +86,26 @@ def validate_remote_manifest(manifest: dict[str, Any], expected_stage_id: str) -
         raise ManifestError("remote manifest cache key is invalid")
 
     annotations = manifest.get("annotations")
-    if not isinstance(annotations, str) or not annotations:
+    annotations_present = annotations is not None
+    if annotations_required and not annotations_present:
         raise ManifestError("remote manifest annotations path is missing")
-    annotation_path = Path(annotations)
-    if annotation_path.is_absolute() or any(part in {".", ".."} for part in annotation_path.parts):
-        raise ManifestError("remote manifest annotations path is unsafe")
+    if annotations_present:
+        if not isinstance(annotations, str) or not annotations:
+            raise ManifestError("remote manifest annotations path is invalid")
+        annotation_path = Path(annotations)
+        if annotation_path.is_absolute() or any(
+            part in {".", ".."} for part in annotation_path.parts
+        ):
+            raise ManifestError("remote manifest annotations path is unsafe")
+    annotations_external = manifest.get("annotations_external")
+    if annotations_external is not None and not isinstance(annotations_external, bool):
+        raise ManifestError("remote manifest annotations_external flag is invalid")
+    if annotations_external is True:
+        # The observed producer omits integrity metadata for external
+        # annotation files. Reject that variant until the producer supplies a
+        # bound size/hash contract; ingesting it relative to result_dir would
+        # be both misleading and unsafe.
+        raise ManifestError("external remote annotations are not supported")
 
     artifacts = manifest.get("artifacts")
     if not isinstance(artifacts, dict) or not artifacts:
@@ -91,14 +119,22 @@ def validate_remote_manifest(manifest: dict[str, Any], expected_stage_id: str) -
         sha256 = artifact.get("sha256")
         size = artifact.get("size")
         external = artifact.get("external")
+        directory_artifact = sha256 is None and size is None
+        unhashed_large_file = sha256 is None and _valid_size(size) and size > _REMOTE_HASH_MAX_BYTES
         if (
             not isinstance(path, str)
             or not path
             or Path(path).is_absolute()
             or any(part in {".", ".."} for part in Path(path).parts)
-            or not isinstance(sha256, str)
-            or not _SHA256.fullmatch(sha256)
-            or not _valid_size(size)
+            or (
+                not directory_artifact
+                and not unhashed_large_file
+                and (
+                    not isinstance(sha256, str)
+                    or not _SHA256.fullmatch(sha256)
+                    or not _valid_size(size)
+                )
+            )
             or (external is not None and not isinstance(external, bool))
         ):
             raise ManifestError(f"remote manifest artifact {artifact_name!r} is invalid")
@@ -116,18 +152,28 @@ def validate_remote_manifest(manifest: dict[str, Any], expected_stage_id: str) -
         ):
             raise ManifestError(f"remote manifest file integrity hash is invalid: {name}")
 
-    # These files are read during publication and must be bound to the same
-    # manifest that declared them. Without both records, a producer could
-    # replace provenance or annotations after the result was marked complete.
-    for required_name in ("annotations", "provenance.json"):
-        record = integrity.get(required_name)
+    # Provenance is always read during publication and must be bound to the
+    # manifest that declared it. The observed producer only emits annotation
+    # integrity for local files up to five million bytes, so that optional
+    # record is checked when present and the bounded transfer/canonical parser
+    # remain the fallback for larger tables.
+    provenance_record = integrity.get("provenance.json")
+    if (
+        not isinstance(provenance_record, dict)
+        or not _valid_size(provenance_record.get("size"))
+        or not isinstance(provenance_record.get("sha256"), str)
+        or not _SHA256.fullmatch(provenance_record["sha256"])
+    ):
+        raise ManifestError("remote manifest file integrity is incomplete: provenance.json")
+    if annotations_present and "annotations" in integrity:
+        annotation_record = integrity["annotations"]
         if (
-            not isinstance(record, dict)
-            or not _valid_size(record.get("size"))
-            or not isinstance(record.get("sha256"), str)
-            or not _SHA256.fullmatch(record["sha256"])
+            not isinstance(annotation_record, dict)
+            or not _valid_size(annotation_record.get("size"))
+            or not isinstance(annotation_record.get("sha256"), str)
+            or not _SHA256.fullmatch(annotation_record["sha256"])
         ):
-            raise ManifestError(f"remote manifest file integrity is incomplete: {required_name}")
+            raise ManifestError("remote manifest file integrity is incomplete: annotations")
 
 
 def normalize_remote_manifest_paths(manifest: dict[str, Any], remote_root: str) -> dict[str, Any]:

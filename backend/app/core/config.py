@@ -152,6 +152,7 @@ class Settings(BaseSettings):
     hpc_pipeline_cpu_budget: int = Field(default=32, ge=1, le=256)
     hpc_pipeline_gpu_budget: int = Field(default=1, ge=0, le=32)
     hpc_max_result_bytes: int = Field(default=256 * 1024 * 1024, ge=1)
+    hpc_max_artifact_entries: int = Field(default=10_000, ge=1, le=1_000_000)
     hpc_max_inflight_stages: int = Field(default=1, ge=1, le=64)
 
     mn5_inspection_mode: Literal["disabled", "mock", "ssh_sftp", "native"] = "disabled"

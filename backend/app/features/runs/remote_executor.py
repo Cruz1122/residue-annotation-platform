@@ -491,7 +491,11 @@ class SSHStageExecutor:
             raise RemoteStageExecutionError("remote result manifest must be an object")
         try:
             manifest = normalize_remote_manifest_paths(manifest, self.root)
-            validate_remote_manifest(manifest, stage.stage_id)
+            validate_remote_manifest(
+                manifest,
+                stage.stage_id,
+                annotations_required=bool(STAGE_BY_ID[stage.stage_id].produced_annotations),
+            )
         except ManifestError as exc:
             raise RemoteStageExecutionError(str(exc)) from exc
 
@@ -508,8 +512,12 @@ class SSHStageExecutor:
             # failed afterward.
             self._purge_stale_results(session, stage, cache_key)
 
-            annotations_relative = str(manifest["annotations"])
-            annotations_path = self._remote_child(result_dir, annotations_relative)
+            annotations_relative = manifest.get("annotations")
+            annotations_path = (
+                self._remote_child(result_dir, str(annotations_relative))
+                if annotations_relative is not None
+                else None
+            )
 
             try:
                 provenance_record = manifest["file_integrity"]["provenance.json"]
@@ -541,14 +549,23 @@ class SSHStageExecutor:
             # another worker has already published successfully.
             ingest_namespace = uuid4().hex
             storage_prefix = f"remote/{stage.run_id}/{stage.stage_id}/{ingest_namespace}"
-            annotation_integrity = manifest.get("file_integrity", {}).get("annotations", {})
-            annotation_key, annotation_size, annotation_sha = self._download_remote_file(
-                store,
-                annotations_path,
-                f"{storage_prefix}/annotations.tsv",
-                annotation_integrity,
+            artifact_storage_names = _artifact_storage_names(
+                manifest["artifacts"],
+                annotations_present=annotations_path is not None,
             )
-            stored_keys.append(annotation_key)
+            annotation_key = None
+            annotation_integrity: dict[str, Any] = {}
+            annotation_unhashed = False
+            if annotations_path is not None:
+                annotation_integrity = manifest.get("file_integrity", {}).get("annotations", {})
+                annotation_unhashed = not annotation_integrity
+                annotation_key, annotation_size, annotation_sha = self._download_remote_file(
+                    store,
+                    annotations_path,
+                    f"{storage_prefix}/annotations.tsv",
+                    annotation_integrity,
+                )
+                stored_keys.append(annotation_key)
 
             result = StageResult(
                 protein_id=stage.run.protein_id,
@@ -560,36 +577,50 @@ class SSHStageExecutor:
                     "remote_run_id": PurePosixPath(run_dir).name,
                     "manifest_schema": manifest.get("schema"),
                     "remote_provenance": _redact_remote_paths(provenance, self.root),
+                    "remote_directory_artifacts": sorted(
+                        name
+                        for name, entry in manifest["artifacts"].items()
+                        if _is_directory_artifact(entry)
+                    ),
+                    "remote_unhashed_annotations": annotation_unhashed,
+                    "remote_unhashed_artifacts": sorted(
+                        name
+                        for name, entry in manifest["artifacts"].items()
+                        if entry.get("sha256") is None and entry.get("size") is not None
+                    ),
                 },
                 owner_id=stage.run.owner_id,
                 project_id=stage.run.project_id,
             )
-            result.artifacts.append(
-                Artifact(
-                    artifact_type="annotations",
-                    storage_backend="filesystem",
-                    storage_key=annotation_key,
-                    sha256=annotation_sha,
-                    size=annotation_size,
-                    media_type="text/tab-separated-values",
+            if annotation_key is not None:
+                result.artifacts.append(
+                    Artifact(
+                        artifact_type="annotations",
+                        storage_backend="filesystem",
+                        storage_key=annotation_key,
+                        sha256=annotation_sha,
+                        size=annotation_size,
+                        media_type="text/tab-separated-values",
+                    )
                 )
-            )
             session.add(result)
             session.flush()
 
             # Parse and insert the published rows in bounded batches instead of
             # materializing the whole file plus every row in memory.
-            self._consume_annotation_file(
-                session,
-                local_path=store.resolve(annotation_key),
-                stage=stage,
-                stage_result_id=result.id,
-            )
+            if annotation_key is not None:
+                self._consume_annotation_file(
+                    session,
+                    local_path=store.resolve(annotation_key),
+                    stage=stage,
+                    stage_result_id=result.id,
+                )
 
             for name, entry in manifest["artifacts"].items():
                 remote_base = self.root if entry.get("external") else result_dir
                 remote_path = self._remote_child(remote_base, str(entry["path"]))
-                storage_name = _safe_artifact_name(str(name), str(entry["path"]))
+                storage_name = artifact_storage_names[name]
+                directory_artifact = _is_directory_artifact(entry)
                 storage_key, size, digest = self._download_remote_file(
                     store,
                     remote_path,
@@ -604,7 +635,11 @@ class SSHStageExecutor:
                         storage_key=storage_key,
                         sha256=digest,
                         size=size,
-                        media_type=_media_type_for_path(str(entry["path"])),
+                        media_type=(
+                            "application/x-tar"
+                            if directory_artifact
+                            else _media_type_for_path(str(entry["path"]))
+                        ),
                     )
                 )
             # Publication becomes visible in the same transaction that links
@@ -739,9 +774,17 @@ class SSHStageExecutor:
         target.parent.mkdir(parents=True, exist_ok=True)
         temporary = target.parent / f".remote-{uuid4().hex}.tmp"
         try:
-            size, digest = self.client.download_to(
-                remote_path, temporary, self.settings.hpc_max_result_bytes
-            )
+            if _is_directory_artifact(expected):
+                size, digest = self.client.download_directory_to(
+                    remote_path,
+                    temporary,
+                    self.settings.hpc_max_result_bytes,
+                    self.settings.hpc_max_artifact_entries,
+                )
+            else:
+                size, digest = self.client.download_to(
+                    remote_path, temporary, self.settings.hpc_max_result_bytes
+                )
         except Exception:
             temporary.unlink(missing_ok=True)
             raise
@@ -841,6 +884,45 @@ def _safe_artifact_name(name: str, path: str) -> str:
     return candidate[:128] or "artifact.bin"
 
 
+def _artifact_storage_names(
+    artifacts: dict[str, Any],
+    *,
+    annotations_present: bool,
+) -> dict[str, str]:
+    """Build deterministic names without allowing one remote artifact to overwrite another."""
+
+    used = {"annotations.tsv"} if annotations_present else set()
+    candidates: dict[str, str] = {}
+    candidate_counts: dict[str, int] = {}
+    for name, entry in artifacts.items():
+        path = str(entry["path"])
+        candidate = _safe_artifact_name(name, path)
+        if _is_directory_artifact(entry):
+            candidate = f"{candidate}.tar"
+        candidates[name] = candidate
+        candidate_counts[candidate] = candidate_counts.get(candidate, 0) + 1
+
+    names: dict[str, str] = {}
+    for name in artifacts:
+        entry = artifacts[name]
+        path = str(entry["path"])
+        candidate = candidates[name]
+        if candidate in used or candidate_counts[candidate] > 1:
+            stem = Path(candidate).stem or "artifact"
+            suffix = Path(candidate).suffix
+            attempt = 0
+            while True:
+                digest = hashlib.sha256(f"{name}\0{path}\0{attempt}".encode()).hexdigest()[:12]
+                disambiguated = f"{stem}-{digest}{suffix}"
+                if disambiguated not in used:
+                    candidate = disambiguated
+                    break
+                attempt += 1
+        names[name] = candidate
+        used.add(candidate)
+    return names
+
+
 def _safe_artifact_type(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]", "_", name)[:64] or "artifact"
 
@@ -857,6 +939,10 @@ def _media_type_for_path(path: str) -> str:
         ".cif": "chemical/x-cif",
         ".mmcif": "chemical/x-cif",
     }.get(suffix, "application/octet-stream")
+
+
+def _is_directory_artifact(entry: Any) -> bool:
+    return isinstance(entry, dict) and entry.get("sha256") is None and entry.get("size") is None
 
 
 def _redact_remote_paths(value: Any, remote_root: str) -> Any:
