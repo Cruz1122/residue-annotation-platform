@@ -4,11 +4,11 @@ from collections.abc import AsyncIterator
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.auth import Principal, get_principal
 from app.core.config import Settings, get_settings
-from app.core.db import SessionLocal, get_db
+from app.core.db import get_db
 from app.features.runs.schemas import AnnotationsResponse, RunCreate, RunRead, StageRead
 from app.features.runs.service import (
     create_run,
@@ -88,7 +88,14 @@ async def run_events(
     initial_payload = serialize_run(initial_run).model_dump(mode="json")
     # The dependency owns this session, but the stream below deliberately opens
     # short-lived sessions for every refresh so a long-lived SSE connection does
-    # not pin one database connection while waiting for a state change.
+    # not pin one database connection while waiting for a state change. Derive
+    # the factory from the injected session's bind so test/runtime overrides
+    # and non-default database engines keep the same persistence boundary.
+    refresh_session_factory = sessionmaker(
+        bind=session.get_bind(),
+        autoflush=False,
+        expire_on_commit=False,
+    )
     session.close()
 
     async def stream() -> AsyncIterator[str]:
@@ -105,7 +112,7 @@ async def run_events(
                 return
             yield ": heartbeat\n\n"
             await asyncio.sleep(2)
-            with SessionLocal() as refresh_session:
+            with refresh_session_factory() as refresh_session:
                 try:
                     run = get_owned_run(refresh_session, run_id, principal)
                 except HTTPException:

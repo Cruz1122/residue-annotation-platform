@@ -103,6 +103,36 @@ def test_run_events_emits_the_persisted_terminal_snapshot(client):
     assert ": heartbeat" not in response.text
 
 
+def test_run_events_refreshes_from_the_current_persisted_snapshot(monkeypatch, client, session):
+    protein_id = _create_protein(client)
+    created = client.post("/api/v1/runs", json={"protein_id": protein_id})
+    assert created.status_code == 201
+    run_id = created.json()["id"]
+
+    changed = False
+
+    async def persist_terminal_state(_: float) -> None:
+        nonlocal changed
+        if changed:
+            return
+        run = session.get(Run, run_id)
+        assert run is not None
+        run.status = "cancelled"
+        session.commit()
+        changed = True
+
+    # Let the request cross one refresh boundary. This keeps the test
+    # deterministic while proving that the long-lived stream re-reads the
+    # persisted state through the injected database bind.
+    monkeypatch.setattr("app.features.runs.router.asyncio.sleep", persist_terminal_state)
+    response = client.get(f"/api/v1/runs/{run_id}/events")
+
+    assert response.status_code == 200
+    assert response.text.count("event: snapshot") == 2
+    assert '"status":"pending"' in response.text
+    assert '"status":"cancelled"' in response.text
+
+
 def test_variants_are_normalized_and_duplicate_positions_are_rejected(client):
     protein_id = _create_protein(client)
     response = client.post(
