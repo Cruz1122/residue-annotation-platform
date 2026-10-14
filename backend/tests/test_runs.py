@@ -29,6 +29,30 @@ def test_run_is_created_with_persisted_stage_graph(client, session):
     assert session.query(RunStage).count() == 18
 
 
+def test_run_creation_rejects_hpc_budget_below_registry(monkeypatch, client):
+    import app.features.runs.service as runs_service
+    from app.core.config import Settings
+
+    monkeypatch.setattr(
+        runs_service,
+        "get_settings",
+        lambda: Settings(
+            app_env="test",
+            database_url="sqlite://",
+            hpc_pipeline_cpu_budget=32,
+            hpc_pipeline_gpu_budget=0,
+        ),
+    )
+    protein_id = _create_protein(client)
+
+    response = client.post("/api/v1/runs", json={"protein_id": protein_id})
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == (
+        "configured HPC budget cannot execute the registered pipeline"
+    )
+
+
 def test_variant_reference_is_validated(client):
     protein_id = _create_protein(client)
     response = client.post(
