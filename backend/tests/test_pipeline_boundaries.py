@@ -21,7 +21,9 @@ from app.infrastructure.hpc.readonly import (
     InMemoryReadOnlyInspector,
     InspectionError,
     LocalReadOnlyInspector,
+    NativeReadOnlyInspector,
     SFTPReadOnlyInspector,
+    build_read_only_inspector,
     validate_relative_path,
 )
 from app.infrastructure.hpc.ssh import (
@@ -174,6 +176,51 @@ def test_in_memory_read_only_inspector_lists_direct_children_and_stats_directori
     assert [entry.path for entry in inspector.list("nested")] == ["nested/deep", "nested/one.txt"]
     assert inspector.stat("nested").is_directory is True
     assert inspector.stat("nested/deep").is_directory is True
+
+
+def test_read_only_inspector_factory_requires_explicit_enablement(tmp_path: Path):
+    from app.core.config import Settings
+
+    settings = Settings(app_env="test", database_url="sqlite://")
+    with pytest.raises(InspectionError, match="disabled"):
+        build_read_only_inspector(settings)
+
+    enabled = Settings(
+        app_env="test",
+        database_url="sqlite://",
+        mn5_inspection_enabled=True,
+        mn5_inspection_mode="mock",
+        mn5_max_entries=2,
+        mn5_max_preview_bytes=8,
+    )
+    inspector = build_read_only_inspector(enabled)
+    assert isinstance(inspector, InMemoryReadOnlyInspector)
+    assert inspector.list() == []
+
+
+def test_native_read_only_inspector_is_confined_to_the_authorized_root(monkeypatch, tmp_path: Path):
+    import app.infrastructure.hpc.readonly as readonly_module
+    from app.core.config import Settings
+
+    root = tmp_path / "mn5-root"
+    root.mkdir()
+    (root / "evidence.tsv").write_text("evidence\n", encoding="utf-8")
+    monkeypatch.setattr(readonly_module, "AUTHORIZED_MN5_ROOT", str(root))
+    settings = Settings(
+        app_env="test",
+        database_url="sqlite://",
+        mn5_inspection_enabled=True,
+        mn5_inspection_mode="native",
+        mn5_root=str(root),
+    )
+
+    inspector = build_read_only_inspector(settings)
+    assert isinstance(inspector, NativeReadOnlyInspector)
+    assert inspector.read_preview("evidence.tsv", 8) == b"evidence"
+
+    rejected = settings.model_copy(update={"mn5_root": str(tmp_path / "other")})
+    with pytest.raises(InspectionError, match="authorized"):
+        build_read_only_inspector(rejected)
 
 
 @pytest.mark.parametrize("relative_path", ["payload.bin", "private-key.txt", "password.txt"])

@@ -154,6 +154,31 @@ class LocalReadOnlyInspector:
             return stream.read(limit)
 
 
+class NativeReadOnlyInspector(LocalReadOnlyInspector):
+    """Read-only GPFS driver for an explicitly approved native host.
+
+    The native profile is deliberately a constrained specialization of the
+    local inspector. It never exposes the executor's Slurm methods and refuses
+    to start unless the configured root is the exact project perimeter.
+    """
+
+    def __init__(self, settings: Settings):
+        root = Path(settings.mn5_root)
+        if settings.mn5_root != AUTHORIZED_MN5_ROOT:
+            raise InspectionError("inspection root is not the authorized MN5 project root")
+        try:
+            metadata = root.lstat()
+        except OSError as exc:
+            raise InspectionError("native inspection root is unavailable") from exc
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise InspectionError("native inspection root is not a real directory")
+        super().__init__(
+            root,
+            max_entries=settings.mn5_max_entries,
+            max_preview_bytes=settings.mn5_max_preview_bytes,
+        )
+
+
 class SFTPReadOnlyInspector:
     def __init__(self, settings: Settings):
         if (
@@ -360,6 +385,29 @@ class InMemoryReadOnlyInspector:
     def read_preview(self, relative_path: str, limit: int) -> bytes:
         if limit < 1 or limit > self.max_preview_bytes:
             raise InspectionError("preview exceeds configured limit")
-        _validate_preview_path(relative_path)
-        self.stat(relative_path)
-        return self.files[relative_path][:limit]
+        normalized = _validate_preview_path(relative_path)
+        self.stat(str(normalized))
+        return self.files[str(normalized)][:limit]
+
+
+def build_read_only_inspector(settings: Settings) -> ReadOnlyMN5Inspector:
+    """Select an explicitly enabled read-only driver.
+
+    There is intentionally no implicit fallback from an unavailable remote
+    profile to a local path: callers must choose ``mock`` for tests or repair
+    the configured SFTP/native perimeter.
+    """
+
+    if not settings.mn5_inspection_enabled:
+        raise InspectionError("MN5 read-only inspection is disabled")
+    if settings.mn5_inspection_mode == "mock":
+        return InMemoryReadOnlyInspector(
+            {},
+            max_entries=settings.mn5_max_entries,
+            max_preview_bytes=settings.mn5_max_preview_bytes,
+        )
+    if settings.mn5_inspection_mode == "ssh_sftp":
+        return SFTPReadOnlyInspector(settings)
+    if settings.mn5_inspection_mode == "native":
+        return NativeReadOnlyInspector(settings)
+    raise InspectionError("MN5 read-only inspection mode is disabled")
