@@ -5,7 +5,8 @@ import json
 import os
 import re
 import tempfile
-from pathlib import Path
+from copy import deepcopy
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 
@@ -89,6 +90,7 @@ def validate_remote_manifest(manifest: dict[str, Any], expected_stage_id: str) -
         path = artifact.get("path")
         sha256 = artifact.get("sha256")
         size = artifact.get("size")
+        external = artifact.get("external")
         if (
             not isinstance(path, str)
             or not path
@@ -97,6 +99,7 @@ def validate_remote_manifest(manifest: dict[str, Any], expected_stage_id: str) -
             or not isinstance(sha256, str)
             or not _SHA256.fullmatch(sha256)
             or not _valid_size(size)
+            or (external is not None and not isinstance(external, bool))
         ):
             raise ManifestError(f"remote manifest artifact {artifact_name!r} is invalid")
 
@@ -113,6 +116,46 @@ def validate_remote_manifest(manifest: dict[str, Any], expected_stage_id: str) -
                 isinstance(record["sha256"], str) and _SHA256.fullmatch(record["sha256"])
             ):
                 raise ManifestError(f"remote manifest file integrity hash is invalid: {name}")
+
+
+def normalize_remote_manifest_paths(manifest: dict[str, Any], remote_root: str) -> dict[str, Any]:
+    """Convert in-root absolute artifact paths to safe result-relative paths.
+
+    Some existing MN5 result manifests record artifact paths as absolute GPFS
+    paths. Those paths are useful to the remote producer but must never cross
+    the application boundary. Normalization happens on a detached copy before
+    validation and ingestion, and rejects absolute paths outside the configured
+    project root instead of trying to guess their meaning.
+    """
+
+    root = PurePosixPath(remote_root)
+    if not root.is_absolute():
+        raise ManifestError("configured remote root must be absolute")
+
+    normalized = deepcopy(manifest)
+    artifacts = normalized.get("artifacts")
+    if not isinstance(artifacts, dict):
+        return normalized
+    for artifact_name, artifact in artifacts.items():
+        if not isinstance(artifact, dict):
+            continue
+        path = artifact.get("path")
+        if not isinstance(path, str):
+            continue
+        candidate = PurePosixPath(path)
+        if not candidate.is_absolute():
+            continue
+        try:
+            relative = candidate.relative_to(root)
+        except ValueError as exc:
+            raise ManifestError(
+                f"remote manifest artifact {artifact_name!r} is outside the configured root"
+            ) from exc
+        if not relative.parts:
+            raise ManifestError(f"remote manifest artifact {artifact_name!r} is empty")
+        artifact["path"] = str(relative)
+        artifact["external"] = True
+    return normalized
 
 
 def sha256_file(path: Path) -> tuple[str, int]:

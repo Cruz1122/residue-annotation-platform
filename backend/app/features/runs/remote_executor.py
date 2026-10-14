@@ -18,7 +18,11 @@ from app.core.config import Settings
 from app.features.annotations.models import ANNOTATION_TABLES
 from app.features.annotations.service import ANNOTATION_INSERT_BATCH_SIZE, insert_annotation_rows
 from app.features.artifacts.storage import ArtifactPathError, ArtifactStore
-from app.features.runs.manifest import ManifestError, validate_remote_manifest
+from app.features.runs.manifest import (
+    ManifestError,
+    normalize_remote_manifest_paths,
+    validate_remote_manifest,
+)
 from app.features.runs.models import Artifact, Run, RunStage, StageResult
 from app.features.runs.service import now_utc, transition_stage
 from app.features.runs.state import RunStageStatus
@@ -349,6 +353,7 @@ class SSHStageExecutor:
         if not isinstance(manifest, dict):
             raise RemoteStageExecutionError("remote result manifest must be an object")
         try:
+            manifest = normalize_remote_manifest_paths(manifest, self.root)
             validate_remote_manifest(manifest, stage.stage_id)
         except ManifestError as exc:
             raise RemoteStageExecutionError(str(exc)) from exc
@@ -428,7 +433,8 @@ class SSHStageExecutor:
             )
 
             for name, entry in manifest["artifacts"].items():
-                remote_path = self._remote_child(result_dir, str(entry["path"]))
+                remote_base = self.root if entry.get("external") else result_dir
+                remote_path = self._remote_child(remote_base, str(entry["path"]))
                 storage_name = _safe_artifact_name(str(name), str(entry["path"]))
                 storage_key, size, digest = self._download_remote_file(
                     store,

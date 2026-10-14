@@ -7,6 +7,7 @@ from app.features.runs.cache import canonical_cache_key
 from app.features.runs.manifest import (
     ManifestError,
     atomic_write_manifest,
+    normalize_remote_manifest_paths,
     validate_manifest,
     validate_remote_manifest,
 )
@@ -136,6 +137,35 @@ def test_manifests_reject_boolean_sizes():
         validate_remote_manifest(_remote_manifest(True), "protein_identity")
     validate_manifest(_local_manifest(0), "protein_identity")
     validate_remote_manifest(_remote_manifest(0), "protein_identity")
+
+
+def test_remote_manifest_normalizes_in_root_absolute_artifact_paths():
+    remote = _remote_manifest(1)
+    remote["artifacts"]["structure"]["path"] = (
+        "/gpfs/projects/bsc08/bsc001997/vcfs_1000geno/hilo_integrado_anotacion/"
+        "results/protein_identity/model.cif"
+    )
+
+    normalized = normalize_remote_manifest_paths(
+        remote,
+        "/gpfs/projects/bsc08/bsc001997/vcfs_1000geno/hilo_integrado_anotacion",
+    )
+
+    assert normalized["artifacts"]["structure"]["path"] == "results/protein_identity/model.cif"
+    assert normalized["artifacts"]["structure"]["external"] is True
+    validate_remote_manifest(normalized, "protein_identity")
+    assert remote["artifacts"]["structure"]["path"].startswith("/gpfs/")
+
+
+def test_remote_manifest_rejects_absolute_artifact_paths_outside_root():
+    remote = _remote_manifest(1)
+    remote["artifacts"]["structure"]["path"] = "/tmp/model.cif"
+
+    with pytest.raises(ManifestError, match="outside the configured root"):
+        normalize_remote_manifest_paths(
+            remote,
+            "/gpfs/projects/bsc08/bsc001997/vcfs_1000geno/hilo_integrado_anotacion",
+        )
 
 
 def test_atomic_manifest_write_is_clean_on_replace_failure(tmp_path: Path, monkeypatch):
