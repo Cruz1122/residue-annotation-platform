@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import LucideIcon from '@shared/components/icons/LucideIcon.jsx';
-import { ApiError, cancelRun, getActiveRun, getRun } from '@shared/api/client';
+import { ApiError, cancelRun, getActiveRun, getRun, subscribeRunEvents } from '@shared/api/client';
 import '@features/runs/styles/progress.css';
 
 const STATUS_ICON = {
@@ -157,6 +157,14 @@ export default function PipelineProgress({ proteinId }) {
   useEffect(() => {
     let active = true;
     let timer;
+    let streamController;
+
+    const scheduleFallback = (load, delay = 2000) => {
+      if (!active) return;
+      if (timer) window.clearTimeout(timer);
+      timer = window.setTimeout(load, delay);
+    };
+
     const load = async () => {
       let id = runId;
       try {
@@ -185,18 +193,39 @@ export default function PipelineProgress({ proteinId }) {
         setRun(value);
         setState('ready');
         setError('');
-        if (!RUN_TERMINAL.has(value.status)) timer = window.setTimeout(load, 2000);
+        if (RUN_TERMINAL.has(value.status)) return;
+
+        streamController?.abort();
+        streamController = new AbortController();
+        try {
+          await subscribeRunEvents(id, {
+            signal: streamController.signal,
+            onSnapshot: (snapshot) => {
+              if (!active) return;
+              setRun(snapshot);
+              setState('ready');
+              setError('');
+              if (RUN_TERMINAL.has(snapshot.status)) streamController?.abort();
+            },
+          });
+          if (active) scheduleFallback(load);
+        } catch (streamError) {
+          if (!active || streamController?.signal.aborted) return;
+          // Keep the existing polling path when SSE is unavailable or drops.
+          scheduleFallback(load);
+        }
       } catch (requestError) {
         if (!active) return;
         setState('error');
         setError(requestError instanceof ApiError ? requestError.message : 'No se pudo cargar la corrida.');
-        timer = window.setTimeout(load, 4000);
+        scheduleFallback(load, 4000);
       }
     };
 
     void load();
     return () => {
       active = false;
+      streamController?.abort();
       if (timer) window.clearTimeout(timer);
     };
   }, [runId]);

@@ -394,6 +394,52 @@ export function getRun(runId: string): Promise<Run> {
   return request<Run>(`/runs/${encodeURIComponent(runId)}`);
 }
 
+export async function subscribeRunEvents(
+  runId: string,
+  options: { onSnapshot: (run: Run) => void; signal?: AbortSignal },
+): Promise<void> {
+  const response = await fetchResponse(`/runs/${encodeURIComponent(runId)}/events`, {
+    headers: { Accept: 'text/event-stream' },
+    signal: options.signal,
+  });
+  if (!response.body) throw new ApiError('El navegador no soporta eventos de corrida.', 501);
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let dataLines: string[] = [];
+
+  const consumeFrame = (frame: string): void => {
+    for (const line of frame.split('\n')) {
+      if (line.startsWith('data:')) dataLines.push(line.slice(5).trimStart());
+    }
+    if (!dataLines.length) return;
+    const encoded = dataLines.join('\n');
+    dataLines = [];
+    let snapshot: unknown;
+    try {
+      snapshot = JSON.parse(encoded);
+    } catch {
+      throw new ApiError('El backend devolvió un evento de corrida inválido.', 502);
+    }
+    options.onSnapshot(snapshot as Run);
+  };
+
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      buffer += decoder.decode(value, { stream: !done }).replace(/\r\n?/g, '\n');
+      const frames = buffer.split('\n\n');
+      buffer = frames.pop() ?? '';
+      for (const frame of frames) consumeFrame(frame);
+      if (done) break;
+    }
+    if (buffer) consumeFrame(buffer);
+  } finally {
+    reader.releaseLock();
+  }
+}
+
 export function cancelRun(runId: string): Promise<Run> {
   return request<Run>(`/runs/${encodeURIComponent(runId)}/cancel`, { method: 'POST' });
 }
