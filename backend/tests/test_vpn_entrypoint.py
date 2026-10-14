@@ -78,4 +78,4 @@ def test_vpn_password_file_builds_non_interactive_command(tmp_path: Path, monkey
     ]
     assert "--pinentry" in command
     assert str(password) not in command
-    assert "secret" not in command
+    assert all("secret" not in argument for argument in command)
