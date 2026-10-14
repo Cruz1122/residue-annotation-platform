@@ -123,6 +123,28 @@ compararon outputs/golden files y no se ejecutó ningún job desde este checkout
 Los paths de logs y muestras que aparecen en `stages.tsv` se conservaron como
 referencia textual, pero no se descargaron sus contenidos ni datasets.
 
+También se inspeccionaron benchmarks históricos ya existentes, sin ejecutar ni
+modificar el pipeline. El resultado más informativo es
+`benchmarks/all_stages_47143345/`: `config.json` declara una corrida de
+`P01130` finalizada en 1,946.887 s, pero `stages.tsv` registra 16 filas de
+nivel 1: 15 `success` y una `failed` en `conformational_ensemble`.
+`profiles.tsv` confirma `returncode=1`, `success=15`, `failed=1` y cero
+`cache_hits`. El archivo sólo cubre `pipeline17` de nivel 1; no prueba los
+niveles configurados `4` y `16`, ni contiene el manifest/provenance/outputs
+necesarios para un golden baseline publicable. Los hashes del snapshot fueron:
+
+| Archivo remoto | Bytes | SHA-256 | Interpretación |
+| --- | ---: | --- | --- |
+| `benchmarks/all_stages_47143345/config.json` | 302 | `6d56610dbc8dc6924d56def015746e22d685d17fcfa6d12c88ac809f9db8d647` | corrida `P01130` finalizada, 80 CPU/4 GPU configuradas |
+| `benchmarks/all_stages_47143345/stages.tsv` | 1,706 | `cc7d03ed3168affd8fed27df23e45b6cde568c1ab6de8d9d4e071c26606dc6b1` | 15 éxitos y 1 fallo en nivel 1 |
+| `benchmarks/all_stages_47143345/profiles.tsv` | 243 | `f565b28151f6e3d2e05c247e568f64039b1f7ddd482aeb158d2a336c07944fb5` | retorno global `1`, sin hits de caché |
+| `benchmarks/all_stages_47143345/telemetry.tsv` | 24,680 | `98a0dcfa95c7f9cefa8db24908b7e74d4e05558e4feab399d2bf3b2a5c370322` | telemetría sólo de nivel 1/pipeline17 |
+
+Como control, `benchmarks/all_stages_47069621/config.json` declara otra corrida
+finalizada, pero su `stages.tsv` de 51 bytes contiene sólo el encabezado; se
+clasifica como evidencia incompleta, no como resultado científico. No se
+descargaron logs de fallo, tablas de anotación ni datasets.
+
 Esta inspección es evidencia de conectividad, permisos de lectura y estructura de código en la raíz observada. No es evidencia de ejecución científica, de permisos de escritura ni de aceptación operativa del pipeline.
 
 ## Manejo de secretos
@@ -142,6 +164,7 @@ La siguiente información no está verificada y no debe presentarse como disponi
 - ejecución de una corrida o de un stage con entradas científicas aprobadas;
 - manifests, logs, outputs y provenance completos producidos por una corrida real;
 - finalización del baseline `47265106`: el metadata y diez etapas parciales son observables, pero `summary.tsv` no contiene filas de proteína completada;
+- resolución reproducible del fallo `conformational_ensemble` observado en `all_stages_47143345` y una corrida completa de los niveles configurados;
 - versiones ejecutables, módulos, licencias, GPUs, cuotas y disponibilidad de cachés;
 - acceso a Slurm, estado de jobs y tiempos de polling;
 - permisos read-only a nivel BSC/OS para una cuenta de servicio y política para automatización;
