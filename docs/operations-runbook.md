@@ -139,9 +139,23 @@ docker compose config --services
 docker compose -f compose.yml config
 docker compose up -d db
 docker compose run --rm migrate
-docker compose up -d backend worker frontend
+docker compose --profile vpn up -d backend worker-vpn frontend
 curl --fail-with-body http://localhost:8742/api/v1/health/db
 ```
+
+For an approved native deployment on a MareNostrum host, use the native
+profile instead of the VPN worker:
+
+```bash
+COMPOSE_PROFILES=mn5 docker compose up -d db
+COMPOSE_PROFILES=mn5 docker compose run --rm migrate
+COMPOSE_PROFILES=mn5 docker compose up -d backend worker-mn5 frontend
+```
+
+The `vpn` profile is the workstation path: the VPN container owns the PPP
+interface and `worker-vpn` shares only that network namespace. The `mn5`
+profile is the direct-host path: `worker-mn5` runs with the host's Slurm and
+GPFS integration and does not start a VPN or SSH client.
 
 Rollback is a deployment decision, not a blind database downgrade. First stop
 new submissions, preserve active-run state, and determine whether the release
