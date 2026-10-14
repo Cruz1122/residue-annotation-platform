@@ -192,6 +192,18 @@ cinco artefactos y 860 filas en SQLite temporal. Esto prueba un stage
 dependiente y su contrato de columnas, pero no el rollout de los 18 stages ni
 la equivalencia del benchmark completo.
 
+También se inspeccionó el resultado exitoso de `structure_modeling`. El manifest
+normalizado declara `model_cif` bajo `alphafold/p01130/p01130_model.cif` con
+569,213 bytes y SHA-256
+`c704b2a141dca8944416a345c1b116b4ad69f31bf98a8d4e0be3327e2fcd45c5`; la
+lectura SFTP explícita verificó ese mmCIF (`data_p01130`) y las dos tablas de
+artefactos con hash/tamaño coincidente. Sus annotations contienen 860 filas
+`1..860`, `aa_ref` concordante con la FASTA canónica y cuatro estados de QC.
+El mismo manifest declara además `alphafold_dir` y `msa_cache_entry` como
+artefactos de directorio, que no se archivaron masivamente. La evidencia
+confirma un modelo estructural real y el contrato de manifest, pero no prueba
+su publicación vía API ni el E2E del visor/browser.
+
 Como control, `benchmarks/all_stages_47069621/config.json` declara otra corrida
 finalizada, pero su `stages.tsv` de 51 bytes contiene sólo el encabezado; se
 clasifica como evidencia incompleta, no como resultado científico. No se
