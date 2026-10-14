@@ -1,0 +1,35 @@
+# Optional operator-owned Prometheus rules for the backend metrics contract.
+# The application does not bundle Prometheus or Alertmanager in Compose because
+# the production monitoring host and notification policy are deployment-owned.
+groups:
+  - name: residue-annotation-platform
+    rules:
+      - alert: RAPMetricsTargetMissing
+        expr: up{job="residue-annotation-backend"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          service: residue-annotation-backend
+        annotations:
+          summary: Residue Annotation backend metrics target is unavailable
+          description: Prometheus cannot scrape the backend metrics endpoint.
+
+      - alert: RAPMetricsDatabaseUnavailable
+        expr: rap_metrics_database_available == 0
+        for: 2m
+        labels:
+          severity: critical
+          service: residue-annotation-backend
+        annotations:
+          summary: Residue Annotation metrics lost database visibility
+          description: The metrics endpoint is reachable but cannot read durable run state.
+
+      - alert: RAPReadyStageBacklog
+        expr: sum(rap_run_stages_by_status{status="ready"}) > 0
+        for: 15m
+        labels:
+          severity: warning
+          service: residue-annotation-worker
+        annotations:
+          summary: Residue Annotation has a ready-stage backlog
+          description: A ready stage has remained unclaimed long enough to inspect worker health.

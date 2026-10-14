@@ -36,6 +36,31 @@ deterministic result-validation failure and is recorded as such. This does not
 replace a real VPN/Slurm outage drill; the local regression tests cover the
 state-preservation contract only.
 
+### Prometheus and alerting hand-off
+
+The optional rule file at
+`infra/monitoring/prometheus-rules.yml` consumes the stable metric names from
+`/api/v1/metrics` and covers a missing scrape target, loss of database-backed
+state visibility, and a sustained ready-stage backlog. It contains no
+credentials, filesystem paths, or user/run identifiers. Configure the approved
+Prometheus deployment with a scrape job such as:
+
+```yaml
+scrape_configs:
+  - job_name: residue-annotation-backend
+    metrics_path: /api/v1/metrics
+    static_configs:
+      - targets: ["backend:8742"]
+rule_files:
+  - /etc/prometheus/rules/prometheus-rules.yml
+```
+
+The repository deliberately does not start Prometheus or Alertmanager in the
+application Compose profiles: their host, retention, receiver, and paging
+policy require an approved deployment decision. Until that hand-off is made,
+the rules are a validated configuration artifact, not evidence that alerts are
+delivered.
+
 ### Remote result artifacts
 
 The MN5 pipeline may publish either regular files or directory artifacts. A
