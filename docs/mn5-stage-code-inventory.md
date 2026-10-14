@@ -244,7 +244,7 @@ La cobertura de tests demuestra intención y reglas verificables en código, per
 
 ## Implicaciones para la plataforma local
 
-El backend actual de este repositorio ya contiene `HPCClient` disabled/offline/SSH/native, `ReadOnlyMN5Inspector`, worker, scheduler local, ingestión de manifests y SSE para el estado persistido. También contiene una frontera SCP explícita para uploads pequeños de una run. Por ello, la evidencia de este documento debe usarse como baseline de integración, no como evidencia de que la aplicación web ya puede lanzar o supervisar una corrida científica real en MN5.
+El backend actual de este repositorio ya contiene `HPCClient` disabled/offline/SSH/native, `ReadOnlyMN5Inspector` con drivers mock/SFTP/native seleccionados explícitamente, worker, scheduler local, ingestión de manifests y SSE para el estado persistido. También contiene una frontera SCP explícita para uploads pequeños de una run. Por ello, la evidencia de este documento debe usarse como baseline de integración, no como evidencia de que la aplicación web ya puede lanzar o supervisar una corrida científica real en MN5.
 
 La primera integración segura debería conservar dos límites separados:
 

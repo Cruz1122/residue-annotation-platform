@@ -50,7 +50,7 @@ flowchart LR
     Host[Host de desarrollo] -->|VPN externa| VPN[gw.bsc.es:443]
     VPN -->|SSH/SFTP password| Login[glogin4.bsc.es:22]
     Login --> Root[GPFS: raíz autorizada]
-    Inspector[ReadOnlyMN5Inspector] -->|list / stat / read_preview| Root
+    Inspector[ReadOnlyMN5Inspector: mock / ssh_sftp / native] -->|list / stat / read_preview| Root
     Worker[HPCClient / input transfer] -->|submit / status / cancel / SCP explícito| Slurm[SLURM / GPFS]
     Slurm --> Root
     API[FastAPI] --> Worker
@@ -128,13 +128,13 @@ La siguiente información no está verificada y no debe presentarse como disponi
 - ejecución real de `HPCClient` contra Slurm/MN5, incluido el SCP de uploads pequeños;
 - aceptación de un `ReadOnlyMN5Inspector` contra el entorno autorizado y la matriz completa de casos.
 
-La matriz [MN5 read-only](../specs/tests/mn5-readonly-inspection-matrix.md) conserva en `NOT RUN` los casos de aceptación formal del inspector porque el smoke anterior no cubre todos los escenarios ni constituye aprobación institucional. El checkout sí implementa la interfaz local/SFTP con límites de lectura; los casos mutadores se prueban únicamente en un laboratorio aislado y nunca sobre datos reales.
+La matriz [MN5 read-only](../specs/tests/mn5-readonly-inspection-matrix.md) conserva en `NOT RUN` los casos de aceptación formal del inspector porque el smoke anterior no cubre todos los escenarios ni constituye aprobación institucional. El checkout implementa drivers local/native, SFTP y mock con límites de lectura; `build_read_only_inspector` exige habilitación explícita y no hace fallback entre perfiles. Los casos mutadores se prueban únicamente en un laboratorio aislado y nunca sobre datos reales.
 
 ## Próximo límite de implementación
 
 Antes de activar cualquier conexión real, el equipo debe aprobar el change `0009` y resolver los ADR de transporte, credenciales, perímetro GPFS y hosting BSC. La implementación debe mantener dos interfaces separadas:
 
-1. `ReadOnlyMN5Inspector` para listar, consultar metadata y leer previews acotados de archivos existentes.
+1. `ReadOnlyMN5Inspector` para listar, consultar metadata y leer previews acotados de archivos existentes; `build_read_only_inspector` selecciona explícitamente el driver `mock`, `ssh_sftp` o `native`.
 2. `HPCClient` para ejecución científica, estado y cancelación de jobs, con permisos y aceptación independientes.
 
 Este documento no autoriza jobs ni inspección remota; solo registra el perfil recibido y el límite actual del producto. El código de transferencia SCP permanece desactivado por configuración hasta que exista autorización explícita y host key/secretos válidos.
