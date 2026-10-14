@@ -1,0 +1,7 @@
+---
+import AuthLayout from '../../layouts/AuthLayout.astro';
+import LoginView from '@features/auth/components/LoginView';
+---
+<AuthLayout title="Iniciar sesión · RAP" description="Acceso a la plataforma de anotación de residuos">
+  <LoginView client:load />
+</AuthLayout>

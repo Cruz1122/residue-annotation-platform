@@ -1,19 +1,425 @@
-const apiBaseUrl = "http://localhost:8742/api/v1";
+import type {
+  AnnotationResponse,
+  CreateProteinInput,
+  CreateRunInput,
+  HealthResponse,
+  Protein,
+  Run,
+  StageDefinition,
+  Upload,
+} from '@shared/types/domain';
+import {
+  clearAuthSession,
+  parseAuthTokenPayload,
+  parseAuthUser,
+  readAuthSession,
+  safeInternalPath,
+  storeAuthSession,
+  updateStoredUser,
+  type AuthSession,
+  type AuthTokenPayload,
+  type AuthUser,
+  type UserRole,
+} from '@shared/auth/session';
 
-type HealthResponse = {
-  status: "ok";
-};
+const configuredBaseUrl = import.meta.env.PUBLIC_API_BASE_URL ?? 'http://localhost:8742/api/v1';
+const apiBaseUrl = configuredBaseUrl.replace(/\/$/, '');
+const ACCESS_REFRESH_MARGIN_MS = 10_000;
 
-async function request<T>(path: string): Promise<T> {
-  const response = await fetch(`${apiBaseUrl}${path}`);
+export class ApiError extends Error {
+  readonly status: number;
+  readonly retryAfter: number | null;
+  readonly activeRunId: string | null;
+  readonly activeProteinId: string | null;
 
-  if (!response.ok) {
-    throw new Error(`Request failed with status ${response.status}`);
+  constructor(
+    message: string,
+    status: number,
+    retryAfter: number | null = null,
+    activeRun: { runId: string; proteinId: string } | null = null,
+  ) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+    this.retryAfter = retryAfter;
+    this.activeRunId = activeRun?.runId ?? null;
+    this.activeProteinId = activeRun?.proteinId ?? null;
   }
-
-  return (await response.json()) as T;
 }
 
-export function getHealth(): Promise<HealthResponse> {
-  return request<HealthResponse>("/health");
+type AuthMode = 'required' | 'optional' | 'none';
+type RequestOptions = RequestInit & {
+  json?: unknown;
+  auth?: AuthMode;
+  retryAuth?: boolean;
+};
+
+export interface ActionResponse {
+  message: string;
+  verification_token?: string | null;
+  reset_token?: string | null;
+}
+
+export interface VerifyEmailResponse {
+  message: string;
+  user: AuthUser;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function parseRetryAfter(response: Response): number | null {
+  const raw = response.headers.get('retry-after');
+  if (!raw) return null;
+  const seconds = Number(raw);
+  return Number.isFinite(seconds) && seconds >= 0 ? seconds : null;
+}
+
+function validationDetail(detail: unknown): string | null {
+  if (!Array.isArray(detail)) return null;
+  for (const item of detail) {
+    if (isRecord(item) && typeof item.msg === 'string') return item.msg;
+  }
+  return null;
+}
+
+async function errorFromResponse(response: Response): Promise<ApiError> {
+  const contentType = response.headers.get('content-type') ?? '';
+  const payload: unknown = contentType.includes('application/json')
+    ? await response.json().catch(() => null)
+    : null;
+  const detail = isRecord(payload) ? payload.detail : null;
+  if (isRecord(detail)) {
+    const message = typeof detail.message === 'string' ? detail.message : `HTTP ${response.status}`;
+    const runId = typeof detail.run_id === 'string' ? detail.run_id : '';
+    const proteinId = typeof detail.protein_id === 'string' ? detail.protein_id : '';
+    return new ApiError(
+      message,
+      response.status,
+      parseRetryAfter(response),
+      runId && proteinId ? { runId, proteinId } : null,
+    );
+  }
+  const message = typeof detail === 'string'
+    ? detail
+    : validationDetail(detail) ?? `HTTP ${response.status}`;
+  return new ApiError(message, response.status, parseRetryAfter(response));
+}
+
+function redirectToLogin(): void {
+  if (typeof window === 'undefined' || /^\/auth\/login\/?$/.test(window.location.pathname)) return;
+  const next = safeInternalPath(
+    `${window.location.pathname}${window.location.search}${window.location.hash}`,
+    '/proteins/',
+  );
+  window.location.assign(`/auth/login/?next=${encodeURIComponent(next)}`);
+}
+
+function expireFrontendSession(): void {
+  clearAuthSession();
+  redirectToLogin();
+}
+
+function apiUrl(path: string): string {
+  return `${apiBaseUrl}${path.startsWith('/') ? path : `/${path}`}`;
+}
+
+let refreshPromise: Promise<AuthSession | null> | null = null;
+
+async function fetchResponse(path: string, options: RequestOptions = {}): Promise<Response> {
+  const {
+    json,
+    auth = 'required',
+    retryAuth = true,
+    headers: inputHeaders,
+    ...requestInit
+  } = options;
+  let session = auth === 'none' ? null : readAuthSession();
+
+  if (
+    retryAuth
+    && session
+    && session.expiresAt <= Date.now() + ACCESS_REFRESH_MARGIN_MS
+  ) {
+    try {
+      session = await refreshAuthSession();
+    } catch {
+      expireFrontendSession();
+      throw new ApiError('Tu sesión expiró. Inicia sesión de nuevo.', 401);
+    }
+  }
+
+  if (auth === 'required' && !session) {
+    redirectToLogin();
+    throw new ApiError('Debes iniciar sesión para continuar.', 401);
+  }
+
+  const headers = new Headers(inputHeaders);
+  if (json !== undefined) headers.set('Content-Type', 'application/json');
+  if (session) headers.set('Authorization', `Bearer ${session.accessToken}`);
+
+  let response: Response;
+  try {
+    response = await fetch(apiUrl(path), {
+      ...requestInit,
+      headers,
+      body: json === undefined ? requestInit.body : JSON.stringify(json),
+    });
+  } catch {
+    throw new ApiError('No se pudo conectar con el backend.', 0);
+  }
+
+  if (response.status === 401 && retryAuth && auth !== 'none' && session?.refreshToken) {
+    try {
+      const refreshed = await refreshAuthSession();
+      if (refreshed) return fetchResponse(path, { ...options, retryAuth: false });
+    } catch {
+      // The common session-expiry path below clears all local credentials.
+    }
+    expireFrontendSession();
+    throw new ApiError('Tu sesión expiró. Inicia sesión de nuevo.', 401);
+  }
+
+  if (!response.ok) {
+    if (response.status === 401 && auth === 'required') expireFrontendSession();
+    throw await errorFromResponse(response);
+  }
+  return response;
+}
+
+async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+  const response = await fetchResponse(path, options);
+  if (response.status === 204) return undefined as T;
+  const contentType = response.headers.get('content-type') ?? '';
+  if (!contentType.includes('application/json')) {
+    throw new ApiError('El backend devolvió una respuesta inesperada.', 502);
+  }
+  return await response.json() as T;
+}
+
+function requireActionResponse(payload: unknown): ActionResponse {
+  if (!isRecord(payload) || typeof payload.message !== 'string') {
+    throw new ApiError('El backend devolvió una respuesta de autenticación inválida.', 502);
+  }
+  return {
+    message: payload.message,
+    verification_token: typeof payload.verification_token === 'string' ? payload.verification_token : null,
+    reset_token: typeof payload.reset_token === 'string' ? payload.reset_token : null,
+  };
+}
+
+function requireTokenPayload(payload: unknown): AuthTokenPayload {
+  const parsed = parseAuthTokenPayload(payload);
+  if (!parsed) throw new ApiError('El backend devolvió una sesión inválida.', 502);
+  return parsed;
+}
+
+function persistTokenPayload(payload: unknown): AuthSession {
+  const session = storeAuthSession(requireTokenPayload(payload));
+  if (!readAuthSession()) {
+    throw new ApiError('El navegador bloqueó el almacenamiento de la sesión.', 0);
+  }
+  return session;
+}
+
+async function rotateRefreshToken(): Promise<AuthSession | null> {
+  const current = readAuthSession();
+  if (!current) return null;
+  try {
+    const payload = await request<unknown>('/auth/refresh', {
+      method: 'POST',
+      json: { refresh_token: current.refreshToken },
+      auth: 'none',
+      retryAuth: false,
+    });
+    return persistTokenPayload(payload);
+  } catch (error) {
+    clearAuthSession();
+    throw error;
+  }
+}
+
+export function refreshAuthSession(): Promise<AuthSession | null> {
+  if (!refreshPromise) {
+    refreshPromise = rotateRefreshToken().finally(() => {
+      refreshPromise = null;
+    });
+  }
+  return refreshPromise;
+}
+
+export async function login(email: string, password: string): Promise<AuthSession> {
+  const payload = await request<unknown>('/auth/login', {
+    method: 'POST',
+    json: { email, password },
+    auth: 'none',
+  });
+  return persistTokenPayload(payload);
+}
+
+export async function registerAccount(email: string, password: string): Promise<ActionResponse> {
+  return requireActionResponse(await request<unknown>('/auth/register', {
+    method: 'POST',
+    json: { email, password },
+    auth: 'none',
+  }));
+}
+
+export async function requestEmailVerification(email: string): Promise<ActionResponse> {
+  return requireActionResponse(await request<unknown>('/auth/verify-email/request', {
+    method: 'POST',
+    json: { email },
+    auth: 'none',
+  }));
+}
+
+export async function verifyEmail(token: string): Promise<VerifyEmailResponse> {
+  const payload = await request<unknown>('/auth/verify-email', {
+    method: 'POST',
+    json: { token },
+    auth: 'none',
+  });
+  if (!isRecord(payload) || typeof payload.message !== 'string') {
+    throw new ApiError('El backend devolvió una verificación inválida.', 502);
+  }
+  const user = parseAuthUser(payload.user);
+  if (!user) throw new ApiError('El backend devolvió un usuario inválido.', 502);
+  return { message: payload.message, user };
+}
+
+export async function requestPasswordReset(email: string): Promise<ActionResponse> {
+  return requireActionResponse(await request<unknown>('/auth/reset-password', {
+    method: 'POST',
+    json: { email },
+    auth: 'none',
+  }));
+}
+
+export async function confirmPasswordReset(token: string, password: string): Promise<ActionResponse> {
+  return requireActionResponse(await request<unknown>('/auth/reset-password/confirm', {
+    method: 'POST',
+    json: { token, password },
+    auth: 'none',
+  }));
+}
+
+export async function changePassword(currentPassword: string, password: string): Promise<AuthSession> {
+  const payload = await request<unknown>('/auth/change-password', {
+    method: 'POST',
+    json: { current_password: currentPassword, password },
+  });
+  return persistTokenPayload(payload);
+}
+
+export async function getCurrentUser(): Promise<AuthUser> {
+  const payload = await request<unknown>('/auth/me');
+  if (!isRecord(payload)) throw new ApiError('El backend devolvió un usuario inválido.', 502);
+  const user = parseAuthUser(payload.user);
+  if (!user) throw new ApiError('El backend devolvió un usuario inválido.', 502);
+  updateStoredUser(user);
+  return user;
+}
+
+export async function logout(): Promise<void> {
+  const current = readAuthSession();
+  try {
+    await request<unknown>('/auth/logout', {
+      method: 'POST',
+      json: { refresh_token: current?.refreshToken ?? null },
+      auth: 'optional',
+      retryAuth: false,
+    });
+  } finally {
+    clearAuthSession();
+  }
+}
+
+export async function listAuthUsers(): Promise<AuthUser[]> {
+  const payload = await request<unknown>('/auth/users');
+  if (!Array.isArray(payload)) throw new ApiError('El backend devolvió una lista de usuarios inválida.', 502);
+  const users = payload.map(parseAuthUser);
+  if (users.some((user) => !user)) throw new ApiError('El backend devolvió un usuario inválido.', 502);
+  return users as AuthUser[];
+}
+
+export async function updateUserRole(userId: string, role: UserRole): Promise<AuthUser> {
+  const payload = await request<unknown>(`/auth/users/${encodeURIComponent(userId)}/role`, {
+    method: 'PATCH',
+    json: { role },
+  });
+  const user = parseAuthUser(payload);
+  if (!user) throw new ApiError('El backend devolvió un usuario inválido.', 502);
+  const current = readAuthSession();
+  if (current?.user.id === user.id) clearAuthSession();
+  return user;
+}
+
+export async function getHealth(): Promise<HealthResponse> {
+  const payload = await request<unknown>('/health', { auth: 'none' });
+  if (!isRecord(payload) || payload.status !== 'ok') {
+    throw new ApiError('El backend devolvió un health inválido.', 502);
+  }
+  return { status: 'ok' };
+}
+
+export function listProteins(): Promise<Protein[]> {
+  return request<Protein[]>('/proteins');
+}
+
+export function getProtein(id: string): Promise<Protein> {
+  return request<Protein>(`/proteins/${encodeURIComponent(id)}`);
+}
+
+export function createProtein(input: CreateProteinInput): Promise<Protein> {
+  return request<Protein>('/proteins', { method: 'POST', json: input });
+}
+
+export function createRun(input: CreateRunInput): Promise<Run> {
+  return request<Run>('/runs', { method: 'POST', json: input });
+}
+
+export function uploadInput(file: File, inputType: 'fasta' | 'structure'): Promise<Upload> {
+  const form = new FormData();
+  form.append('file', file);
+  form.append('input_type', inputType);
+  return request<Upload>('/uploads', { method: 'POST', body: form });
+}
+
+export function getActiveRun(): Promise<Run> {
+  return request<Run>('/runs/active');
+}
+
+export function getRun(runId: string): Promise<Run> {
+  return request<Run>(`/runs/${encodeURIComponent(runId)}`);
+}
+
+export function cancelRun(runId: string): Promise<Run> {
+  return request<Run>(`/runs/${encodeURIComponent(runId)}/cancel`, { method: 'POST' });
+}
+
+export function getStageDefinitions(): Promise<StageDefinition[]> {
+  return request<StageDefinition[]>('/stages');
+}
+
+export function getAnnotations(runId: string): Promise<AnnotationResponse> {
+  return request<AnnotationResponse>(`/runs/${encodeURIComponent(runId)}/annotations`);
+}
+
+export async function getArtifactBlob(artifactId: string): Promise<Blob> {
+  const response = await fetchResponse(`/artifacts/${encodeURIComponent(artifactId)}/content`);
+  return await response.blob();
+}
+
+export async function getArtifactObjectUrl(artifactId: string): Promise<string> {
+  return URL.createObjectURL(await getArtifactBlob(artifactId));
+}
+
+export async function getUploadBlob(uploadId: string): Promise<Blob> {
+  const response = await fetchResponse(`/uploads/${encodeURIComponent(uploadId)}/content`);
+  return await response.blob();
+}
+
+export async function getUploadObjectUrl(uploadId: string): Promise<string> {
+  return URL.createObjectURL(await getUploadBlob(uploadId));
 }

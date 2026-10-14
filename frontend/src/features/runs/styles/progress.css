@@ -21,6 +21,7 @@
   z-index: 2;
 }
 .progress-head h1 { margin: 0; font-size: 13px; font-weight: 700; }
+.run-id { display: block; margin-top: 4px; color: var(--muted); font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; }
 .progress-actions { display: flex; align-items: center; gap: 14px; }
 .progress-counter { color: var(--muted); font-size: 10px; font-weight: 550; white-space: nowrap; }
 .progress-counter strong { color: var(--ink); font-weight: 700; }
@@ -31,6 +32,12 @@
 .progress-zoom button:last-child { border-right: 0; }
 .progress-zoom button:hover { background: var(--green-soft); }
 .progress-zoom .zoom-value { min-width: 54px; font-size: 9px; font-variant-numeric: tabular-nums; }
+.cancel-run { min-height: 30px; color: var(--danger); border-color: rgba(214,40,40,.35); }
+.progress-inline-error { margin: 0; padding: 8px 16px; border-bottom: 1px solid rgba(214,40,40,.2); background: rgba(214,40,40,.05); color: var(--danger); font-size: 10px; }
+.progress-waiting { margin: 0; padding: 8px 16px; border-bottom: 1px solid var(--line); background: rgba(17,19,24,.03); color: var(--ink); font-size: 10px; font-weight: 600; }
+.progress-message { min-height: calc(100svh - 28px); display: grid; place-items: center; align-content: center; gap: 12px; padding: 24px; color: var(--muted); text-align: center; }
+.progress-message h1, .progress-message p { margin: 0; }
+.progress-message .protein-open { width: min(280px, 100%); }
 .pipeline-scroll {
   position: relative;
   flex: 1;
@@ -64,6 +71,7 @@
   transition: stroke 220ms ease, opacity 220ms ease;
 }
 .pipeline-edge.edge-running { stroke: #111318; stroke-dasharray: 5 5; animation: edge-flow 800ms linear infinite; }
+.pipeline-edge.edge-queued { stroke: rgba(17,19,24,.45); stroke-dasharray: 2 4; }
 .pipeline-edge.edge-ok { stroke: var(--green); }
 .pipeline-edge.edge-failed { stroke: #d62828; }
 .pipeline-edge.edge-skipped { stroke: #9aa0a8; stroke-dasharray: 4 5; }
@@ -118,6 +126,7 @@
 }
 .stage-status .icon-slot { width: 16px; height: 16px; }
 .stage-status-running .lucide-icon { animation: spin 1s linear infinite; }
+.stage-status-queued { color: #555b63; }
 .stage-status-ok { color: #328c57; }
 .stage-status-failed { color: #c51f2e; }
 .stage-status-skipped { color: #9198a1; }
@@ -137,6 +146,7 @@
 }
 .stage-runtime .icon-slot { width: 11px; height: 11px; flex: 0 0 11px; transform: translateY(0); }
 .status-running { border-color: #111318; }
+.status-queued { border-color: rgba(17,19,24,.35); }
 .status-ok { border-color: rgba(81,171,117,.62); }
 .status-failed { border-color: rgba(214,40,40,.52); }
 .status-skipped { opacity: .72; }

@@ -1,0 +1,73 @@
+.session-navigation {
+  min-height: 0;
+  margin-top: auto;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.sidebar-session-item {
+  min-height: 42px;
+  border: 1px solid var(--line-strong);
+  border-radius: 2px;
+  background: #fff;
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr);
+  align-items: center;
+  gap: 9px;
+  padding: 7px 10px;
+  color: var(--ink);
+  text-decoration: none;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.sidebar-session-item:hover,
+.sidebar-session-item.active {
+  border-color: rgba(81,171,117,.52);
+  background: var(--green-soft);
+}
+
+.sidebar-session-item .icon-slot {
+  width: 18px;
+  height: 18px;
+  color: var(--green-dark);
+}
+
+.session-identity {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.session-identity strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 9px;
+  font-weight: 650;
+}
+
+.session-identity small {
+  color: var(--muted);
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+
+@media (max-width: 760px) {
+  .sidebar-session-item {
+    min-height: 38px;
+    padding: 6px 8px;
+    grid-template-columns: 17px minmax(0, 1fr);
+  }
+
+  .sidebar-session-item .icon-slot {
+    width: 16px;
+    height: 16px;
+  }
+}

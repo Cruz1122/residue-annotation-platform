@@ -7,17 +7,35 @@ const {
   description,
   active = 'progress',
   sidebarMode = 'pipeline',
-  proteinId = 'P01130',
+  proteinId = undefined,
   flush = false,
 } = Astro.props;
 ---
-<BaseLayout title={title} description={description}>
+<BaseLayout title={title} description={description} requiresAuth>
   <div class="app-page" transition:name="app-screen">
     <Sidebar active={active} mode={sidebarMode} proteinId={proteinId} />
     <main class:list={['page-with-sidebar', { flush }]}>
       <slot />
     </main>
   </div>
+  <script>
+    function keepRunQuery() {
+      const run = new URLSearchParams(window.location.search).get('run');
+      if (!run) return;
+      for (const link of document.querySelectorAll('a.sidebar-item')) {
+        const href = link.getAttribute('href');
+        if (!href || !href.includes('/proteins/')) continue;
+        const url = new URL(href, window.location.origin);
+        url.searchParams.set('run', run);
+        link.setAttribute('href', `${url.pathname}${url.search}`);
+      }
+    }
+    keepRunQuery();
+    if (!document.documentElement.dataset.rapKeepRun) {
+      document.documentElement.dataset.rapKeepRun = '1';
+      document.addEventListener('astro:page-load', keepRunQuery);
+    }
+  </script>
 </BaseLayout>
 
 <style>

@@ -9,7 +9,7 @@ Este documento separa tres fuentes de información:
 - **Verificado en este repositorio:** el estado del código que vive en `frontend/`, `backend/` y `compose.yml`.
 - **Reportado por el equipo:** el bloque de configuración `HPC_*` recibido para la conexión a BSC/MN5.
 - **Verificado remotamente por SFTP:** la raíz GPFS, su inventario de código/documentación y los contratos de los stages, sin ejecutar jobs ni modificar el filesystem.
-- **Especificado pero no verificado:** resultados científicos, disponibilidad de binarios/GPU/cuota, aceptación institucional de automatización y la implementación del cliente HPC en este checkout.
+- **Especificado pero no verificado:** resultados científicos, disponibilidad de binarios/GPU/cuota, aceptación institucional de automatización y ejecución real contra MN5. El checkout ya contiene las interfaces locales del cliente HPC, el inspector read-only y una frontera SCP para inputs pequeños; sus gates remotos siguen pendientes.
 
 La VPN se levantó en el host y el perfil corregido `bsc001997@glogin4.bsc.es` abrió una sesión SFTP autenticada. La host key coincidió con una entrada ya existente en `~/.ssh/known_hosts`. La inspección se limitó a `pwd`, listados y lecturas de código/documentación dentro de la raíz autorizada; no se abrió shell remota, no se enviaron jobs y no se escribió en MN5.
 
@@ -51,7 +51,7 @@ flowchart LR
     VPN -->|SSH/SFTP password| Login[glogin4.bsc.es:22]
     Login --> Root[GPFS: raíz autorizada]
     Inspector[ReadOnlyMN5Inspector] -->|list / stat / read_preview| Root
-    Worker[HPCClient futuro] -->|submit / status / cancel| Slurm[SLURM futuro]
+    Worker[HPCClient / input transfer] -->|submit / status / cancel / SCP explícito| Slurm[SLURM / GPFS]
     Slurm --> Root
     API[FastAPI] --> Worker
     Browser[Frontend] -->|REST / SSE futuro| API
@@ -71,16 +71,16 @@ La inspección local del código confirma el siguiente alcance:
 
 | Componente | Evidencia | Estado respecto a MN5 |
 | --- | --- | --- |
-| API FastAPI | `backend/app/main.py`, `backend/app/features/health/router.py` | Solo expone health; no conecta con HPC |
-| Frontend Astro/Preact | `frontend/src/` | Superficies de demostración locales |
-| Progreso del pipeline | `frontend/src/features/runs/components/progress/PipelineProgress.jsx` | Usa frames y timers locales; no consulta Slurm ni hace polling de 30 s |
-| Compose | `compose.yml` | Solo `frontend` y `backend`; no hay PostgreSQL, worker, VPN, SFTP ni Slurm |
-| Datos científicos locales | `frontend/public/mock-artifacts/` | Fixtures/mock artifacts; no son evidencia de MN5 |
-| Cliente HPC | búsqueda del repositorio | No existe todavía |
-| Inspector read-only | búsqueda del repositorio | No existe todavía |
+| API FastAPI | `backend/app/main.py`, `backend/app/features/*/router.py` | Expone catálogo, runs, SSE, artifacts, auth y uploads; no dispara por sí sola una ejecución científica real |
+| Frontend Astro/Preact | `frontend/src/` | Onboarding y progreso conectados a la API; no contiene fixtures científicos de producto |
+| Progreso del pipeline | `frontend/src/features/runs/components/progress/PipelineProgress.jsx` | Consulta la API/SSE persistida; no afirma que un stage tenga resultado sin `StageResult` |
+| Compose | `compose.yml`, `compose.ssh.yml` | `docker compose up` levanta PostgreSQL, migraciones, API, worker y frontend. El overlay SSH monta secretos sólo cuando se pide. VPN/SFTP/Slurm siguen fuera de Compose |
+| Datos científicos locales | No se versionan fixtures de producto | El frontend no contiene artefactos científicos simulados; los resultados sólo llegan por el backend y los outputs MN5 aún no están publicados |
+| Cliente HPC | `backend/app/infrastructure/hpc/{base,disabled,offline,ssh,native}.py` | Implementado como frontera local; submit/status/cancel real y smoke MN5 siguen pendientes |
+| Inspector read-only | `backend/app/infrastructure/hpc/readonly.py` | Implementado con paths confinados; smoke remoto y matriz completa siguen pendientes |
 | Código científico remoto | raíz MN5 autorizada | Inspeccionado por SFTP: 19 paquetes de stage, 18 en el registro, documentación y tests; no ejecutado |
 
-Por tanto, la variable `HPC_POLL_INTERVAL_SECONDS=30` describe una decisión operativa futura. No altera el progreso visual actual ni demuestra que haya un job ejecutándose en MN5.
+Por tanto, la variable `HPC_POLL_INTERVAL_SECONDS=30` describe una decisión operativa aún no conectada a un supervisor real. La API puede persistir y mostrar estados, pero eso no demuestra que haya un job ejecutándose en MN5.
 
 ## Último preflight de conectividad e inspección
 
@@ -118,9 +118,10 @@ La siguiente información no está verificada y no debe presentarse como disponi
 - versiones ejecutables, módulos, licencias, GPUs, cuotas y disponibilidad de cachés;
 - acceso a Slurm, estado de jobs y tiempos de polling;
 - permisos read-only a nivel BSC/OS para una cuenta de servicio y política para automatización;
-- integración del producto local con `HPCClient` o `ReadOnlyMN5Inspector`.
+- ejecución real de `HPCClient` contra Slurm/MN5, incluido el SCP de uploads pequeños;
+- aceptación de un `ReadOnlyMN5Inspector` contra el entorno autorizado y la matriz completa de casos.
 
-La matriz [MN5 read-only](../specs/tests/mn5-readonly-inspection-matrix.md) conserva en `NOT RUN` los casos de aceptación del inspector porque este checkout todavía no implementa esa interfaz. Los casos mutadores se prueban únicamente con mocks o un laboratorio aislado; nunca se usan para probar denegaciones sobre datos reales.
+La matriz [MN5 read-only](../specs/tests/mn5-readonly-inspection-matrix.md) conserva en `NOT RUN` los casos de aceptación del inspector porque todavía no se ha ejecutado contra el entorno autorizado. El checkout sí implementa la interfaz local/SFTP con límites de lectura; los casos mutadores se prueban únicamente en un laboratorio aislado y nunca sobre datos reales.
 
 ## Próximo límite de implementación
 
@@ -129,7 +130,7 @@ Antes de activar cualquier conexión real, el equipo debe aprobar el change `000
 1. `ReadOnlyMN5Inspector` para listar, consultar metadata y leer previews acotados de archivos existentes.
 2. `HPCClient` para ejecución científica, estado y cancelación de jobs, con permisos y aceptación independientes.
 
-Este documento no autoriza ninguna de las dos operaciones remotas; solo registra el perfil recibido y el límite actual del producto.
+Este documento no autoriza jobs ni inspección remota; solo registra el perfil recibido y el límite actual del producto. El código de transferencia SCP permanece desactivado por configuración hasta que exista autorización explícita y host key/secretos válidos.
 
 ## Referencias del plan
 

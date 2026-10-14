@@ -1,0 +1,7 @@
+---
+import AuthLayout from '../../layouts/AuthLayout.astro';
+import RegisterView from '@features/auth/components/RegisterView';
+---
+<AuthLayout title="Crear cuenta · RAP" description="Registro de una cuenta de usuario">
+  <RegisterView client:load />
+</AuthLayout>

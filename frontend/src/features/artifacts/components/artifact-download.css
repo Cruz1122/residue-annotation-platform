@@ -1,0 +1,54 @@
+.authenticated-artifact {
+  display: block;
+}
+
+.artifact-download-link {
+  width: 100%;
+  min-height: 38px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  background: #fff;
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) auto 15px;
+  align-items: center;
+  gap: 8px;
+  color: var(--ink);
+  text-align: left;
+  font-size: 9px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.artifact-download-link:hover {
+  border-color: var(--green);
+  background: var(--green-soft);
+}
+
+.artifact-download-link:disabled {
+  cursor: wait;
+  opacity: .58;
+}
+
+.artifact-download-link .icon-slot {
+  width: 14px;
+  height: 14px;
+}
+
+.artifact-download-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.artifact-download-type {
+  color: var(--muted);
+  font-size: 8px;
+}
+
+.authenticated-artifact > small {
+  display: block;
+  margin-top: 5px;
+  color: var(--danger);
+  font-size: 9px;
+}

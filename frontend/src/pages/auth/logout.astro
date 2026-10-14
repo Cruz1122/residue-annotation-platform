@@ -1,0 +1,7 @@
+---
+import AuthLayout from '../../layouts/AuthLayout.astro';
+import LogoutView from '@features/auth/components/LogoutView';
+---
+<AuthLayout title="Cerrar sesión · RAP" description="Cierre seguro de la sesión">
+  <LogoutView client:load />
+</AuthLayout>

@@ -21,6 +21,13 @@
 .info-head h1 { margin: 0; font-size: 13px; font-weight: 700; letter-spacing: -.01em; }
 .info-head-meta { color: var(--muted); font-size: 11px; font-weight: 600; white-space: nowrap; }
 .info-body { flex: 1; min-height: 0; overflow: auto; padding: 18px 20px 26px; scroll-behavior: smooth; }
+.info-message { display: grid; place-items: center; align-content: center; gap: 10px; padding: 24px; color: var(--muted); text-align: center; }
+.info-message h1, .info-message p { margin: 0; }
+.info-notice { width: min(1180px, 100%); margin: 0 auto 12px; padding: 10px 12px; border: 1px solid var(--line); background: rgba(81,171,117,.06); color: var(--muted); font-size: 10px; line-height: 1.45; }
+.run-id { display: block; margin-top: 4px; color: var(--muted); font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.evidence-count { margin: 0 0 8px; color: var(--muted); font-size: 9px; font-weight: 600; }
+.status-failed-text { color: var(--danger); }
+.stage-error { margin: 0; padding: 10px 14px; border-top: 1px solid rgba(214,40,40,.2); background: rgba(214,40,40,.05); color: var(--danger); font: 9px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
 .info-stages { width: min(1180px, 100%); margin: 0 auto; display: flex; flex-direction: column; gap: 12px; }
 .info-stage {
   border: 1px solid var(--line-strong);
@@ -54,10 +61,12 @@
 .info-annotation dd { text-align: right; font-size: 10px; font-weight: 650; overflow-wrap: anywhere; }
 .info-empty-note, .artifact-none { color: var(--muted); font-size: 10px; line-height: 1.5; padding: 8px 0; }
 .artifact-list { display: flex; flex-direction: column; gap: 7px; }
-.artifact-link { min-height: 38px; border: 1px solid var(--line); border-radius: 2px; padding: 0 10px; display: grid; grid-template-columns: 16px minmax(0,1fr) 15px; align-items: center; gap: 8px; color: var(--ink); text-decoration: none; background: #fff; font-size: 9px; font-weight: 600; }
+.artifact-link { width: 100%; min-height: 38px; border: 1px solid var(--line); border-radius: 2px; padding: 0 10px; display: grid; grid-template-columns: 16px minmax(0,1fr) 15px; align-items: center; gap: 8px; color: var(--ink); text-align: left; text-decoration: none; background: #fff; font-size: 9px; font-weight: 600; cursor: pointer; }
 .artifact-link:hover { border-color: var(--green); background: var(--green-soft); }
+.artifact-link:disabled { cursor: wait; opacity: .58; }
 .artifact-link .icon-slot { width: 14px; height: 14px; }
 .artifact-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.artifact-download-error { margin: 2px 0 0; color: var(--danger); font-size: 9px; line-height: 1.4; }
 .variant-ddg-state { position: relative; }
 .variant-ddg-state > .info-stage-status { position: absolute; right: 14px; top: -45px; }
 

@@ -27,6 +27,13 @@ button, input { font: inherit; color: inherit; }
 a { color: inherit; }
 button { -webkit-tap-highlight-color: transparent; }
 
+.api-health { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: 10px; font-weight: 700; white-space: nowrap; }
+.api-health-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+.api-health-connected { color: var(--green-dark); }
+.api-health-connected .api-health-dot { background: var(--green); }
+.api-health-unavailable { color: var(--danger); }
+.api-health-unavailable .api-health-dot { background: var(--danger); }
+
 .app-page {
   min-height: 100svh;
   background: var(--canvas);

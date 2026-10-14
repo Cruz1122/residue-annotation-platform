@@ -1,8 +1,7 @@
 ---
 import AppLayout from '../../layouts/AppLayout.astro';
 import ProteinLibrary from '@features/proteins/components/library/ProteinLibrary.jsx';
-import { MOCK_PROTEINS } from '@features/proteins/data/protein.js';
 ---
 <AppLayout title="Mis proteínas" active="library" sidebarMode="library">
-  <ProteinLibrary client:load proteins={MOCK_PROTEINS} />
+  <ProteinLibrary client:load />
 </AppLayout>

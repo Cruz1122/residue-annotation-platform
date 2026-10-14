@@ -1,0 +1,7 @@
+---
+import AuthLayout from '../../layouts/AuthLayout.astro';
+import UsersAdminView from '@features/auth/components/UsersAdminView';
+---
+<AuthLayout title="Usuarios · RAP" description="Gestión de roles de la plataforma" requiresAuth>
+  <UsersAdminView client:load />
+</AuthLayout>

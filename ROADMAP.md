@@ -1,6 +1,6 @@
 # Roadmap — Residue Annotation Platform, producto final
 
-**Estado:** PLANIFICACIÓN / NO IMPLEMENTADO / NO VALIDADO. **Destino:** release de producto científico operativo, no solamente un scaffold. **Política de inspección:** VPN+SSH por contraseña, solo lectura en GPFS autorizado.
+**Estado:** implementación incremental en curso; no es todavía release científico validado. **Puertos locales:** frontend 4742 / backend 8742. **Destino:** release de producto científico operativo, no solamente un scaffold. **Política de inspección:** VPN+SSH por contraseña, solo lectura en GPFS autorizado.
 
 ## 1. Qué significa «producto final»
 
@@ -64,6 +64,7 @@ La topología web/worker y el transporte a MN5 requieren ADR antes del despliegu
 | [0013 — Seguridad](specs/changes/0013-security-access/spec.md) | Autenticación, autorización, cuotas, audit, control de inspección read-only | 0004, 0005, 0011 | IDOR, secretos, límites GPFS, cuotas HPC |
 | [0014 — Operación](specs/changes/0014-operations-deployment/spec.md) | Staging/prod, Linux/Windows, VPN host, recuperación, backups | 0010, 0011, 0013 | Restart/reconcile, VPN outage, restore y rollback |
 | [0015 — Release](specs/changes/0015-product-release/spec.md) | E2E científico real, performance, security, sign-off | 0012, 0013, 0014 | Release aprobado con trazabilidad total |
+| [0016 — Auth, inputs y concurrencia](specs/changes/0016-auth-account-security/spec.md) | Cuentas, sesiones, tokens, uploads pequeños y máximo una run activa por usuario | 0004, 0005, 0011 | Aceptación pending: PostgreSQL concurrente, proveedor email/SSO, secret scan, threat model y SCP autorizado |
 
 **La spec de cada ID contiene** propuesta, requisitos observables, diseño preliminar, tareas y aceptación con estado `NOT RUN`. Aprobación de un ID **no** autoriza ejecutar los siguientes.
 
@@ -73,7 +74,7 @@ La topología web/worker y el transporte a MN5 requieren ADR antes del despliegu
 - **R1 — Catálogo + prototipo molecular:** 0003–0005; viewer real aislado y proteínas/runs persistentes, sin HPC aún.
 - **R2 — Motor reproducible:** 0006–0008; pipeline, historial, baseline y manifest/caché en entorno controlado.
 - **R3 — Piloto MN5:** 0009–0011; etapas científicas reales, Slurm/GPFS, resultados parciales y eventos.
-- **R4 — Producto utilizable:** 0012–0013; explorador molecular conectado y control de acceso.
+- **R4 — Producto utilizable:** 0012–0013, 0016; explorador molecular conectado, control de acceso, cuentas y límite de concurrencia por usuario.
 - **R5 — Producto final:** 0014–0015; recuperación, seguridad, pruebas de integración y aceptación final firmada.
 
 No se asignan fechas ni presupuestos sin equipo, infraestructura, SLAs y política de GPU aprobados. Un gate puede bloquear entregas posteriores.
@@ -105,7 +106,7 @@ No se resuelven por suposición. Hay que comparar con código/outputs y registra
 7. Restore DB y política de artefactos ensayados; despliegue y rollback en entorno aprobado.
 8. Requisitos `MUST` trazados a pruebas con evidencia real (o excepciones aprobadas), revisión científica y operacional firmada.
 
-**Estado ahora:** documentos de planificación. **No hay producto implementado ni pruebas del producto ejecutadas en este paquete.**
+**Estado ahora:** el checkout contiene una implementación local del plano de identidad, runs, DAG, API REST/SSE, artefactos, caché/manifiestos, worker y frontend conectado. No hay todavía producto científico final: los adapters de stages, baseline, smoke Slurm/GPFS, regresión, restore, seguridad operacional y aceptación E2E siguen pendientes según sus gates.
 
 ## 8. Desarrollo Linux/Windows y acceso de inspección a MareNostrum 5
 

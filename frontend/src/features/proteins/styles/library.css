@@ -7,6 +7,8 @@
   overflow-y: auto;
   overflow-x: hidden;
   padding: clamp(22px, 2.4vw, 36px) clamp(20px, 2.8vw, 42px) clamp(26px, 3vw, 44px);
+  display: flex;
+  flex-direction: column;
 }
 .proteins-toolbar {
   width: 100%;
@@ -16,6 +18,7 @@
   gap: 10px;
   align-items: center;
 }
+.proteins-toolbar.is-single { grid-template-columns: minmax(0, 1fr); }
 .protein-search {
   height: 48px;
   border: 1.5px solid var(--line-strong);
@@ -70,6 +73,8 @@
   overflow: hidden; display: grid; place-items: center;
 }
 .protein-preview img { width: 100%; height: 100%; object-fit: contain; object-position: center; padding: 7px; }
+.protein-sequence-preview { align-items: flex-start; justify-content: flex-start; padding: 13px; }
+.protein-sequence-preview code { color: var(--muted); font: 10px/1.65 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
 .protein-card-title { text-align: center; padding: 1px 6px 0; }
 .protein-accession { font-size: clamp(19px, 1.45vw, 24px); line-height: 1; font-weight: 700; letter-spacing: -.03em; }
 .protein-name { margin-top: 6px; color: #3f444b; font-size: clamp(11px, .82vw, 13px); line-height: 1.35; font-weight: 600; }
@@ -88,7 +93,25 @@
   transition: background 140ms ease, color 140ms ease, border-color 140ms ease;
 }
 .protein-open:hover { background: var(--ink); color: #fff; border-color: var(--ink); }
+.protein-card-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.secondary-open { background: var(--green-soft); border-color: rgba(81,171,117,.45); }
 .library-empty { min-width: 320px; color: var(--muted); font-size: 12px; padding: 22px; border: 1px dashed var(--line-strong); background: #fff; }
+.library-create {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 44px;
+  padding: 0 20px;
+  border: 2px solid var(--ink);
+  background: var(--ink);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  text-decoration: none;
+  transition: background 140ms ease, border-color 140ms ease;
+}
+.library-create:hover { background: var(--green-dark); border-color: var(--green-dark); }
+.library-create .icon-slot { width: 16px; height: 16px; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 @media (max-width: 1180px) { .proteins-grid { grid-auto-columns: calc((100% - 18px) / 2); } }

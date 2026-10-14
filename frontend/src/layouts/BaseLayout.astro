@@ -1,11 +1,13 @@
 ---
 import { ClientRouter } from 'astro:transitions';
+import AuthGate from '@shared/components/auth/AuthGate';
 import '../shared/styles/global.css';
 
 const {
   title = 'Protein pipeline',
   description = 'Interfaz del pipeline de anotación proteica',
   bodyClass = '',
+  requiresAuth = false,
 } = Astro.props;
 ---
 <!doctype html>
@@ -20,6 +22,7 @@ const {
     <ClientRouter fallback="animate" />
   </head>
   <body class={bodyClass}>
+    {requiresAuth && <AuthGate client:load />}
     <slot />
   </body>
 </html>

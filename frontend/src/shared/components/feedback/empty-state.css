@@ -1,0 +1,35 @@
+.empty-state {
+  flex: 1 1 auto;
+  width: 100%;
+  min-height: clamp(240px, 40svh, 420px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 32px 20px;
+  text-align: center;
+}
+.empty-state-icon { width: 56px; height: 56px; color: var(--muted); }
+.empty-state-title {
+  margin: 0;
+  max-width: 44ch;
+  color: var(--muted);
+  font-size: clamp(17px, 1.5vw, 20px);
+  font-weight: 600;
+  line-height: 1.45;
+}
+.empty-state-description {
+  margin: 0;
+  max-width: 52ch;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.empty-state-action {
+  margin-top: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}

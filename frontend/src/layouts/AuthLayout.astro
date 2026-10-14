@@ -1,0 +1,13 @@
+---
+import BaseLayout from './BaseLayout.astro';
+import '@features/auth/styles/auth.css';
+
+const {
+  title,
+  description,
+  requiresAuth = false,
+} = Astro.props;
+---
+<BaseLayout title={title} description={description} bodyClass="auth-body" requiresAuth={requiresAuth}>
+  <slot />
+</BaseLayout>

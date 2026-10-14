@@ -1,95 +1,101 @@
 import { useEffect, useMemo, useState } from 'preact/hooks';
 import LucideIcon from '@shared/components/icons/LucideIcon.jsx';
-import { readSession, writeSession } from '@shared/lib/session.js';
+import EmptyState from '@shared/components/feedback/EmptyState.jsx';
+import { ApiError, listProteins } from '@shared/api/client';
 import '@features/proteins/styles/library.css';
 
-function formatElapsed(ms) {
-  const seconds = Math.max(0, Math.floor(ms / 1000));
-  if (seconds < 60) return `${seconds} s`;
-  const minutes = Math.floor(seconds / 60);
-  const rest = seconds % 60;
-  if (minutes < 60) return `${minutes} min ${rest} s`;
-  const hours = Math.floor(minutes / 60);
-  return `${hours} h ${minutes % 60} min`;
+function proteinLabel(protein) {
+  return protein.aliases?.[0]?.identifier || protein.id;
 }
 
-function completionPercent(ms) {
-  // Demo-only curve: visually useful, deliberately asymptotic before 100%.
-  return Math.min(96, Math.max(1, Math.round(100 * (1 - Math.exp(-ms / 42000)))));
-}
-
-function ProteinCard({ protein, now, startedAt }) {
-  const elapsed = Math.max(0, now - startedAt);
-  const percent = completionPercent(elapsed);
-
+function ProteinCard({ protein }) {
+  const label = proteinLabel(protein);
   return (
     <article class="protein-card">
-      <div class="protein-preview" aria-label={`Snapshot de ${protein.accession}`}>
-        <img src={protein.preview} alt={`Snapshot estructural de ${protein.accession}`} loading="eager" />
+      <div class="protein-preview protein-sequence-preview" aria-label={`Secuencia de ${label}`}>
+        <code>{protein.sequence.slice(0, 120)}{protein.sequence.length > 120 ? '…' : ''}</code>
       </div>
       <div class="protein-card-title">
-        <div class="protein-accession">{protein.accession}</div>
-        <div class="protein-name">{protein.gene} · {protein.name}</div>
+        <div class="protein-accession">{label}</div>
+        <div class="protein-name">{protein.id}</div>
         <div class="protein-completion">
-          <LucideIcon name="clock" />
-          <span>Lleva {formatElapsed(elapsed)} · {percent}%</span>
+          <LucideIcon name="hash" />
+          <span>{protein.sequence_sha256.slice(0, 12)}…</span>
         </div>
       </div>
       <div class="protein-meta">
-        <div class="protein-meta-item"><LucideIcon name="tag" /><span>{protein.organism}</span></div>
-        <div class="protein-meta-item"><LucideIcon name="activity" /><span>{protein.length} aa</span></div>
-        <div class="protein-meta-item"><LucideIcon name="file-text" /><span>{protein.source}</span></div>
-        <div class="protein-meta-item"><LucideIcon name="rotate-cw" /><span>Anotación en curso</span></div>
+        <div class="protein-meta-item"><LucideIcon name="activity" /><span>{protein.length.toLocaleString('es-CO')} aa</span></div>
+        <div class="protein-meta-item"><LucideIcon name="tags" /><span>{protein.aliases.length} alias{protein.aliases.length === 1 ? '' : 'es'}</span></div>
       </div>
-      <a class="protein-open" href={`/proteins/${protein.id}/progress/`}>Ver proteína</a>
+      <div class="protein-card-actions">
+        <a class="protein-open" href={`/proteins/${encodeURIComponent(protein.id)}/progress/`}>Ver progreso</a>
+        <a class="protein-open secondary-open" href="/">Crear corrida</a>
+      </div>
     </article>
   );
 }
 
-export default function ProteinLibrary({ proteins }) {
+export default function ProteinLibrary() {
+  const [proteins, setProteins] = useState([]);
   const [query, setQuery] = useState('');
-  const [now, setNow] = useState(0);
-  const [startedAt, setStartedAt] = useState(0);
+  const [state, setState] = useState('loading');
+  const [error, setError] = useState('');
 
   useEffect(() => {
-    const session = readSession();
-    const started = session.runStartedAt || Date.now();
-    if (!session.runStartedAt) writeSession({ runStartedAt: started });
-    setStartedAt(started);
-    setNow(Date.now());
-    const timer = window.setInterval(() => setNow(Date.now()), 250);
-    return () => window.clearInterval(timer);
+    let active = true;
+    listProteins()
+      .then((items) => {
+        if (!active) return;
+        setProteins(items);
+        setState('ready');
+      })
+      .catch((requestError) => {
+        if (!active) return;
+        setState('error');
+        setError(requestError instanceof ApiError ? requestError.message : 'No se pudo cargar el catálogo.');
+      });
+    return () => { active = false; };
   }, []);
 
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase();
     if (!needle) return proteins;
-    return proteins.filter((protein) => [protein.accession, protein.gene, protein.name, protein.organism]
-      .some((value) => String(value).toLowerCase().includes(needle)));
+    return proteins.filter((protein) => [protein.id, protein.sequence_sha256, ...protein.aliases.map((alias) => alias.identifier)]
+      .some((value) => value.toLowerCase().includes(needle)));
   }, [proteins, query]);
+
+  const catalogEmpty = state === 'ready' && proteins.length === 0;
 
   return (
     <section class="library-view" aria-label="Mis proteínas">
-      <div class="proteins-toolbar">
+      <div class={`proteins-toolbar ${catalogEmpty ? 'is-single' : ''}`.trim()}>
         <label class="protein-search" aria-label="Buscar proteína">
           <LucideIcon name="search" />
-          <input
-            type="search"
-            placeholder="Buscar proteína"
-            autoComplete="off"
-            value={query}
-            onInput={(event) => setQuery(event.currentTarget.value)}
-          />
+          <input type="search" placeholder="Buscar por ID, alias o hash" autoComplete="off" value={query} onInput={(event) => setQuery(event.currentTarget.value)} />
         </label>
-        <button class="protein-filter" type="button" aria-label="Filtrar proteínas" title="Filtro mock">
-          <LucideIcon name="sliders-horizontal" />
-        </button>
+        {!catalogEmpty && (
+          <a class="protein-filter" href="/" aria-label="Registrar proteína" title="Registrar proteína"><LucideIcon name="plus" /></a>
+        )}
       </div>
 
-      <div class="proteins-grid">
-        {filtered.map((protein) => <ProteinCard key={protein.id} protein={protein} now={now} startedAt={startedAt || now} />)}
-        {!filtered.length && <div class="library-empty">No hay proteínas que coincidan con la búsqueda.</div>}
-      </div>
+      {state === 'loading' && <div class="library-empty">Cargando proteínas desde el backend…</div>}
+      {state === 'error' && <div class="library-empty" role="alert">{error}</div>}
+      {catalogEmpty && (
+        <EmptyState
+          icon="dna"
+          title="Aún no tienes proteínas registradas."
+        >
+          <a class="library-create" href="/"><LucideIcon name="plus" />Registrar proteína</a>
+        </EmptyState>
+      )}
+      {state === 'ready' && !catalogEmpty && filtered.length > 0 && (
+        <div class="proteins-grid">
+          {filtered.map((protein) => <ProteinCard key={protein.id} protein={protein} />)}
+        </div>
+      )}
+      {state === 'ready' && !catalogEmpty && !filtered.length && (
+        <EmptyState icon="scan-search" title="No hay proteínas que coincidan con la búsqueda." />
+      )}
     </section>
   );
 }

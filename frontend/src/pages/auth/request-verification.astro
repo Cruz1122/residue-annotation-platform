@@ -1,0 +1,7 @@
+---
+import AuthLayout from '../../layouts/AuthLayout.astro';
+import RequestVerificationView from '@features/auth/components/RequestVerificationView';
+---
+<AuthLayout title="Verificar correo · RAP" description="Solicitud de un enlace de verificación">
+  <RequestVerificationView client:load />
+</AuthLayout>

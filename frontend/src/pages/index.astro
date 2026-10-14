@@ -1,9 +1,7 @@
 ---
-import BaseLayout from '../layouts/BaseLayout.astro';
+import AuthLayout from '../layouts/AuthLayout.astro';
 import OnboardingFlow from '@features/runs/components/onboarding/OnboardingFlow.jsx';
 ---
-<BaseLayout title="Protein pipeline · Onboarding" description="Carga PDB/FASTA y selección opcional de variantes">
-  <main transition:name="app-screen">
-    <OnboardingFlow client:load />
-  </main>
-</BaseLayout>
+<AuthLayout title="Protein pipeline · Onboarding" description="Carga PDB/FASTA y selección opcional de variantes" requiresAuth>
+  <OnboardingFlow client:load />
+</AuthLayout>

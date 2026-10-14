@@ -5,7 +5,7 @@
 **Audiencia:** desarrollo, operación y revisión científica  
 **Fuente observada:** `/gpfs/projects/bsc08/bsc001997/vcfs_1000geno/hilo_integrado_anotacion`
 
-Este documento complementa la especificación del producto con el estado que realmente tiene el pipeline desplegado en MN5. No describe una implementación local del producto web: el checkout de este repositorio todavía contiene un scaffold FastAPI/Astro y fixtures mock, mientras que el directorio remoto contiene el pipeline científico Python que se debe integrar.
+Este documento complementa la especificación del producto con el estado que realmente tiene el pipeline desplegado en MN5. No describe una implementación local del producto web: el checkout de este repositorio contiene un scaffold FastAPI/Astro sin datos científicos de producto, mientras que el directorio remoto contiene el pipeline científico Python que se debe integrar.
 
 ## Cómo se obtuvo la evidencia
 
@@ -210,7 +210,7 @@ HPC_VPN_PASSWORD_FILE=/run/secrets/hpc_vpn_password
 HPC_POLL_INTERVAL_SECONDS=30
 ```
 
-El archivo [`.env.example`](../.env.example) conserva el modo offline/mock y usa hosts y secretos ficticios. `.env` no se versiona y no debe contener el contenido de ninguna contraseña.
+El archivo [`.env.example`](../.env.example) conserva los perfiles remotos deshabilitados; `compose.ssh.yml` recibe los hosts y archivos de secreto sólo desde el entorno local. `.env` no se versiona y no debe contener el contenido de ninguna contraseña.
 
 ### 2. P07 tiene una divergencia de fuente de verdad
 
@@ -244,7 +244,7 @@ La cobertura de tests demuestra intención y reglas verificables en código, per
 
 ## Implicaciones para la plataforma local
 
-El backend actual de este repositorio solo expone health. Aún no existen `HPCClient`, `ReadOnlyMN5Inspector`, worker, scheduler, ingestión de manifests ni SSE para el pipeline remoto. Por ello, la evidencia de este documento debe usarse como baseline de integración, no como evidencia de que la aplicación web ya puede lanzar o supervisar el pipeline.
+El backend actual de este repositorio ya contiene `HPCClient` disabled/offline/SSH/native, `ReadOnlyMN5Inspector`, worker, scheduler local, ingestión de manifests y SSE para el estado persistido. También contiene una frontera SCP explícita para uploads pequeños de una run. Por ello, la evidencia de este documento debe usarse como baseline de integración, no como evidencia de que la aplicación web ya puede lanzar o supervisar una corrida científica real en MN5.
 
 La primera integración segura debería conservar dos límites separados:
 
@@ -253,7 +253,7 @@ flowchart LR
     Web[Frontend] --> API[FastAPI]
     API --> Inspector[ReadOnlyMN5Inspector]
     Inspector -->|SFTP list/stat/read_preview| Root[Raíz GPFS autorizada]
-    API --> Client[HPCClient futuro]
+    API --> Client[HPCClient / SCP input transfer]
     Client -->|submit/status/cancel, aprobación independiente| Slurm[Canal Slurm]
     Pipeline[Pipeline Python remoto] -->|StageResult + manifest + provenance| Results[run/results/cache]
 ```

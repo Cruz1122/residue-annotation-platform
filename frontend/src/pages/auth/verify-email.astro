@@ -1,0 +1,7 @@
+---
+import AuthLayout from '../../layouts/AuthLayout.astro';
+import VerifyEmailView from '@features/auth/components/VerifyEmailView';
+---
+<AuthLayout title="Confirmar correo · RAP" description="Confirmación del correo de la cuenta">
+  <VerifyEmailView client:load />
+</AuthLayout>

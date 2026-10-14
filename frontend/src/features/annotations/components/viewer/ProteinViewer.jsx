@@ -1,25 +1,19 @@
 import { memo } from 'preact/compat';
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import LucideIcon from '@shared/components/icons/LucideIcon.jsx';
-import { AA_NAMES, RESIDUES } from '@features/proteins/data/protein.js';
-import { MODE_INFO, mockAnnotations, modeColor, readableValue } from '@features/annotations/data/viewer.js';
-import { OrderedSet } from 'molstar/lib/mol-data/int';
+import { ApiError, getAnnotations, getArtifactObjectUrl, getProtein, getRun, getUploadObjectUrl } from '@shared/api/client';
+import {
+  AA_NAMES,
+  ANNOTATION_GROUPS,
+  MODE_INFO,
+  canonicalChain,
+  displayColor,
+  oneLetter,
+  readableValue,
+  residueKey,
+} from '@features/annotations/data/viewer-presentation.js';
 import 'molstar/build/viewer/molstar.css';
 import '@features/annotations/styles/viewer.css';
-
-const MODE_COLORS = Object.fromEntries(
-  Object.keys(MODE_INFO).map((mode) => [
-    mode,
-    RESIDUES.map((residue, index) => modeColor(index, mode, residue)),
-  ]),
-);
-
-const MODE_COLOR_VALUES = Object.fromEntries(
-  Object.entries(MODE_COLORS).map(([mode, colors]) => [
-    mode,
-    colors.map((color) => Number.parseInt(color.slice(1), 16)),
-  ]),
-);
 
 const RESIDUE_FOCUS_OPTIONS = {
   extraRadius: 4,
@@ -28,41 +22,117 @@ const RESIDUE_FOCUS_OPTIONS = {
   trajectory: 'linear',
 };
 const CAMERA_RESET_DURATION_MS = 180;
+const EMPTY_SELECTION = { lo: null, hi: null, active: null };
 
-function buildResidueLociCache(structure, structureLib) {
-  const residueLoci = new Map();
-  const { Loci } = structureLib.StructureElement;
+function publishedField(row, key) {
+  const value = row?.values?.[key];
+  if (value === null || value === undefined || value === '') return 'NA';
+  const unit = row.units?.[key];
+  return unit ? `${value} ${unit}` : value;
+}
 
-  for (const unit of structure.units) {
+function structureFormat(name, mediaType) {
+  const lowerName = String(name ?? '').toLowerCase();
+  const media = String(mediaType ?? '').toLowerCase();
+  if (/\.(cif|mmcif)$/.test(lowerName) || media.includes('cif')) return 'mmcif';
+  return 'pdb';
+}
+
+function isStructure(name, mediaType) {
+  const lowerName = String(name ?? '').toLowerCase();
+  const media = String(mediaType ?? '').toLowerCase();
+  return /\.(pdb|cif|mmcif)$/.test(lowerName) || media.includes('pdb') || media.includes('cif');
+}
+
+function structureSource(run) {
+  for (const stage of run?.stages ?? []) {
+    for (const artifact of stage.artifacts ?? []) {
+      if (!isStructure(artifact.artifact_type, artifact.media_type)) continue;
+      return {
+        id: artifact.id,
+        label: artifact.artifact_type,
+        format: structureFormat(artifact.artifact_type, artifact.media_type),
+        loadUrl: () => getArtifactObjectUrl(artifact.id),
+      };
+    }
+  }
+  const upload = (run?.uploads ?? []).find((item) => item.input_type === 'structure');
+  if (!upload) return null;
+  return {
+    id: upload.id,
+    label: upload.original_filename,
+    format: structureFormat(upload.original_filename, upload.media_type),
+    loadUrl: () => getUploadObjectUrl(upload.id),
+  };
+}
+
+function chainValue(column, index) {
+  return String(column?.value?.(index) || '');
+}
+
+function collectChains(structure) {
+  const byChain = new Map();
+  const seen = new Set();
+  for (const unit of structure.units ?? []) {
     if (!unit.residueIndex || !unit.elements?.length) continue;
-    const atomicHierarchy = unit.model.atomicHierarchy;
-    if (!atomicHierarchy?.residues || !atomicHierarchy?.chains) continue;
-
-    const { auth_seq_id: authSeqId } = atomicHierarchy.residues;
-    const { auth_asym_id: authAsymId } = atomicHierarchy.chains;
-    const chainIndex = atomicHierarchy.chainAtomSegments.index;
+    const hierarchy = unit.model?.atomicHierarchy;
+    if (!hierarchy?.residues || !hierarchy?.chains || !hierarchy.chainAtomSegments) continue;
+    const { residues, chains, chainAtomSegments } = hierarchy;
     let start = 0;
-
     while (start < unit.elements.length) {
       const atomIndex = unit.elements[start];
       const residueIndex = unit.residueIndex[atomIndex];
       let end = start + 1;
-
       while (end < unit.elements.length && unit.residueIndex[unit.elements[end]] === residueIndex) end += 1;
-
-      if (authAsymId.value(chainIndex[atomIndex]) === 'A') {
-        const authSeq = Number(authSeqId.value(residueIndex));
-        if (Number.isFinite(authSeq)) {
-          const loci = Loci(structure, [{ unit, indices: OrderedSet.ofBounds(start, end) }]);
-          const existing = residueLoci.get(authSeq);
-          residueLoci.set(authSeq, existing ? Loci.union(existing, loci) : loci);
-        }
+      const chain = chainValue(chains.auth_asym_id, chainAtomSegments.index[atomIndex])
+        || chainValue(chains.label_asym_id, chainAtomSegments.index[atomIndex])
+        || 'A';
+      const authSeqId = Number(residues.auth_seq_id?.value?.(residueIndex) ?? residues.label_seq_id?.value?.(residueIndex));
+      const insCode = String(residues.pdbx_PDB_ins_code?.value?.(residueIndex) || '').trim();
+      const compId = String(hierarchy.atoms?.label_comp_id?.value?.(atomIndex) || hierarchy.atoms?.auth_comp_id?.value?.(atomIndex) || 'UNK');
+      const key = `${chain}|${authSeqId}|${insCode}`;
+      if (Number.isFinite(authSeqId) && !seen.has(key)) {
+        seen.add(key);
+        const list = byChain.get(chain) ?? [];
+        list.push({ chain, authSeqId, insCode, compId, one: oneLetter(compId) });
+        byChain.set(chain, list);
       }
-
       start = end;
     }
   }
+  return [...byChain.entries()].map(([id, residues]) => ({
+    id,
+    residues: residues.sort((left, right) => left.authSeqId - right.authSeqId || left.insCode.localeCompare(right.insCode)),
+  }));
+}
 
+function buildResidueLociCache(structure, structureLib, OrderedSet) {
+  const residueLoci = new Map();
+  const { Loci } = structureLib.StructureElement;
+  for (const unit of structure.units ?? []) {
+    if (!unit.residueIndex || !unit.elements?.length) continue;
+    const hierarchy = unit.model?.atomicHierarchy;
+    if (!hierarchy?.residues || !hierarchy?.chains || !hierarchy.chainAtomSegments) continue;
+    let start = 0;
+    while (start < unit.elements.length) {
+      const atomIndex = unit.elements[start];
+      const residueIndex = unit.residueIndex[atomIndex];
+      let end = start + 1;
+      while (end < unit.elements.length && unit.residueIndex[unit.elements[end]] === residueIndex) end += 1;
+      const chain = chainValue(hierarchy.chains.auth_asym_id, hierarchy.chainAtomSegments.index[atomIndex])
+        || chainValue(hierarchy.chains.label_asym_id, hierarchy.chainAtomSegments.index[atomIndex])
+        || 'A';
+      const authSeqId = Number(hierarchy.residues.auth_seq_id?.value?.(residueIndex) ?? hierarchy.residues.label_seq_id?.value?.(residueIndex));
+      const insCode = String(hierarchy.residues.pdbx_PDB_ins_code?.value?.(residueIndex) || '').trim();
+      if (Number.isFinite(authSeqId)) {
+        const loci = Loci(structure, [{ unit, indices: OrderedSet.ofBounds(start, end) }]);
+        const key = `${chain}|${authSeqId}|${insCode}`;
+        const existing = residueLoci.get(key);
+        residueLoci.set(key, existing ? Loci.union(existing, loci) : loci);
+      }
+      start = end;
+    }
+  }
   return residueLoci;
 }
 
@@ -81,118 +151,124 @@ const ResidueButton = memo(function ResidueButton({ residue, index, inRange, act
   );
 });
 
-const ANNOTATION_GROUPS = [
-  ['Contexto funcional', [
-    ['tag', 'Dominio UniProt', 'uniprot_domain'],
-  ]],
-  ['Estructura', [
-    ['waves', 'Topología de membrana', 'tmbed_topology'],
-    ['shield-check', 'Calidad del modelo', 'structure_qc_status'],
-    ['layers-3', 'Régimen estructural', 'structural_regime'],
-    ['route', 'Estructura secundaria', 'secondary_structure'],
-    ['circle-dot', 'Exposición al solvente', 'buried_status'],
-    ['zap', 'Energía por residuo', 'residue_energy_value'],
-    ['activity', 'Índice de frustración', 'structural_frustration_fi_singleresidue'],
-    ['network', 'Contactos estructurales', 'structural_contacts_n_contacts'],
-  ]],
-  ['Predicción y conservación', [
-    ['chart-column', 'AlphaMissense', 'alphamissense_mean'],
-    ['gauge', 'CADD PHRED', 'cadd_phred_mean'],
-    ['chart-column', 'REVEL', 'revel_mean'],
-    ['sparkles', 'Frustración por secuencia', 'frustraiseq_class'],
-    ['scan-search', 'Conservación ConSurf', 'consurf_grade'],
-  ]],
-  ['Evidencia experimental', [
-    ['flask-conical', 'Ensayado en MaveDB', 'mavedb_position_assayed'],
-  ]],
-];
-
-function registerModeThemes(viewer, structureLib) {
-  const registry = viewer.plugin.representation.structure.themes.colorThemeRegistry;
-  const residueIndex = new Map(RESIDUES.map((residue, index) => [`${residue.chain}|${residue.authSeqId}|`, index]));
-  const names = {};
-
-  for (const [mode, info] of Object.entries(MODE_INFO)) {
-    const name = `mock-residue-${mode}`;
-    const colors = MODE_COLOR_VALUES[mode];
-    const factory = (ctx, props) => ({
-      factory,
-      granularity: 'group',
-      props,
-      description: `Color mock por residuo · ${info.title}`,
-      color: (location) => {
-        try {
-          if (!structureLib.StructureElement.Location.is(location)) return 0xb8bec5;
-          const chain = String(structureLib.StructureProperties.chain.auth_asym_id(location) || structureLib.StructureProperties.chain.label_asym_id(location) || '_');
-          const authSeqId = Number(structureLib.StructureProperties.residue.auth_seq_id(location) || structureLib.StructureProperties.residue.label_seq_id(location));
-          const insCode = String(structureLib.StructureProperties.residue.pdbx_PDB_ins_code?.(location) || '').trim();
-          const index = residueIndex.get(`${chain}|${authSeqId}|${insCode}`) ?? residueIndex.get(`${chain}|${authSeqId}|`);
-          return index === undefined ? 0xb8bec5 : colors[index] ?? 0xb8bec5;
-        } catch {
-          return 0xb8bec5;
-        }
-      },
-    });
-
-    try {
-      registry.add({ name, label: info.title, category: 'Mock annotations', factory, getParams: () => ({}), defaultValues: {}, isApplicable: () => true });
-      names[mode] = name;
-    } catch {
-      // Hot-reload or a remount can leave a provider registered in development.
-      names[mode] = name;
-    }
-  }
-  return names;
-}
-
-export default function ProteinViewer({ protein }) {
+export default function ProteinViewer({ proteinId }) {
   const hostRef = useRef(null);
   const viewerRef = useRef(null);
   const structureLibRef = useRef(null);
+  const orderedSetRef = useRef(null);
   const structureRef = useRef(null);
   const residueLociRef = useRef(new Map());
   const rangeLociRef = useRef(new Map());
   const themeNamesRef = useRef({});
-  const selectionRef = useRef({ lo: null, hi: null, active: null });
+  const colorMapRef = useRef(new Map());
+  const chainsRef = useRef([]);
+  const chainIdRef = useRef('');
+  const selectionRef = useRef(EMPTY_SELECTION);
   const dragRef = useRef(null);
   const molstarFrameRef = useRef(null);
   const molstarFocusFrameRef = useRef(null);
-  const [boot, setBoot] = useState('loading');
+  const [protein, setProtein] = useState(null);
+  const [annotations, setAnnotations] = useState([]);
+  const [chains, setChains] = useState([]);
+  const [chainId, setChainId] = useState('');
+  const [state, setState] = useState('loading');
+  const [viewerState, setViewerState] = useState('loading');
+  const [viewerError, setViewerError] = useState('');
+  const [error, setError] = useState('');
+  const [wipe, setWipe] = useState('covering');
   const [mode, setMode] = useState('regime');
-  const [selection, setSelection] = useState({ lo: null, hi: null, active: null });
+  const [selection, setSelection] = useState(EMPTY_SELECTION);
+  const runId = typeof window === 'undefined' ? '' : new URLSearchParams(window.location.search).get('run') ?? '';
+  const [structureRequest, setStructureRequest] = useState(null);
 
-  const annotation = useMemo(() => selection.active === null ? null : mockAnnotations(selection.active, RESIDUES[selection.active]), [selection.active]);
-  const activeResidue = selection.active === null ? null : RESIDUES[selection.active];
-  const hasActiveAnnotation = Boolean(activeResidue && annotation);
+  useEffect(() => {
+    chainsRef.current = chains;
+    chainIdRef.current = chainId;
+  }, [chains, chainId]);
+
+  useEffect(() => {
+    let active = true;
+    Promise.all([getProtein(proteinId), runId ? getRun(runId) : Promise.resolve(null)])
+      .then(async ([proteinData, runData]) => {
+        const annotationData = runData ? await getAnnotations(runData.id) : null;
+        if (!active) return;
+        const nextChains = canonicalChain(proteinData.sequence);
+        setProtein(proteinData);
+        setAnnotations(annotationData?.rows ?? []);
+        setChains(nextChains);
+        setChainId(nextChains[0]?.id ?? '');
+        setStructureRequest(structureSource(runData));
+        setViewerState(structureSource(runData) ? 'loading' : 'unavailable');
+        setState('ready');
+      })
+      .catch((requestError) => {
+        if (!active) return;
+        setState('error');
+        setViewerState('unavailable');
+        setError(requestError instanceof ApiError ? requestError.message : 'No se pudo cargar la proteína.');
+      });
+    return () => { active = false; };
+  }, [proteinId, runId]);
+
+  const activeChain = chains.find((chain) => chain.id === chainId) ?? chains[0] ?? null;
+  const residues = activeChain?.residues ?? [];
+  const annotationByPosition = useMemo(() => {
+    const rows = new Map();
+    for (const row of annotations) rows.set(row.aa_position, row);
+    return rows;
+  }, [annotations]);
+  const colors = useMemo(
+    () => residues.map((residue, index) => displayColor(index, mode, residue, annotationByPosition.get(residue.authSeqId)?.values)),
+    [residues, mode, annotationByPosition],
+  );
+  const activeResidue = selection.active === null ? null : residues[selection.active] ?? null;
+  const activeAnnotation = activeResidue ? annotationByPosition.get(activeResidue.authSeqId) ?? null : null;
 
   const applyTheme = async (nextMode) => {
     const viewer = viewerRef.current;
-    if (!viewer?.plugin) return;
     const theme = themeNamesRef.current[nextMode];
-    if (!theme) return;
+    if (!viewer?.plugin || !theme) return;
     try {
       await viewer.plugin.dataTransaction(async () => {
-        for (const structure of viewer.plugin.managers.structure.hierarchy.current.structures) {
-          await viewer.plugin.managers.structure.component.updateRepresentationsTheme(structure.components, { color: theme });
+        for (const entry of viewer.plugin.managers.structure.hierarchy.current.structures) {
+          await viewer.plugin.managers.structure.component.updateRepresentationsTheme(entry.components, { color: theme });
         }
       });
-    } catch (error) {
-      console.warn('No se pudo aplicar el tema por residuo de Mol*', error);
+    } catch (themeError) {
+      console.warn('No se pudo aplicar el tema por residuo de Mol*', themeError);
     }
   };
 
   useEffect(() => {
-    let disposed = false;
-    let clickSubscription = null;
+    const next = new Map();
+    for (const chain of chains) {
+      for (const [index, residue] of chain.residues.entries()) {
+        const color = displayColor(index, mode, residue, annotationByPosition.get(residue.authSeqId)?.values);
+        next.set(residueKey(residue), Number.parseInt(color.slice(1), 16));
+      }
+    }
+    colorMapRef.current = next;
+    applyTheme(mode);
+  }, [chains, mode, annotationByPosition]);
 
-    async function bootViewer() {
+  useEffect(() => {
+    if (!structureRequest || !hostRef.current) return undefined;
+    let disposed = false;
+    let subscription;
+    let structureObjectUrl = '';
+
+    async function loadViewer() {
       try {
-        const [{ Viewer }, structureLib] = await Promise.all([
+        const [{ Viewer }, structureLib, orderedSetMod, objectUrl] = await Promise.all([
           import('molstar/lib/apps/viewer/app'),
           import('molstar/lib/mol-model/structure'),
+          import('molstar/lib/mol-data/int'),
+          structureRequest.loadUrl(),
         ]);
+        structureObjectUrl = objectUrl;
         if (disposed || !hostRef.current) return;
         structureLibRef.current = structureLib;
+        orderedSetRef.current = orderedSetMod.OrderedSet;
         const viewer = await Viewer.create(hostRef.current, {
           layoutIsExpanded: false,
           layoutShowControls: false,
@@ -204,7 +280,6 @@ export default function ProteinViewer({ protein }) {
           viewportShowSelectionMode: false,
           viewportShowAnimation: false,
           viewportBackgroundColor: '#f3f4f4',
-          disableAntialiasing: false,
           pixelScale: 1,
           resolutionMode: 'auto',
         });
@@ -212,7 +287,6 @@ export default function ProteinViewer({ protein }) {
           viewer.dispose();
           return;
         }
-        // Mol* throttles pointer picking and drag interaction to 30 FPS by default.
         viewer.plugin.canvas3d?.setProps({
           interaction: { maxFps: 60 },
           cameraResetDurationMs: CAMERA_RESET_DURATION_MS,
@@ -220,75 +294,138 @@ export default function ProteinViewer({ protein }) {
           cameraResetTrajectory: 'linear',
         });
         viewerRef.current = viewer;
-        await viewer.loadStructureFromUrl(protein.pdb, 'pdb', false, { label: `${protein.id}_model_0` });
-        structureRef.current = viewer.plugin.managers.structure.hierarchy.current.structures[0]?.cell?.obj?.data ?? null;
-        if (structureRef.current) residueLociRef.current = buildResidueLociCache(structureRef.current, structureLib);
-        themeNamesRef.current = registerModeThemes(viewer, structureLib);
+        await viewer.loadStructureFromUrl(structureObjectUrl, structureRequest.format, false, { label: structureRequest.label });
+        const loaded = viewer.plugin.managers.structure.hierarchy.current.structures[0]?.cell?.obj?.data ?? null;
+        structureRef.current = loaded;
+        if (loaded) {
+          residueLociRef.current = buildResidueLociCache(loaded, structureLib, orderedSetMod.OrderedSet);
+          const parsed = collectChains(loaded);
+          const parsedResidues = parsed.flatMap((chain) => chain.residues);
+          const hasKnownResidues = parsedResidues.some((residue) => AA_NAMES[residue.compId]);
+          if (parsed.length && hasKnownResidues) {
+            setChains(parsed);
+            setChainId(parsed[0].id);
+          }
+        }
+        const registry = viewer.plugin.representation.structure.themes.colorThemeRegistry;
+        for (const [themeMode, info] of Object.entries(MODE_INFO)) {
+          const name = `residue-display-${themeMode}`;
+          const factory = (ctx, props) => ({
+            factory,
+            granularity: 'group',
+            props,
+            description: info.title,
+            color: (location) => {
+              try {
+                if (!structureLib.StructureElement.Location.is(location)) return 0xb8bec5;
+                const chain = String(structureLib.StructureProperties.chain.auth_asym_id(location) || structureLib.StructureProperties.chain.label_asym_id(location) || 'A');
+                const authSeqId = Number(structureLib.StructureProperties.residue.auth_seq_id(location) || structureLib.StructureProperties.residue.label_seq_id(location));
+                const insCode = String(structureLib.StructureProperties.residue.pdbx_PDB_ins_code?.(location) || '').trim();
+                return colorMapRef.current.get(`${chain}|${authSeqId}|${insCode}`) ?? 0xb8bec5;
+              } catch {
+                return 0xb8bec5;
+              }
+            },
+          });
+          try {
+            registry.add({ name, label: info.title, category: 'Residue display', factory, getParams: () => ({}), defaultValues: {}, isApplicable: () => true });
+          } catch {
+            // A hot reload can leave the provider registered.
+          }
+          themeNamesRef.current[themeMode] = name;
+        }
         await applyTheme(mode);
-
-        clickSubscription = viewer.subscribe(viewer.plugin.behaviors.interaction.click, (event) => {
+        subscription = viewer.subscribe(viewer.plugin.behaviors.interaction.click, (event) => {
           const loci = event?.current?.loci;
           if (!structureLib.StructureElement.Loci.is(loci)) return;
           let picked = null;
           structureLib.StructureElement.Loci.forEachLocation(loci, (location) => {
             if (picked) return;
-            const chain = String(structureLib.StructureProperties.chain.auth_asym_id(location) || structureLib.StructureProperties.chain.label_asym_id(location) || '_');
+            const chain = String(structureLib.StructureProperties.chain.auth_asym_id(location) || structureLib.StructureProperties.chain.label_asym_id(location) || 'A');
             const authSeqId = Number(structureLib.StructureProperties.residue.auth_seq_id(location) || structureLib.StructureProperties.residue.label_seq_id(location));
-            if (chain === 'A' && Number.isFinite(authSeqId)) picked = authSeqId - 1;
+            const insCode = String(structureLib.StructureProperties.residue.pdbx_PDB_ins_code?.(location) || '').trim();
+            if (Number.isFinite(authSeqId)) picked = { chain, authSeqId, insCode };
           });
-          if (picked !== null && picked >= 0 && picked < RESIDUES.length) selectSingle(picked, true);
+          if (!picked) return;
+          const chain = chainsRef.current.find((item) => item.id === picked.chain);
+          if (!chain) return;
+          if (chain.id !== chainIdRef.current) {
+            chainIdRef.current = chain.id;
+            setChainId(chain.id);
+          }
+          const index = chain.residues.findIndex((residue) => residue.authSeqId === picked.authSeqId && (residue.insCode || '') === picked.insCode);
+          if (index >= 0) selectSingle(index, true);
         });
-        setBoot('ready');
-      } catch (error) {
-        console.error(error);
-        setBoot('error');
+        if (!disposed) setViewerState('ready');
+      } catch (viewerErrorValue) {
+        console.error(viewerErrorValue);
+        if (!disposed) {
+          const message = viewerErrorValue instanceof Error ? viewerErrorValue.message : 'No se pudo leer la estructura.';
+          setViewerError(message);
+          setViewerState('error');
+        }
       }
     }
 
-    bootViewer();
+    loadViewer();
     return () => {
       disposed = true;
       if (molstarFrameRef.current !== null) cancelAnimationFrame(molstarFrameRef.current);
       if (molstarFocusFrameRef.current !== null) cancelAnimationFrame(molstarFocusFrameRef.current);
-      clickSubscription?.unsubscribe?.();
+      subscription?.unsubscribe?.();
       viewerRef.current?.dispose?.();
       viewerRef.current = null;
       structureRef.current = null;
-      residueLociRef.current.clear();
-      rangeLociRef.current.clear();
+      residueLociRef.current = new Map();
+      rangeLociRef.current = new Map();
+      if (structureObjectUrl) URL.revokeObjectURL(structureObjectUrl);
     };
-  }, []);
+  }, [structureRequest]);
 
-  useEffect(() => { applyTheme(mode); }, [mode]);
+  useEffect(() => {
+    if (wipe !== 'covering') return undefined;
+    const settled = state === 'error' || (state === 'ready' && viewerState !== 'loading');
+    if (!settled) return undefined;
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      setWipe('gone');
+      return undefined;
+    }
+    setWipe('revealing');
+    return undefined;
+  }, [state, viewerState, wipe]);
+
+  useEffect(() => {
+    if (wipe !== 'revealing') return undefined;
+    const timer = window.setTimeout(() => setWipe('gone'), 820);
+    return () => window.clearTimeout(timer);
+  }, [wipe]);
 
   const getSelectionLoci = (lo, hi) => {
-    const key = `${lo}:${hi}`;
+    const key = `${chainIdRef.current}:${lo}:${hi}`;
     const cached = rangeLociRef.current.get(key);
     if (cached) return cached;
-
     const { Loci } = structureLibRef.current?.StructureElement ?? {};
-    if (!Loci) return null;
-
+    const chain = chainsRef.current.find((item) => item.id === chainIdRef.current);
+    if (!Loci || !chain) return null;
     let loci = null;
     for (let index = lo; index <= hi; index += 1) {
-      const residueLoci = residueLociRef.current.get(RESIDUES[index].authSeqId);
+      const residueLoci = residueLociRef.current.get(residueKey(chain.residues[index]));
       if (!residueLoci) continue;
       loci = loci ? Loci.union(loci, residueLoci) : residueLoci;
     }
-
     if (loci) rangeLociRef.current.set(key, loci);
     return loci;
   };
 
   const syncMolstar = (lo, hi, focus = true) => {
     const viewer = viewerRef.current;
-    if (!viewer) return;
+    const chain = chainsRef.current.find((item) => item.id === chainIdRef.current);
+    if (!viewer || !chain) return;
     try {
       const loci = getSelectionLoci(lo, hi);
       if (!loci) {
-        const schema = { auth_asym_id: 'A', beg_auth_seq_id: RESIDUES[lo].authSeqId, end_auth_seq_id: RESIDUES[hi].authSeqId };
         viewer.structureInteractivity({
-          elements: schema,
+          elements: { auth_asym_id: chain.id, beg_auth_seq_id: chain.residues[lo].authSeqId, end_auth_seq_id: chain.residues[hi].authSeqId },
           action: focus ? ['select', 'focus'] : 'select',
           ...(focus ? { focusOptions: RESIDUE_FOCUS_OPTIONS } : {}),
         });
@@ -305,8 +442,8 @@ export default function ProteinViewer({ protein }) {
           viewerRef.current?.plugin?.managers?.camera?.focusLoci?.(loci, RESIDUE_FOCUS_OPTIONS);
         });
       }
-    } catch (error) {
-      console.warn('No se pudo sincronizar la selección con Mol*', error);
+    } catch (syncError) {
+      console.warn('No se pudo sincronizar la selección con Mol*', syncError);
     }
   };
 
@@ -321,14 +458,13 @@ export default function ProteinViewer({ protein }) {
   const clearSelection = () => {
     if (molstarFocusFrameRef.current !== null) cancelAnimationFrame(molstarFocusFrameRef.current);
     molstarFocusFrameRef.current = null;
-    const next = { lo: null, hi: null, active: null };
-    selectionRef.current = next;
-    setSelection(next);
+    selectionRef.current = EMPTY_SELECTION;
+    setSelection(EMPTY_SELECTION);
     scheduleMolstar(() => {
       try {
         viewerRef.current?.plugin?.managers?.interactivity?.lociSelects?.deselectAll?.();
-      } catch (error) {
-        console.warn('No se pudo limpiar la selección de Mol*', error);
+      } catch (clearError) {
+        console.warn('No se pudo limpiar la selección de Mol*', clearError);
       }
       viewerRef.current?.plugin?.managers?.camera?.reset?.(undefined, CAMERA_RESET_DURATION_MS, {
         easing: 'cubic-out',
@@ -339,8 +475,7 @@ export default function ProteinViewer({ protein }) {
 
   const selectSingle = (index, fromCanvas = false) => {
     const previous = selectionRef.current;
-    const repeated = previous.active === index && previous.lo === index && previous.hi === index;
-    if (repeated) {
+    if (previous.active === index && previous.lo === index && previous.hi === index) {
       clearSelection();
       return;
     }
@@ -397,8 +532,7 @@ export default function ProteinViewer({ protein }) {
     if (drag.start === drag.end) {
       if (drag.wasSelected) clearSelection();
       else selectSingle(drag.start);
-    }
-    else commitRange(drag.start, drag.end);
+    } else commitRange(drag.start, drag.end);
   };
 
   const sequencePointerCancel = () => {
@@ -409,24 +543,46 @@ export default function ProteinViewer({ protein }) {
     setSelection(drag.previous);
   };
 
+  const chooseChain = (nextChainId) => {
+    if (nextChainId === chainId) return;
+    setChainId(nextChainId);
+    selectionRef.current = EMPTY_SELECTION;
+    setSelection(EMPTY_SELECTION);
+    rangeLociRef.current = new Map();
+  };
+
+  if (state === 'error' && wipe === 'gone') {
+    return <section class="viewer-shell viewer-message" role="alert"><h1>No se pudo cargar la proteína</h1><p>{error}</p></section>;
+  }
+
   return (
-    <section class={`viewer-shell ${hasActiveAnnotation ? 'has-annotations' : ''}`} onContextMenu={(event) => event.preventDefault()}>
-      <div ref={hostRef} class="molstar-host" aria-label="Visor molecular Mol*" />
-      {boot !== 'ready' && <div class={`viewer-boot ${boot === 'error' ? 'error' : ''}`}>{boot === 'error' ? 'No se pudo inicializar Mol*' : 'Cargando estructura…'}</div>}
+    <section class={`viewer-shell ${activeResidue ? 'has-annotations' : ''}`} aria-label="Visor molecular y secuencia" onContextMenu={(event) => event.preventDefault()}>
+      <div ref={hostRef} class="molstar-host" aria-label={structureRequest ? 'Visor molecular Mol*' : 'Sin estructura publicada'} />
+      {viewerState === 'unavailable' && wipe === 'gone' && <div class="viewer-boot viewer-empty"><LucideIcon name="box" /><strong>Estructura no disponible</strong><span>La corrida no tiene un PDB o mmCIF subido ni un artefacto publicado.</span></div>}
+      {viewerState === 'error' && wipe === 'gone' && <div class="viewer-boot error"><strong>No se pudo cargar la estructura</strong><span>{viewerError || 'Verifica el artefacto y vuelve a intentarlo.'}</span></div>}
 
       <div class="viewer-top-stack">
         <div class="viewer-chain-panel">
-          <div class="viewer-chain-title">Cadena A</div>
+          <div class="viewer-chain-title">
+            <span>{activeChain ? `Cadena ${activeChain.id}` : 'Cadenas'}</span>
+            {chains.length > 1 && (
+              <div class="viewer-chain-switch" role="tablist" aria-label="Cadenas">
+                {chains.map((chain) => (
+                  <button key={chain.id} type="button" class={chain.id === activeChain?.id ? 'active' : ''} aria-pressed={chain.id === activeChain?.id} onClick={() => chooseChain(chain.id)}>{chain.id}</button>
+                ))}
+              </div>
+            )}
+          </div>
           <div class="viewer-sequence-scroll" onPointerDown={sequencePointerDown} onPointerMove={sequencePointerMove} onPointerUp={sequencePointerUp} onPointerCancel={sequencePointerCancel}>
             <div class={`viewer-sequence-track ${selection.lo !== null ? 'has-selection' : ''}`}>
-              {RESIDUES.map((residue, index) => (
+              {residues.map((residue, index) => (
                 <ResidueButton
-                  key={index}
+                  key={residueKey(residue)}
                   residue={residue}
                   index={index}
                   inRange={selection.lo !== null && index >= selection.lo && index <= selection.hi}
                   active={selection.active === index}
-                  color={MODE_COLORS[mode][index]}
+                  color={colors[index]}
                 />
               ))}
             </div>
@@ -450,29 +606,43 @@ export default function ProteinViewer({ protein }) {
         </div>
       </div>
 
-      {hasActiveAnnotation && (
+      {activeResidue && (
         <aside class="viewer-annotations" aria-label="Anotaciones del residuo">
-          <div class="viewer-annotations-head"><h2>Anotaciones</h2><span class="viewer-mock-badge">Mock</span></div>
+          <div class="viewer-annotations-head"><h2>Anotaciones</h2></div>
           <div class="viewer-annotations-body">
-              <div class="viewer-residue-title">
-                <div><strong>{activeResidue.one}</strong><span>{activeResidue.compId} · {AA_NAMES[activeResidue.compId]}</span></div>
-                <b>{activeResidue.authSeqId}</b>
-              </div>
-              <dl class="viewer-annotation-list">
-                {ANNOTATION_GROUPS.map(([group, rows]) => (
-                  <div key={group} class="viewer-annotation-group-wrap">
-                    <div class="viewer-annotation-group">{group}</div>
-                    {rows.map(([icon, label, key]) => (
-                      <div key={key} class="viewer-annotation-row">
-                        <dt><span><LucideIcon name={icon} />{label}</span></dt>
-                        <dd>{readableValue(key, annotation[key])}</dd>
-                      </div>
-                    ))}
-                  </div>
-                ))}
-              </dl>
+            <div class="viewer-residue-title">
+              <div><strong>{activeResidue.one}</strong><span>{activeResidue.compId} · {AA_NAMES[activeResidue.compId] ?? 'Residuo'}</span></div>
+              <b>{activeResidue.authSeqId}{activeResidue.insCode || ''}</b>
+            </div>
+            <dl class="viewer-annotation-list">
+              {ANNOTATION_GROUPS.map(([group, rows]) => (
+                <div key={group}>
+                  <div class="viewer-annotation-group">{group}</div>
+                  {rows.map(([icon, label, key]) => (
+                    <div key={key} class="viewer-annotation-row">
+                      <dt><span><LucideIcon name={icon} />{label}</span></dt>
+                      <dd>{readableValue(key, publishedField(activeAnnotation, key))}</dd>
+                    </div>
+                  ))}
+                </div>
+              ))}
+            </dl>
           </div>
         </aside>
+      )}
+
+      {wipe !== 'gone' && (
+        <div
+          class={`viewer-load-wipe ${wipe === 'revealing' ? 'is-revealing' : ''}`}
+          onAnimationEnd={(event) => {
+            if (event.animationName === 'viewer-wipe-reveal') setWipe('gone');
+          }}
+        >
+          <div class="viewer-load-mark">
+            <span>{state === 'error' ? 'Sin proteína' : viewerState === 'error' ? 'Estructura no leída' : 'Cargando estructura'}</span>
+            <i class="viewer-load-rule" />
+          </div>
+        </div>
       )}
     </section>
   );

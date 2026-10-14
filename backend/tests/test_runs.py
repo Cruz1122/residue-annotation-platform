@@ -1,0 +1,137 @@
+from app.features.annotations.service import insert_annotation_rows
+from app.features.runs.models import ActiveRunSlot, Run, RunStage, StageResult
+from app.features.runs.service import transition_stage
+from app.features.runs.state import RunStageStatus
+from app.features.runs.worker_service import process_one
+from sqlalchemy import select
+
+SEQUENCE = "ACDEFGHIKLMNPQRSTVWY"
+
+
+def _create_protein(client):
+    response = client.post("/api/v1/proteins", json={"sequence": SEQUENCE})
+    assert response.status_code == 201
+    return response.json()["id"]
+
+
+def test_run_is_created_with_persisted_stage_graph(client, session):
+    protein_id = _create_protein(client)
+    response = client.post("/api/v1/runs", json={"protein_id": protein_id})
+
+    assert response.status_code == 201
+    payload = response.json()
+    assert payload["status"] == "pending"
+    assert len(payload["stages"]) == 18
+    assert payload["stages"][0]["status"] == "ready"
+    assert payload["stages"][15]["status"] == "skipped"
+    assert session.query(Run).count() == 1
+    assert session.query(RunStage).count() == 18
+
+
+def test_variant_reference_is_validated(client):
+    protein_id = _create_protein(client)
+    response = client.post(
+        "/api/v1/runs",
+        json={
+            "protein_id": protein_id,
+            "variants": [{"aa_position": 1, "aa_ref": "Y", "aa_alt": "A"}],
+        },
+    )
+
+    assert response.status_code == 422
+    assert "aa_ref" in response.json()["detail"]
+
+
+def test_invalid_state_transition_is_rejected(session):
+    stage = RunStage(stage_id="protein_identity", status=RunStageStatus.SUCCESS)
+
+    try:
+        transition_stage(session, stage, RunStageStatus.RUNNING)
+    except ValueError as exc:
+        assert "invalid stage transition" in str(exc)
+    else:
+        raise AssertionError("terminal stage transition unexpectedly succeeded")
+
+
+def test_run_not_found_does_not_invent_progress(client):
+    response = client.get("/api/v1/runs/does-not-exist")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Run not found"
+
+
+def test_variants_are_normalized_and_duplicate_positions_are_rejected(client):
+    protein_id = _create_protein(client)
+    response = client.post(
+        "/api/v1/runs",
+        json={
+            "protein_id": protein_id,
+            "variants": [{"aa_position": 1, "aa_ref": "a", "aa_alt": "c"}],
+        },
+    )
+
+    assert response.status_code == 201
+    assert response.json()["requested_variants"] == [
+        {"aa_position": 1, "aa_ref": "A", "aa_alt": "C"}
+    ]
+
+    duplicate = client.post(
+        "/api/v1/runs",
+        json={
+            "protein_id": protein_id,
+            "variants": [
+                {"aa_position": 1, "aa_ref": "A", "aa_alt": "C"},
+                {"aa_position": 1, "aa_ref": "A", "aa_alt": "D"},
+            ],
+        },
+    )
+    assert duplicate.status_code == 422
+
+
+def test_annotations_return_only_published_rows(client, session):
+    protein_id = _create_protein(client)
+    run_response = client.post("/api/v1/runs", json={"protein_id": protein_id})
+    run_id = run_response.json()["id"]
+    run = session.get(Run, run_id)
+    stage = next(item for item in run.stages if item.stage_id == "protein_identity")
+    result = StageResult(
+        protein_id=protein_id,
+        stage_id=stage.stage_id,
+        cache_key="a" * 64,
+        status="success",
+        provenance={"tool": "verified-test"},
+        owner_id=run.owner_id,
+        project_id=run.project_id,
+    )
+    session.add(result)
+    session.flush()
+    stage.stage_result_id = result.id
+    stage.status = RunStageStatus.SUCCESS
+    insert_annotation_rows(
+        session,
+        stage.stage_id,
+        result.id,
+        [{"aa_position": 1, "aa_ref": "A", "values": {"gene": "example"}}],
+    )
+    session.commit()
+
+    response = client.get(f"/api/v1/runs/{run_id}/annotations")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["rows"][0]["aa_position"] == 1
+    assert payload["rows"][0]["values"] == {"gene": "example"}
+    assert "protein_identity" not in payload["pending_stage_ids"]
+
+
+def test_worker_finishes_failed_run_after_descendants_are_skipped(client, session):
+    protein_id = _create_protein(client)
+    run_id = client.post("/api/v1/runs", json={"protein_id": protein_id}).json()["id"]
+
+    assert process_one(session) is True
+    assert process_one(session) is False
+    run = session.get(Run, run_id)
+
+    assert run.status == "failed"
+    assert all(stage.status in {"failed", "skipped"} for stage in run.stages)
+    assert session.scalar(select(ActiveRunSlot).where(ActiveRunSlot.run_id == run_id)) is None

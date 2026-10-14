@@ -1,10 +1,6 @@
 ---
-import Icon from '@shared/components/icons/Icon.astro';
-const { stageId, filename } = Astro.props;
-const href = `/mock-artifacts/${stageId}/${filename}`;
+import AuthenticatedArtifactLink from './AuthenticatedArtifactLink';
+
+const { id, filename, mediaType } = Astro.props;
 ---
-<a class="artifact-link" href={href} download={filename} title={`Descargar ${filename}`}>
-  <Icon name="file-text" class="artifact-file-icon" />
-  <span class="artifact-name">{filename}</span>
-  <Icon name="download" class="artifact-download-icon" />
-</a>
+<AuthenticatedArtifactLink client:load id={id} filename={filename} mediaType={mediaType} />

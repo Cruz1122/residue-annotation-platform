@@ -1,0 +1,7 @@
+---
+import AuthLayout from '../../layouts/AuthLayout.astro';
+import SessionView from '@features/auth/components/SessionView';
+---
+<AuthLayout title="Tu cuenta · RAP" description="Identidad, rol y seguridad de la sesión" requiresAuth>
+  <SessionView client:load />
+</AuthLayout>
