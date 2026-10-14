@@ -59,7 +59,6 @@ docker compose config --services
 # db
 # migrate
 # backend
-# worker-vpn
 # frontend
 ```
 
