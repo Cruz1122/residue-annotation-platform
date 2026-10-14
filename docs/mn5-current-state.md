@@ -1,7 +1,7 @@
 # Estado actual de MN5 y perfil de conectividad
 
-**Fecha de corte:** 2026-10-10  
-**Estado:** documentación integrada; conectividad VPN/SSH verificada; inventario remoto de código **VERIFIED / READ-ONLY**.  
+**Fecha de corte:** 2026-10-14
+**Estado:** documentación integrada; conectividad VPN/SSH verificada; inventario remoto de código y metadata de benchmark **VERIFIED / READ-ONLY**; baseline científico **PARCIAL**.
 **Audiencia:** desarrollo, operación y revisión científica.
 
 Este documento separa tres fuentes de información:
@@ -104,6 +104,25 @@ sin abrir shell, ejecutar Slurm ni escribir SFTP. Esto valida el transporte y
 los límites del adaptador de aplicación; no sustituye la matriz completa ni
 una ejecución científica.
 
+En la misma fecha se inspeccionó, mediante el helper read-only del skill y cinco
+archivos explícitos de metadata, el directorio remoto
+`benchmarks/multinode_baseline_47265106/`. El snapshot SFTP terminó sin fallos
+y verificó estos tamaños y hashes SHA-256:
+
+| Archivo remoto | Bytes | SHA-256 | Lectura verificable |
+| --- | ---: | --- | --- |
+| `meta.json` | 413 | `0ff4b3b8751d09da2a347d5d2817a1d8f39431f70e07fd6721c75e464771873b` | job `47265106`, dos nodos, niveles `1/2/4/8`, presupuesto de 46 h |
+| `dag_contracts.json` | 2,065 | `8d858cce27223e0612f3aca7bd5498a194d31fe60bc08608d80d2ffa409a9d2a` | dependencias y reservas CPU/GPU del DAG |
+| `stages.tsv` | 4,506 | `c9e9a214475bd6282d0994c81fc1b54c6248ad44842c24eec08b529820e136b5` | 10 etapas de nivel 1 para `P01130`, todas `success`, `exit_code=0` |
+| `summary.tsv` | 81 | `779d60c14abf8b79179f236dde3d9ec9373091715c4f67d3474374b0cc1ce40c` | sólo contiene el encabezado; no prueba una corrida completa |
+| `code_sha256.tsv` | 19,130 | `6e0c7094959ce85983b5f7d71e81861ceaae4f3ced47945bd3f31855db2e5944` | relación de hashes del snapshot de código remoto |
+
+La interpretación correcta es **ejecución parcial observada**, no baseline
+científico aprobado: no hay resumen agregado de proteínas completadas, no se
+compararon outputs/golden files y no se ejecutó ningún job desde este checkout.
+Los paths de logs y muestras que aparecen en `stages.tsv` se conservaron como
+referencia textual, pero no se descargaron sus contenidos ni datasets.
+
 Esta inspección es evidencia de conectividad, permisos de lectura y estructura de código en la raíz observada. No es evidencia de ejecución científica, de permisos de escritura ni de aceptación operativa del pipeline.
 
 ## Manejo de secretos
@@ -121,7 +140,8 @@ El repositorio debe contener únicamente rutas a secretos o nombres de variables
 La siguiente información no está verificada y no debe presentarse como disponible:
 
 - ejecución de una corrida o de un stage con entradas científicas aprobadas;
-- manifests, logs, outputs y provenance producidos por una corrida real;
+- manifests, logs, outputs y provenance completos producidos por una corrida real;
+- finalización del baseline `47265106`: el metadata y diez etapas parciales son observables, pero `summary.tsv` no contiene filas de proteína completada;
 - versiones ejecutables, módulos, licencias, GPUs, cuotas y disponibilidad de cachés;
 - acceso a Slurm, estado de jobs y tiempos de polling;
 - permisos read-only a nivel BSC/OS para una cuenta de servicio y política para automatización;
