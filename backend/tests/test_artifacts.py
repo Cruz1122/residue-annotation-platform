@@ -1,5 +1,7 @@
 import hashlib
 
+import pytest
+from app.features.artifacts.storage import ArtifactIntegrityError, ArtifactStore
 from app.features.proteins.models import Protein
 from app.features.runs.models import Artifact, Run, RunStage, StageResult
 
@@ -94,6 +96,32 @@ def test_artifact_download_serves_matching_content(client, session, tmp_path):
 
     assert response.status_code == 200
     assert response.content == b"data"
+
+
+def test_verified_artifact_stream_uses_the_hashed_descriptor(tmp_path):
+    from app.core.config import Settings
+
+    stored = tmp_path / "artifacts" / "artifact" / "content.bin"
+    stored.parent.mkdir(parents=True, exist_ok=True)
+    stored.write_bytes(b"data")
+    store = ArtifactStore(Settings(artifact_root=tmp_path / "artifacts"))
+
+    stream = store.open_verified(
+        "artifact/content.bin",
+        size=4,
+        sha256=hashlib.sha256(b"data").hexdigest(),
+    )
+    try:
+        assert stream.read() == b"data"
+    finally:
+        stream.close()
+
+    with pytest.raises(ArtifactIntegrityError):
+        store.open_verified(
+            "artifact/content.bin",
+            size=4,
+            sha256=hashlib.sha256(b"tampered").hexdigest(),
+        )
 
 
 def test_artifact_metadata_never_exposes_storage_or_gpfs_paths(client, session):

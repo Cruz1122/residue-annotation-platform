@@ -11,7 +11,11 @@ from sqlalchemy.orm import Session
 from app.core.auth import Principal, get_principal
 from app.core.config import Settings, get_settings
 from app.core.db import get_db
-from app.features.artifacts.storage import ArtifactPathError, ArtifactStore
+from app.features.artifacts.storage import (
+    ArtifactIntegrityError,
+    ArtifactPathError,
+    ArtifactStore,
+)
 from app.features.auth.service import record_audit
 from app.features.runs.models import Upload
 from app.features.runs.schemas import UploadRead
@@ -131,19 +135,27 @@ def download_upload(
     upload = _owned_upload(session, upload_id, principal)
     store = ArtifactStore(settings)
     try:
-        actual_size, actual_sha256 = store.metadata(upload.storage_key)
-    except (ArtifactPathError, FileNotFoundError, OSError) as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Upload content unavailable"
-        ) from exc
-    if actual_size != upload.size or actual_sha256 != upload.sha256:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Upload content does not match its record",
+        stream = store.open_verified(
+            upload.storage_key,
+            size=upload.size,
+            sha256=upload.sha256,
         )
+    except (ArtifactPathError, ArtifactIntegrityError, FileNotFoundError, OSError) as exc:
+        raise HTTPException(
+            status_code=(
+                status.HTTP_409_CONFLICT
+                if isinstance(exc, ArtifactIntegrityError)
+                else status.HTTP_404_NOT_FOUND
+            ),
+            detail=(
+                "Upload content does not match its record"
+                if isinstance(exc, ArtifactIntegrityError)
+                else "Upload content unavailable"
+            ),
+        ) from exc
     filename = _attachment_filename(upload.original_filename)
     return StreamingResponse(
-        store.iter_bytes(upload.storage_key),
+        store.iter_open(stream),
         media_type=upload.media_type,
         headers={
             "Content-Length": str(upload.size),

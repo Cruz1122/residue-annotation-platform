@@ -1,14 +1,20 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from collections.abc import Iterator
 from pathlib import Path
+from typing import BinaryIO
 
 from app.core.config import Settings
 
 
 class ArtifactPathError(ValueError):
     pass
+
+
+class ArtifactIntegrityError(ValueError):
+    """The bytes on disk do not match the database record."""
 
 
 def safe_storage_path(root: Path, storage_key: str) -> Path:
@@ -54,6 +60,51 @@ class ArtifactStore:
             for chunk in iter(lambda: stream.read(1024 * 1024), b""):
                 digest.update(chunk)
         return stat.st_size, digest.hexdigest()
+
+    def open_verified(self, storage_key: str, *, size: int, sha256: str) -> BinaryIO:
+        """Open and verify one immutable descriptor before it is streamed.
+
+        The caller receives the same descriptor that was hashed. Re-opening the
+        storage path after verification would allow a path replacement (for
+        example, a symlink swap) to bypass the integrity check between the
+        metadata read and the HTTP stream.
+        """
+
+        path = self.resolve(storage_key)
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(path, flags)
+        try:
+            stream = os.fdopen(descriptor, "rb")
+        except Exception:
+            os.close(descriptor)
+            raise
+        try:
+            descriptor_size = stream.seek(0, 2)
+            if descriptor_size != size:
+                raise ArtifactIntegrityError("artifact content does not match its record")
+            stream.seek(0)
+            digest = hashlib.sha256()
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+            if digest.hexdigest() != sha256:
+                raise ArtifactIntegrityError("artifact content does not match its record")
+            stream.seek(0)
+            return stream
+        except Exception:
+            stream.close()
+            raise
+
+    @staticmethod
+    def iter_open(stream: BinaryIO, chunk_size: int = 1024 * 1024) -> Iterator[bytes]:
+        """Yield an already verified stream and close it on completion."""
+
+        try:
+            while chunk := stream.read(chunk_size):
+                yield chunk
+        finally:
+            stream.close()
 
     def iter_bytes(self, storage_key: str, chunk_size: int = 1024 * 1024) -> Iterator[bytes]:
         path = self.resolve(storage_key)
