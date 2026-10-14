@@ -548,6 +548,7 @@ def test_submit_poll_and_ingest_persist_a_linked_stage_result(client, session, t
     assert "pipeline_status=$?" in remote_script
     assert 'exit "$pipeline_status"' in remote_script
     assert "SLURM_JOB_ID" in remote_script
+    assert 'grep -Fq "SLURM_JOB_ID | ${SLURM_JOB_ID}" "$log"' in remote_script
 
     assert executor.poll_stage(session, stage) is True
     session.expire_all()
