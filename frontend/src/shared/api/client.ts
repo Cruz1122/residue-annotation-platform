@@ -403,6 +403,19 @@ export function getRun(runId: string): Promise<Run> {
   return request<Run>(`/runs/${encodeURIComponent(runId)}`);
 }
 
+export function listRuns(limit = 200, offset = 0): Promise<Run[]> {
+  const boundedLimit = Math.min(200, Math.max(1, Math.trunc(limit)));
+  const boundedOffset = Math.max(0, Math.trunc(offset));
+  return request<Run[]>(`/runs?limit=${boundedLimit}&offset=${boundedOffset}`);
+}
+
+function parseRunSnapshot(value: unknown): Run {
+  if (!isRecord(value) || typeof value.id !== 'string' || typeof value.status !== 'string' || !Array.isArray(value.stages)) {
+    throw new ApiError('El backend devolvió un snapshot de corrida inválido.', 502);
+  }
+  return value as unknown as Run;
+}
+
 export async function subscribeRunEvents(
   runId: string,
   options: { onSnapshot: (run: Run) => void; signal?: AbortSignal },
@@ -431,7 +444,7 @@ export async function subscribeRunEvents(
     } catch {
       throw new ApiError('El backend devolvió un evento de corrida inválido.', 502);
     }
-    options.onSnapshot(snapshot as Run);
+    options.onSnapshot(parseRunSnapshot(snapshot));
   };
 
   try {

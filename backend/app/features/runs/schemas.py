@@ -65,6 +65,7 @@ class StageRead(BaseModel):
     cache_key: str | None = None
     cache_factors: dict[str, object] = Field(default_factory=dict)
     reuse_reason: dict[str, object] | None = None
+    provenance: dict[str, object] = Field(default_factory=dict)
     omission_reason: str | None = None
     slurm_job_id: str | None = None
     error_code: str | None = None
@@ -143,6 +144,8 @@ class RunRead(BaseModel):
     protein_id: str
     status: str
     requested_variants: list[dict[str, object]]
+    error_code: str | None = None
+    error_message: str | None = None
     configuration: RunConfigurationRead | None = None
     preparation: RunPreparationRead | None = None
     created_at: datetime | None = None

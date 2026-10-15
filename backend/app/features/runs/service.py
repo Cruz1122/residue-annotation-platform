@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -167,6 +168,9 @@ def _stage_read(stage: RunStage) -> StageRead:
         cache_key=stage.cache_key,
         cache_factors=stage.cache_factors or {},
         reuse_reason=stage.reuse_reason,
+        provenance=(
+            _public_provenance(stage.stage_result.provenance or {}) if stage.stage_result else {}
+        ),
         omission_reason=stage.omission_reason,
         slurm_job_id=stage.slurm_job_id,
         error_code=stage.error_code,
@@ -197,7 +201,101 @@ def _stage_read(stage: RunStage) -> StageRead:
     )
 
 
+_SENSITIVE_PROVENANCE_KEY_PARTS = (
+    "accesskey",
+    "apikey",
+    "authorization",
+    "cookie",
+    "credential",
+    "password",
+    "passphrase",
+    "privatekey",
+    "secret",
+    "token",
+)
+
+
+def _is_sensitive_provenance_key(key: object) -> bool:
+    normalized = re.sub(r"[^a-z0-9]", "", str(key).lower())
+    return any(part in normalized for part in _SENSITIVE_PROVENANCE_KEY_PARTS)
+
+
+def _public_provenance(value: object) -> dict[str, object]:
+    """Keep provenance useful while applying the API's path/secret redaction."""
+
+    if not isinstance(value, dict):
+        return {}
+
+    def sanitize(item: object, *, key: object = None, depth: int = 0) -> object:
+        if key is not None and _is_sensitive_provenance_key(key):
+            return "<redacted>"
+        if depth > 8:
+            return "<truncated>"
+        if isinstance(item, dict):
+            return {
+                str(nested_key): sanitize(nested, key=nested_key, depth=depth + 1)
+                for nested_key, nested in list(item.items())[:100]
+            }
+        if isinstance(item, list):
+            return [sanitize(nested, depth=depth + 1) for nested in item[:100]]
+        if isinstance(item, str):
+            return sanitize_error_message(item, roots=(get_settings().hpc_remote_root,))
+        if item is None or isinstance(item, (bool, int, float)):
+            return item
+        return str(item)
+
+    return {str(key): sanitize(item, key=key, depth=1) for key, item in list(value.items())[:100]}
+
+
+def _run_error(run: Run) -> tuple[str | None, str | None]:
+    """Expose a bounded run-level summary when the failure lives on a child record."""
+
+    if run.error_code is not None or run.error_message is not None:
+        return (
+            run.error_code,
+            sanitize_error_message(
+                run.error_message,
+                roots=(get_settings().hpc_remote_root,),
+            )
+            if run.error_message is not None
+            else None,
+        )
+    if (
+        run.preparation is not None
+        and run.preparation.error_message is not None
+        and (run.preparation.status == "failed" or run.status == RunStatus.FAILED)
+    ):
+        return (
+            run.preparation.error_code,
+            sanitize_error_message(
+                run.preparation.error_message,
+                roots=(get_settings().hpc_remote_root,),
+            ),
+        )
+    for stage in run.stages:
+        if stage.error_message is not None:
+            return (
+                stage.error_code,
+                sanitize_error_message(
+                    stage.error_message,
+                    roots=(get_settings().hpc_remote_root,),
+                ),
+            )
+        if stage.preflight_error_message is not None and (
+            stage.preflight_status == "failed" or run.status == RunStatus.FAILED
+        ):
+            return (
+                stage.preflight_error_code,
+                sanitize_error_message(
+                    stage.preflight_error_message,
+                    roots=(get_settings().hpc_remote_root,),
+                ),
+            )
+    return None, None
+
+
 def serialize_run(run: Run) -> RunRead:
+    run_error_code, run_error_message = _run_error(run)
     configuration = (
         RunConfigurationRead(
             id=run.configuration.id,
@@ -232,6 +330,8 @@ def serialize_run(run: Run) -> RunRead:
         protein_id=run.protein_id,
         status=run.status,
         requested_variants=run.requested_variants or [],
+        error_code=run_error_code,
+        error_message=run_error_message,
         configuration=configuration,
         preparation=(
             RunPreparationRead(
@@ -751,6 +851,28 @@ def transition_stage(session: Session, stage: RunStage, target: RunStageStatus) 
     }:
         stage.finished_at = now_utc()
         stage.lease_expires_at = None
+    session.flush()
+
+
+def mark_run_running(session: Session, stage: RunStage) -> None:
+    """Persist execution evidence only after a worker or scheduler observed it.
+
+    A remote submission is merely queued until Slurm reports ``RUNNING`` or a
+    terminal success that proves the job executed. The local executor calls
+    this immediately before entering a reviewed adapter, while the remote
+    executor calls it from the polling boundary.
+    """
+
+    run = session.get(Run, stage.run_id)
+    if run is None or run.status in {
+        RunStatus.CANCEL_REQUESTED,
+        RunStatus.CANCELLED,
+        RunStatus.SUCCESS,
+        RunStatus.FAILED,
+    }:
+        return
+    run.status = RunStatus.RUNNING
+    run.started_at = run.started_at or now_utc()
     session.flush()
 
 

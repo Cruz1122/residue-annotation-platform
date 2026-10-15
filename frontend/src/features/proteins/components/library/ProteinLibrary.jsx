@@ -1,11 +1,23 @@
 import { useEffect, useMemo, useState } from 'preact/hooks';
 import LucideIcon from '@shared/components/icons/LucideIcon.jsx';
 import EmptyState from '@shared/components/feedback/EmptyState.jsx';
-import { ApiError, listProteins } from '@shared/api/client';
+import RunHistory from '@features/runs/components/history/RunHistory.jsx';
+import { ApiError, listProteins, listRuns } from '@shared/api/client';
 import '@features/proteins/styles/library.css';
 
 function proteinLabel(protein) {
   return protein.aliases?.[0]?.identifier || protein.id;
+}
+
+async function listAllRuns() {
+  const runs = [];
+  let offset = 0;
+  while (true) {
+    const page = await listRuns(200, offset);
+    runs.push(...page);
+    if (page.length < 200) return runs;
+    offset += page.length;
+  }
 }
 
 function ProteinCard({ protein }) {
@@ -37,16 +49,18 @@ function ProteinCard({ protein }) {
 
 export default function ProteinLibrary() {
   const [proteins, setProteins] = useState([]);
+  const [runs, setRuns] = useState([]);
   const [query, setQuery] = useState('');
   const [state, setState] = useState('loading');
   const [error, setError] = useState('');
 
   useEffect(() => {
     let active = true;
-    listProteins()
-      .then((items) => {
+    Promise.all([listProteins(), listAllRuns()])
+      .then(([proteinItems, runItems]) => {
         if (!active) return;
-        setProteins(items);
+        setProteins(proteinItems);
+        setRuns(runItems);
         setState('ready');
       })
       .catch((requestError) => {
@@ -96,6 +110,7 @@ export default function ProteinLibrary() {
       {state === 'ready' && !catalogEmpty && !filtered.length && (
         <EmptyState icon="scan-search" title="No hay proteínas que coincidan con la búsqueda." />
       )}
+      <RunHistory runs={runs} proteins={proteins} state={state} />
     </section>
   );
 }

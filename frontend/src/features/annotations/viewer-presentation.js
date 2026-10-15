@@ -130,21 +130,47 @@ export function canonicalChain(sequence) {
     insCode: '',
     compId: AA3[one] ?? 'UNK',
     one,
-    aaPosition: index + 1,
+    // A synthetic sequence is useful for the textual fallback, but it is not
+    // evidence of a canonical-to-structure mapping.
+    aaPosition: null,
   }));
   return residues.length ? [{ id: 'A', residues }] : [];
 }
 
-export function assignCanonicalPositions(chains, canonicalSequence) {
-  const expected = String(canonicalSequence || '');
+function mappingResidueKey(chain, residueNumber, insertionCode = '') {
+  return `${String(chain || 'A')}|${String(residueNumber)}|${String(insertionCode || '')}`;
+}
+
+export function assignCanonicalPositions(chains, canonicalSequence, structureMapping = null) {
+  const canonicalLength = String(canonicalSequence || '').length;
+  const pairs = Array.isArray(structureMapping?.canonical_to_structure)
+    ? structureMapping.canonical_to_structure
+    : [];
+  const byStructureResidue = new Map();
+  const usedCanonicalPositions = new Set();
+  for (const pair of pairs) {
+    const canonicalPosition = Number(pair?.canonical_position);
+    const residueNumber = pair?.residue_number;
+    if (!Number.isInteger(canonicalPosition) || canonicalPosition < 1 || canonicalPosition > canonicalLength) continue;
+    if (residueNumber === null || residueNumber === undefined || residueNumber === '') continue;
+    if (usedCanonicalPositions.has(canonicalPosition)) continue;
+    const key = mappingResidueKey(pair?.chain, residueNumber, pair?.insertion_code);
+    if (byStructureResidue.has(key)) continue;
+    usedCanonicalPositions.add(canonicalPosition);
+    byStructureResidue.set(key, {
+      canonicalPosition,
+      aminoAcid: String(pair?.aa ?? '').toUpperCase(),
+    });
+  }
   return chains.map((chain) => {
-    const observed = chain.residues.map((residue) => residue.one).join('');
-    const aligned = expected.length > 0 && observed === expected;
     return {
       ...chain,
-      residues: chain.residues.map((residue, index) => ({
+      residues: chain.residues.map((residue) => ({
         ...residue,
-        aaPosition: aligned ? index + 1 : null,
+        aaPosition: (() => {
+          const mapped = byStructureResidue.get(mappingResidueKey(residue.chain, residue.authSeqId, residue.insCode));
+          return mapped && (!mapped.aminoAcid || mapped.aminoAcid === residue.one) ? mapped.canonicalPosition : null;
+        })(),
       })),
     };
   });
@@ -186,6 +212,25 @@ export function relativeDomain(mode, rows) {
   }
   if (!numbers.length) return null;
   return { min: Math.min(...numbers), max: Math.max(...numbers), relative: true };
+}
+
+function hasPublishedField(rows, field, kind) {
+  return (rows ?? []).some((row) => {
+    if (!Number.isInteger(row?.aa_position) || row.aa_position < 1) return false;
+    const value = row?.values?.[field];
+    if (kind === 'continuous') return finiteAnnotationValue(value) !== null;
+    return value !== null && value !== undefined && value !== '' && value !== 'NA';
+  });
+}
+
+export function viewerModeAvailability(rows, { structureAvailable = false, mappingValid = false } = {}) {
+  const mappedStructure = Boolean(structureAvailable && mappingValid);
+  return {
+    regime: mappedStructure && hasPublishedField(rows, VISUALIZATION_MODES.regime.field, 'categorical'),
+    frustration: mappedStructure && hasPublishedField(rows, VISUALIZATION_MODES.frustration.field, 'continuous'),
+    contacts: mappedStructure && hasPublishedField(rows, VISUALIZATION_MODES.contacts.field, 'continuous'),
+    conservation: mappedStructure && hasPublishedField(rows, VISUALIZATION_MODES.conservation.field, 'continuous'),
+  };
 }
 
 export function annotationForResidue(residue, byPosition) {

@@ -33,7 +33,7 @@ from app.features.runs.manifest import (
     validate_remote_manifest,
 )
 from app.features.runs.models import Artifact, Run, RunStage, StageResult
-from app.features.runs.service import now_utc, transition_stage
+from app.features.runs.service import mark_run_running, now_utc, transition_stage
 from app.features.runs.state import RunStageStatus
 from app.features.stages.registry import STAGE_BY_ID
 from app.infrastructure.hpc.base import (
@@ -380,16 +380,16 @@ class SSHStageExecutor:
         )
         handle = self.client.submit(request)
         stage.slurm_job_id = handle.job_id
-        if stage.status == RunStageStatus.QUEUED:
-            # The row lock acquired by ``reserve_remote_submission`` remains
-            # held while the scheduler call is in flight. Publish the job id
-            # and RUNNING state in the same commit so cancellation cannot
-            # terminalize a queued stage after Slurm has accepted the job.
+        if stage.status == RunStageStatus.QUEUED and handle.state == JobState.RUNNING:
+            # A client may return an already-running handle. Normal Slurm
+            # submissions return QUEUED and are promoted only by polling.
             transition_stage(session, stage, RunStageStatus.RUNNING)
+            mark_run_running(session, stage)
         elif stage.status != RunStageStatus.RUNNING:
-            raise RemoteStageExecutionError(
-                "remote submission completed for a stage that is no longer active"
-            )
+            if stage.status != RunStageStatus.QUEUED:
+                raise RemoteStageExecutionError(
+                    "remote submission completed for a stage that is no longer active"
+                )
         session.commit()
 
     def poll_stage(self, session: Session, stage: RunStage) -> bool:
@@ -420,6 +420,7 @@ class SSHStageExecutor:
             persisted = session.scalar(select(RunStage.status).where(RunStage.id == stage.id))
             if persisted == RunStageStatus.QUEUED:
                 transition_stage(session, stage, RunStageStatus.RUNNING)
+                mark_run_running(session, stage)
                 session.commit()
             return True
         if status.state == JobState.SUCCESS:
@@ -453,6 +454,7 @@ class SSHStageExecutor:
                 return True
             if persisted == RunStageStatus.QUEUED:
                 transition_stage(session, stage, RunStageStatus.RUNNING)
+                mark_run_running(session, stage)
             transition_stage(
                 session,
                 stage,

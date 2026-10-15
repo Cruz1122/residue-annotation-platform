@@ -35,7 +35,7 @@ from app.features.runs.preflight import (
     inspect_stage_preflight,
 )
 from app.features.runs.selection import dependency_is_satisfied, has_dependency_override
-from app.features.runs.service import transition_stage
+from app.features.runs.service import mark_run_running, transition_stage
 from app.features.runs.state import RunStageStatus, RunStatus
 from app.features.stages.registry import STAGE_BY_ID
 from app.infrastructure.hpc.base import (
@@ -590,8 +590,6 @@ def claim_ready_stage(session: Session, settings: Settings) -> RunStage | None:
         stage.preflight_retry_at = None
     stage.lease_expires_at = _lease_deadline(settings, _utcnow())
     transition_stage(session, stage, RunStageStatus.QUEUED)
-    stage.run.status = RunStatus.RUNNING
-    stage.run.started_at = stage.run.started_at or _utcnow()
     session.commit()
     log_worker_event(
         "stage_claimed",
@@ -611,7 +609,7 @@ def reserve_remote_submission(session: Session, stage_id: str) -> RunStage | Non
     queued stage. Locking the stage and then its run (the same order used by
     ``request_cancel``) keeps the reservation and cancellation decisions
     serializable. The lock remains held until the executor commits the job id
-    and moves the stage to ``RUNNING``.
+    and leaves the stage queued, or observes an already-running handle.
     """
 
     stage = session.scalar(select(RunStage).where(RunStage.id == stage_id).with_for_update())
@@ -1031,8 +1029,9 @@ def _process_remote(session: Session, settings: Settings) -> bool:
                 # write was not confirmed. Persist the recovered job id
                 # immediately so polling/cancellation can own it without a
                 # second submit.
-                if failed.status == RunStageStatus.QUEUED:
-                    transition_stage(session, failed, RunStageStatus.RUNNING)
+                # The scheduler accepted the job, but its runtime state is
+                # still unknown. Keep the stage queued until polling observes
+                # actual execution.
                 failed.slurm_job_id = exc.job_id
                 failed.preflight_status = "passed"
                 failed.preflight_retry_at = None
@@ -1144,6 +1143,7 @@ def process_one(session: Session, executor: ScientificStageExecutor | None = Non
             _finalize_runs(session, {stage.run_id})
             return True
         transition_stage(session, stage, RunStageStatus.RUNNING)
+        mark_run_running(session, stage)
         stage.lease_expires_at = _lease_deadline(settings, _utcnow())
         session.commit()
         log_worker_event(

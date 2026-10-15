@@ -1,7 +1,7 @@
 import { memo } from 'preact/compat';
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import LucideIcon from '@shared/components/icons/LucideIcon.jsx';
-import { ApiError, getAnnotations, getArtifactObjectUrl, getProtein, getRun, getUploadObjectUrl } from '@shared/api/client';
+import { ApiError, getAnnotations, getArtifactObjectUrl, getProtein, getRun, getUploadObjectUrl, subscribeRunEvents } from '@shared/api/client';
 import {
   AA_NAMES,
   ANNOTATION_GROUPS,
@@ -22,6 +22,7 @@ import {
   relativeDomain,
   residueDisplayColor,
   residueKey,
+  viewerModeAvailability,
 } from '@features/annotations/viewer-presentation.js';
 import 'molstar/build/viewer/molstar.css';
 import '@features/annotations/styles/viewer.css';
@@ -37,7 +38,7 @@ const EMPTY_SELECTION = { lo: null, hi: null, active: null };
 
 function publishedField(row, key) {
   const value = row?.values?.[key];
-  if (value === null || value === undefined || value === '') return 'NA';
+  if (value === null || value === undefined || value === '' || value === 'NA') return 'NA';
   const unit = row.units?.[key];
   return unit ? `${value} ${unit}` : value;
 }
@@ -75,6 +76,11 @@ function structureSource(run) {
     format: structureFormat(upload.original_filename, upload.media_type),
     loadUrl: () => getUploadObjectUrl(upload.id),
   };
+}
+
+function sameStructureSource(left, right) {
+  if (!left || !right) return left === right;
+  return left?.id === right?.id && left?.format === right?.format;
 }
 
 function chainValue(column, index) {
@@ -216,20 +222,112 @@ export default function ProteinViewer({ proteinId }) {
   const [state, setState] = useState('loading');
   const [viewerState, setViewerState] = useState('loading');
   const [viewerError, setViewerError] = useState('');
+  const [structureMapping, setStructureMapping] = useState({});
+  const [structureParsed, setStructureParsed] = useState(false);
   const [error, setError] = useState('');
   const [wipe, setWipe] = useState('covering');
   const [mode, setMode] = useState('regime');
   const [selection, setSelection] = useState(EMPTY_SELECTION);
   const runId = typeof window === 'undefined' ? '' : new URLSearchParams(window.location.search).get('run') ?? '';
   const [structureRequest, setStructureRequest] = useState(null);
+  const structureSourceRef = useRef(null);
+  const structureMappingRef = useRef({});
+  const structureChainRef = useRef('');
 
   useEffect(() => {
     chainsRef.current = chains;
     chainIdRef.current = chainId;
   }, [chains, chainId]);
 
+  const applyParsedChains = (parsedChains) => {
+    const aligned = assignCanonicalPositions(parsedChains, sequenceRef.current, structureMappingRef.current);
+    setChains(aligned);
+    const configuredChain = structureChainRef.current;
+    const preferredChain = configuredChain && aligned.some((chain) => chain.id === configuredChain)
+      ? configuredChain
+      : aligned.some((chain) => chain.id === chainIdRef.current) ? chainIdRef.current : aligned[0]?.id;
+    setChainId(preferredChain ?? '');
+    setStructureParsed(true);
+  };
+
   useEffect(() => {
     let active = true;
+    let timer;
+    let streamController;
+    let latestRun = null;
+
+    const applyRun = (runData) => {
+      if (!active) return;
+      latestRun = runData;
+      const configuration = runData?.configuration;
+      structureMappingRef.current = configuration?.structure_mapping ?? {};
+      structureChainRef.current = configuration?.structure_chain ?? '';
+      setStructureMapping(configuration?.structure_mapping ?? {});
+      const nextStructure = structureSource(runData);
+      setRunStructure(nextStructure);
+    };
+
+    const refreshAnnotations = async () => {
+      if (!runId) return;
+      try {
+        const annotationData = await getAnnotations(runId);
+        if (active) setAnnotations(annotationData.rows ?? []);
+      } catch (requestError) {
+        if (active) setViewerError(requestError instanceof ApiError ? requestError.message : 'No se pudieron actualizar las anotaciones.');
+      }
+    };
+
+    const schedulePolling = (delay = 2_000) => {
+      if (!active || !runId) return;
+      if (timer) window.clearTimeout(timer);
+      timer = window.setTimeout(async () => {
+        try {
+          const [runData, annotationData] = await Promise.all([getRun(runId), getAnnotations(runId)]);
+          applyRun(runData);
+          if (active) setAnnotations(annotationData.rows ?? []);
+          if (!['success', 'failed', 'cancelled'].includes(runData.status)) connectStream();
+        } catch (requestError) {
+          if (!active) return;
+          setViewerError(requestError instanceof ApiError ? requestError.message : 'No se pudo actualizar el visor.');
+          schedulePolling(4_000);
+        }
+      }, delay);
+    };
+
+    const connectStream = async () => {
+      if (!active || !runId || ['success', 'failed', 'cancelled'].includes(latestRun?.status)) return;
+      streamController?.abort();
+      streamController = new AbortController();
+      try {
+        await subscribeRunEvents(runId, {
+          signal: streamController.signal,
+          onSnapshot: (snapshot) => {
+            latestRun = snapshot;
+            applyRun(snapshot);
+            void refreshAnnotations();
+          },
+        });
+        if (active && !['success', 'failed', 'cancelled'].includes(latestRun?.status)) schedulePolling();
+      } catch (streamError) {
+        if (active && !streamController.signal.aborted) {
+          setViewerError(streamError instanceof ApiError ? streamError.message : 'La actualización en vivo se desconectó; se reintentará automáticamente.');
+          schedulePolling();
+        }
+      }
+    };
+
+    const setRunStructure = (nextStructure) => {
+      if (sameStructureSource(structureSourceRef.current, nextStructure)) {
+        if (!nextStructure) setViewerState((current) => current === 'loading' ? 'unavailable' : current);
+        return;
+      }
+      structureSourceRef.current = nextStructure;
+      setStructureParsed(false);
+      setViewerState(nextStructure ? 'loading' : 'unavailable');
+      setWipe('covering');
+      setStructureRequest(nextStructure);
+    };
+
     Promise.all([getProtein(proteinId), runId ? getRun(runId) : Promise.resolve(null)])
       .then(async ([proteinData, runData]) => {
         const annotationData = runData ? await getAnnotations(runData.id) : null;
@@ -240,9 +338,9 @@ export default function ProteinViewer({ proteinId }) {
         setAnnotations(annotationData?.rows ?? []);
         setChains(nextChains);
         setChainId(nextChains[0]?.id ?? '');
-        setStructureRequest(structureSource(runData));
-        setViewerState(structureSource(runData) ? 'loading' : 'unavailable');
+        applyRun(runData);
         setState('ready');
+        if (runData && !['success', 'failed', 'cancelled'].includes(runData.status)) void connectStream();
       })
       .catch((requestError) => {
         if (!active) return;
@@ -250,17 +348,37 @@ export default function ProteinViewer({ proteinId }) {
         setViewerState('unavailable');
         setError(requestError instanceof ApiError ? requestError.message : 'No se pudo cargar la proteína.');
       });
-    return () => { active = false; };
+    return () => {
+      active = false;
+      streamController?.abort();
+      if (timer) window.clearTimeout(timer);
+    };
   }, [proteinId, runId]);
 
   const activeChain = chains.find((chain) => chain.id === chainId) ?? chains[0] ?? null;
   const residues = activeChain?.residues ?? [];
+  const mappingValid = useMemo(() => {
+    if (!structureParsed || !activeChain || !protein?.sequence?.length) return false;
+    const mappedPositions = new Set(
+      activeChain.residues
+        .map((residue) => residue.aaPosition)
+        .filter((position) => Number.isInteger(position) && position > 0),
+    );
+    return mappedPositions.size >= Math.ceil(protein.sequence.length * 0.8);
+  }, [activeChain, protein, structureParsed]);
   const annotationByPosition = useMemo(() => {
     const rows = new Map();
     for (const row of annotations) rows.set(row.aa_position, row);
     return rows;
   }, [annotations]);
   const domain = useMemo(() => relativeDomain(mode, annotations), [mode, annotations]);
+  const modeAvailability = useMemo(
+    () => viewerModeAvailability(annotations, {
+      structureAvailable: Boolean(structureRequest),
+      mappingValid,
+    }),
+    [annotations, mappingValid, structureRequest],
+  );
   const colors = useMemo(
     () => residues.map((residue) => residueDisplayColor(mode, residue, annotationForResidue(residue, annotationByPosition), domain)),
     [residues, mode, annotationByPosition, domain],
@@ -269,6 +387,12 @@ export default function ProteinViewer({ proteinId }) {
   const activeAnnotation = activeResidue ? annotationForResidue(activeResidue, annotationByPosition) : null;
   const activeMeasurement = finiteAnnotationValue(activeAnnotation?.values?.[VISUALIZATION_MODES[mode].field]);
   const regimeMissing = mode === 'regime' && activeResidue && !colorForValues(mode, activeAnnotation?.values, null);
+
+  useEffect(() => {
+    if (modeAvailability[mode]) return;
+    const next = Object.keys(MODE_INFO).find((candidate) => modeAvailability[candidate]);
+    if (next) setMode(next);
+  }, [mode, modeAvailability]);
 
   const applyTheme = async (nextMode) => {
     const viewer = viewerRef.current;
@@ -349,9 +473,9 @@ export default function ProteinViewer({ proteinId }) {
           const parsedResidues = parsed.flatMap((chain) => chain.residues);
           const hasKnownResidues = parsedResidues.some((residue) => AA_NAMES[residue.compId]);
           if (parsed.length && hasKnownResidues) {
-            const aligned = assignCanonicalPositions(parsed, sequenceRef.current);
-            setChains(aligned);
-            setChainId(aligned[0].id);
+            applyParsedChains(parsed);
+          } else {
+            setStructureParsed(false);
           }
         }
         const registry = viewer.plugin.representation.structure.themes.colorThemeRegistry;
@@ -409,6 +533,7 @@ export default function ProteinViewer({ proteinId }) {
         if (!disposed) {
           const message = viewerErrorValue instanceof Error ? viewerErrorValue.message : 'No se pudo leer la estructura.';
           setViewerError(message);
+          setStructureParsed(false);
           setViewerState('error');
         }
       }
@@ -428,6 +553,13 @@ export default function ProteinViewer({ proteinId }) {
       if (structureObjectUrl) URL.revokeObjectURL(structureObjectUrl);
     };
   }, [structureRequest]);
+
+  useEffect(() => {
+    if (!structureRef.current) return;
+    const parsed = collectChains(structureRef.current);
+    const parsedResidues = parsed.flatMap((chain) => chain.residues);
+    if (parsed.length && parsedResidues.some((residue) => AA_NAMES[residue.compId])) applyParsedChains(parsed);
+  }, [structureMapping]);
 
   useEffect(() => {
     if (wipe !== 'covering') return undefined;
@@ -607,6 +739,7 @@ export default function ProteinViewer({ proteinId }) {
       <div ref={hostRef} class="molstar-host" aria-label={structureRequest ? 'Visor molecular Mol*' : 'Sin estructura publicada'} />
       {viewerState === 'unavailable' && wipe === 'gone' && <div class="viewer-boot viewer-empty"><LucideIcon name="box" /><strong>Estructura no disponible</strong><span>La corrida no tiene un PDB o mmCIF subido ni un artefacto publicado.</span></div>}
       {viewerState === 'error' && wipe === 'gone' && <div class="viewer-boot error"><strong>No se pudo cargar la estructura</strong><span>{viewerError || 'Verifica el artefacto y vuelve a intentarlo.'}</span></div>}
+      {(viewerState === 'unavailable' || viewerState === 'error') && wipe === 'gone' && <p class="viewer-accessibility-note" role="status">La secuencia y los estados de evidencia siguen disponibles en formato textual; la vista 3D no está disponible.</p>}
 
       <div class="viewer-top-stack">
         <div class="viewer-chain-panel">
@@ -639,13 +772,14 @@ export default function ProteinViewer({ proteinId }) {
         <div class="viewer-mode-panel" aria-label="Modos de color">
           <div class="viewer-mode-buttons">
             {Object.entries(MODE_INFO).map(([key, info]) => (
-              <button key={key} class={`viewer-mode ${mode === key ? 'active' : ''}`} type="button" title={info.title} aria-pressed={mode === key} onClick={() => setMode(key)}>
+              <button key={key} class={`viewer-mode ${mode === key ? 'active' : ''}`} type="button" title={modeAvailability[key] ? info.title : `${info.title} · pendiente de estructura, mapping y resultado publicado`} aria-pressed={mode === key} disabled={!modeAvailability[key]} onClick={() => setMode(key)}>
                 <LucideIcon name={info.icon} />
               </button>
             ))}
           </div>
           <div class={`viewer-mode-info ${mode === 'regime' ? '' : 'is-continuous'}`}>
             <span class="viewer-mode-title">{MODE_INFO[mode].title}</span>
+            {!modeAvailability[mode] && <span class="viewer-mode-pending">Pendiente: requiere estructura, mapping validado y el dato publicado.</span>}
             {mode === 'regime' ? (
               <span class="viewer-mode-legend">
                 {MODE_INFO.regime.legend.map(([label, color]) => <span key={label} class="viewer-legend-item"><i style={{ background: color }} />{label}</span>)}

@@ -1,6 +1,6 @@
 # 03 — Seguimiento y resultados
 
-**Estado:** especificación funcional objetivo. El frontend ya tiene una base de progreso, información y visor, pero la habilitación progresiva y el historial todavía no reflejan completamente el contrato.
+**Estado:** implementación local de SEG-001 a SEG-012 completada y verificada con los gates disponibles en este checkout. SEG-013 y SEG-014 siguen siendo posteriores. El transporte VPN/SFTP y la inspección read-only de la raíz autorizada de MN5 fueron verificados el 2026-10-15 mediante el perfil Compose, sin `sudo` en el host. La ejecución científica remota no se lanza desde esta validación porque la frontera aprobada para MN5 es estrictamente de solo lectura.
 
 ## Objetivo
 
@@ -116,27 +116,37 @@ flowchart LR
 ### Evidencia técnica usada
 
 - Los cuatro campos que alimentan los modos están definidos en [`frontend/src/features/annotations/viewer-presentation.js`](../frontend/src/features/annotations/viewer-presentation.js) y el visor usa Mol* en [`frontend/src/features/annotations/components/viewer/ProteinViewer.jsx`](../frontend/src/features/annotations/components/viewer/ProteinViewer.jsx).
-- La API ya tiene snapshots de run, stages, anotaciones parciales y SSE, pero no un listado completo de historial: [`backend/app/features/runs/router.py`](../backend/app/features/runs/router.py) y [`backend/app/features/runs/schemas.py`](../backend/app/features/runs/schemas.py).
+- La API tiene snapshots de run, stages, anotaciones parciales, SSE y un listado autorizado de historial: [`backend/app/features/runs/router.py`](../backend/app/features/runs/router.py) y [`backend/app/features/runs/schemas.py`](../backend/app/features/runs/schemas.py).
 - El inventario del estado actual y sus límites científicos se conserva en [`AUDIT_REPORT.md`](../AUDIT_REPORT.md).
 
 ## Estado actual
 
-### Implementado o aprovechable
+### Implementado y verificado localmente
 
 - El frontend consulta la API real, tiene flujo de onboarding, progreso, información y visor Mol*.
-- Existen estados persistidos y transiciones `pending`, `ready`, `queued`, `running`, `reused`, `success`, `failed`, `skipped` y `cancelled`.
-- La API ofrece lectura de una run, stages, anotaciones parciales, artefactos y eventos SSE con fallback de snapshot/polling.
-- El visor conserva cuatro modos: régimen, frustración estructural, contactos y conservación.
-- La agregación de anotaciones conserva `aa_position`, `aa_ref`, unidades y estado QC cuando el resultado está publicado.
+- Existen estados persistidos y transiciones `pending`, `ready`, `queued`, `running`, `reused`, `success`, `failed`, `skipped` y `cancelled`; el backend sólo promueve a `running` cuando el worker local inicia ejecución o el polling remoto observa el job ejecutándose.
+- `stage-visibility.js` representa todos los stages persistidos y no aplica una lista de stages ocultos de demo.
+- La API ofrece lectura de una run, listado autorizado de historial, stages, anotaciones parciales, artefactos y eventos SSE con fallback de snapshot/polling.
+- El progreso distingue preparación, validación, envío, espera de recursos, ejecución real, fallos y cancelación; conserva DAG, omisiones, descendientes y reusos.
+- El visor conserva exactamente cuatro modos y los habilita según estructura, mapping válido y campo publicado; actualiza la fuente de la run mediante SSE/polling y mantiene fallback textual cuando Mol* no está disponible.
+- La información distingue estados de evidencia, muestra sólo valores publicados con unidades/QC/provenance y habilita descargas únicamente para artefactos existentes.
+- El historial lista runs autorizadas y permite abrir cada `run_id` de forma independiente, incluso para dos ejecuciones de la misma proteína.
 
-### Parcial o pendiente
+### Gate externo de transporte e inspección read-only
 
-- [`frontend/src/features/runs/stage-visibility.js`](../frontend/src/features/runs/stage-visibility.js) mantiene nueve stages deshabilitados por una política de demo/presentación; eso no representa la ejecución normal que debe mostrar el producto.
-- El flujo de progreso y el visor todavía requieren habilitación por artefacto/dato disponible, no sólo por existencia de la run o por botones renderizados.
-- El visor carga datos al abrirse y no tiene un mecanismo completo de refresco progresivo cuando llega un artefacto posterior.
-- `InformationView` obtiene datos una vez y conserva enlaces de exportación deshabilitados hasta que exista un backend real para esos archivos.
-- No existe endpoint/UI de listado de historial completo; la API actual expone principalmente la run activa y lecturas por `run_id`.
-- No hay evidencia de una ejecución científica MN5 que alimente progresivamente estas vistas con resultados reales; los tests y smoke locales no sustituyen ese gate.
+El gate de conectividad e inspección quedó **VERIFIED / READ-ONLY** el 2026-10-15:
+
+- El perfil Compose `vpn` levantó el túnel y creó `ppp0` dentro de su namespace de red; no se necesitó `sudo` en el host.
+- `glogin4.bsc.es` resolvió a través de los DNS entregados por la VPN (`84.88.52.35`/`84.88.52.36`) y la host key configurada fue aceptada por Paramiko con `RejectPolicy`.
+- El `SFTPReadOnlyInspector` del backend abrió una sesión SFTP real con la cuenta configurada, validó la raíz exacta `/gpfs/projects/bsc08/bsc001997/vcfs_1000geno/hilo_integrado_anotacion` y listó 56 entradas.
+- Se revisaron por SFTP únicamente metadatos y documentación autorizados. El manifiesto `benchmarks/multinode_baseline_47265106/` permitió leer `meta.json`, `dag_contracts.json`, `stages.tsv`, `summary.tsv` y `code_sha256.tsv` con límites de tamaño y hashes registrados; no se descargaron archivos de datos ni archivos comprimidos.
+- No se abrió shell remoto, no se ejecutó `sbatch`, `squeue`, `sacct` ni `scancel`, y no se realizó ninguna operación SFTP de escritura.
+
+El perfil Compose declara esos DNS mediante `HPC_VPN_DNS_PRIMARY` y `HPC_VPN_DNS_SECONDARY`. Docker conserva su resolver interno, pero lo configura para reenviar a los DNS BSC; así el `healthcheck` del contenedor `vpn`, el `worker-vpn` y el inspector usan el mismo endpoint sin que `openfortivpn` tenga que modificar `/etc/resolv.conf`. La verificación posterior dejó `vpn=healthy`, `worker-vpn=running` y repitió el inspector sin ningún parche de resolución.
+
+### Gate de ejecución científica
+
+Este gate queda **NOT RUN** por la frontera de seguridad de esta tarea. No se puede afirmar una corrida científica end-to-end, polling de Slurm ni publicación de resultados en MN5 a partir de la inspección read-only. Los tests locales, fixtures y mocks validan el contrato de seguimiento, pero no sustituyen una ejecución autorizada.
 
 ## Requisitos funcionales
 
@@ -190,14 +200,14 @@ flowchart LR
 
 ## Trabajo pendiente
 
-1. Sustituir la política de stages deshabilitados de demo por visibilidad derivada de configuración, dependencias y resultados.
-2. Modelar y mostrar estados de preparación/espera con señales reales de worker y Slurm.
-3. Corregir el progreso para que use el DAG y los estados persistidos, incluyendo `reused`, omisiones y descendientes bloqueados.
-4. Implementar refresco de artefactos/anotaciones en visor e información mediante SSE/polling sin perder selección ni duplicar filas.
-5. Habilitar cada uno de los cuatro modos sólo cuando su dato/mapping esté disponible y conservar los mensajes de ausencia/QC.
-6. Añadir endpoint y UI de historial autorizado con configuración resumida, estados, resultados y errores.
-7. Conectar descargas sólo a artifacts publicados y autorizados; retirar placeholders que parezcan funcionales.
-8. Probar el flujo con una ejecución MN5 autorizada y documentar el primer resultado real antes de ampliar la cobertura.
+1. `[x]` Sustituir la política de stages deshabilitados de demo por visibilidad derivada de configuración, dependencias y resultados.
+2. `[x]` Modelar y mostrar estados de preparación/espera con señales reales de worker y Slurm.
+3. `[x]` Corregir el progreso para que use el DAG y los estados persistidos, incluyendo `reused`, omisiones y descendientes bloqueados.
+4. `[x]` Implementar refresco de artefactos/anotaciones en visor e información mediante SSE/polling sin perder selección ni duplicar filas.
+5. `[x]` Habilitar cada uno de los cuatro modos sólo cuando su dato/mapping esté disponible y conservar los mensajes de ausencia/QC.
+6. `[x]` Añadir endpoint y UI de historial autorizado con configuración resumida, estados, resultados y errores.
+7. `[x]` Conectar descargas sólo a artifacts publicados y autorizados; retirar placeholders que parezcan funcionales.
+8. `[ ]` Probar el flujo con una ejecución MN5 autorizada y documentar el primer resultado real antes de ampliar la cobertura; **NOT RUN** en esta validación porque la frontera de MN5 disponible es estrictamente read-only.
 
 ## Fuera de alcance
 

@@ -30,6 +30,55 @@ def test_run_is_created_with_persisted_stage_graph(client, session):
     assert session.query(RunStage).count() == 18
 
 
+def test_run_history_keeps_two_runs_of_one_protein_independent(client):
+    protein_id = _create_protein(client)
+    first = client.post("/api/v1/runs", json={"protein_id": protein_id})
+    assert first.status_code == 201
+    first_id = first.json()["id"]
+    assert client.post(f"/api/v1/runs/{first_id}/cancel").status_code == 200
+
+    second = client.post(
+        "/api/v1/runs",
+        json={
+            "protein_id": protein_id,
+            "variants": [{"aa_position": 1, "aa_ref": "A", "aa_alt": "C"}],
+        },
+    )
+    assert second.status_code == 201
+    second_id = second.json()["id"]
+
+    history = client.get("/api/v1/runs")
+
+    assert history.status_code == 200
+    payload = history.json()
+    by_id = {item["id"]: item for item in payload}
+    assert {first_id, second_id}.issubset(by_id)
+    assert by_id[first_id]["status"] == "cancelled"
+    assert by_id[first_id]["requested_variants"] == []
+    assert by_id[second_id]["requested_variants"] == [
+        {"aa_position": 1, "aa_ref": "A", "aa_alt": "C"}
+    ]
+    assert len(by_id[first_id]["stages"]) == len(by_id[second_id]["stages"]) == 18
+
+
+def test_run_history_supports_authorized_pagination(client):
+    protein_id = _create_protein(client)
+    run_ids = []
+    for _ in range(3):
+        created = client.post("/api/v1/runs", json={"protein_id": protein_id})
+        assert created.status_code == 201
+        run_ids.append(created.json()["id"])
+        assert client.post(f"/api/v1/runs/{run_ids[-1]}/cancel").status_code == 200
+
+    first_page = client.get("/api/v1/runs?limit=2&offset=0")
+    second_page = client.get("/api/v1/runs?limit=2&offset=2")
+
+    assert first_page.status_code == second_page.status_code == 200
+    assert len(first_page.json()) == 2
+    assert len(second_page.json()) == 1
+    assert {item["id"] for item in first_page.json() + second_page.json()} == set(run_ids)
+
+
 def test_cpu_only_remote_run_uses_selected_stage_resources(client):
     from app.core.config import Settings, get_settings
     from app.main import app
@@ -215,6 +264,75 @@ def test_annotations_return_only_published_rows(client, session):
     assert "protein_identity" not in payload["pending_stage_ids"]
 
 
+def test_run_provenance_redacts_nested_sensitive_keys(client, session):
+    protein_id = _create_protein(client)
+    run_id = client.post("/api/v1/runs", json={"protein_id": protein_id}).json()["id"]
+    run = session.get(Run, run_id)
+    stage = next(item for item in run.stages if item.stage_id == "protein_identity")
+    result = StageResult(
+        protein_id=protein_id,
+        stage_id=stage.stage_id,
+        cache_key="e" * 64,
+        status="success",
+        provenance={
+            "tool": "verified-test",
+            "password": "secret-value",
+            "nested": {
+                "api_key": "abc123",
+                "client_secret_key": "nested-secret",
+                "oauth_token_value": "nested-token",
+                "db_password_hash": "nested-password",
+                "path": "/gpfs/private/result",
+            },
+            "list": [{"private_key_material": "list-secret"}],
+        },
+        owner_id=run.owner_id,
+        project_id=run.project_id,
+    )
+    session.add(result)
+    session.flush()
+    stage.stage_result_id = result.id
+    stage.status = RunStageStatus.SUCCESS
+    session.commit()
+
+    response = client.get(f"/api/v1/runs/{run_id}")
+
+    assert response.status_code == 200
+    provenance = response.json()["stages"][0]["provenance"]
+    assert provenance["tool"] == "verified-test"
+    assert provenance["password"] == "<redacted>"
+    assert provenance["nested"]["api_key"] == "<redacted>"
+    assert provenance["nested"]["client_secret_key"] == "<redacted>"
+    assert provenance["nested"]["oauth_token_value"] == "<redacted>"
+    assert provenance["nested"]["db_password_hash"] == "<redacted>"
+    assert provenance["list"][0]["private_key_material"] == "<redacted>"
+    assert "/gpfs/" not in str(provenance)
+
+
+def test_retryable_preflight_error_is_not_projected_as_terminal_run_error(client, session):
+    protein_id = _create_protein(client)
+    run_id = client.post("/api/v1/runs", json={"protein_id": protein_id}).json()["id"]
+    run = session.get(Run, run_id)
+    assert run is not None and run.preparation is not None
+    stage = next(item for item in run.stages if item.stage_id == "protein_identity")
+    run.preparation.status = "blocked"
+    run.preparation.error_code = "temporary_prerequisite_unavailable"
+    run.preparation.error_message = "retry later"
+    stage.preflight_status = "blocked"
+    stage.preflight_error_code = "temporary_prerequisite_unavailable"
+    stage.preflight_error_message = "retry later"
+    session.commit()
+
+    response = client.get(f"/api/v1/runs/{run_id}")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "pending"
+    assert payload["error_code"] is None
+    assert payload["error_message"] is None
+    assert payload["preparation"]["status"] == "blocked"
+
+
 def test_worker_finishes_failed_run_after_descendants_are_skipped(client, session):
     protein_id = _create_protein(client)
     run_id = client.post("/api/v1/runs", json={"protein_id": protein_id}).json()["id"]
@@ -226,6 +344,10 @@ def test_worker_finishes_failed_run_after_descendants_are_skipped(client, sessio
     assert run.status == "failed"
     assert all(stage.status in {"failed", "skipped"} for stage in run.stages)
     assert session.scalar(select(ActiveRunSlot).where(ActiveRunSlot.run_id == run_id)) is None
+    history = client.get("/api/v1/runs").json()
+    failed_summary = next(item for item in history if item["id"] == run_id)
+    assert failed_summary["error_code"] == "stage_execution_unavailable"
+    assert "no reviewed executable adapter" in failed_summary["error_message"]
 
 
 def test_ready_states_require_all_dependencies(client, session):

@@ -47,15 +47,16 @@ def create_run_endpoint(
 @router.get("", response_model=list[RunRead])
 def list_runs(
     limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
     session: Session = Depends(get_db),
     principal: Principal = Depends(get_principal),
 ) -> list[RunRead]:
-    """Return the owner's run history without collapsing shared proteins."""
+    """Return one page of authorized run history without collapsing shared proteins."""
 
     from sqlalchemy import select
     from sqlalchemy.orm import selectinload
 
-    runs = session.scalars(
+    statement = (
         select(Run)
         .options(
             selectinload(Run.configuration),
@@ -65,10 +66,15 @@ def list_runs(
             .selectinload(StageResult.artifacts),
             selectinload(Run.uploads),
         )
-        .where((Run.owner_id == principal.user_id) | (Run.project_id == principal.project_id))
-        .order_by(Run.created_at.desc())
+        .order_by(Run.created_at.desc(), Run.id.desc())
+        .offset(offset)
         .limit(limit)
     )
+    if not principal.is_admin:
+        statement = statement.where(
+            (Run.owner_id == principal.user_id) | (Run.project_id == principal.project_id)
+        )
+    runs = session.scalars(statement)
     return [serialize_run(run) for run in runs]
 
 

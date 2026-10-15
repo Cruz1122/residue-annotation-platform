@@ -7,7 +7,8 @@ export type StageStatus =
   | 'reused'
   | 'failed'
   | 'skipped'
-  | 'cancelled';
+  | 'cancelled'
+  | 'disabled';
 
 export interface ProteinAlias {
   source: string;
@@ -76,6 +77,7 @@ export interface RunStage {
   cache_key: string | null;
   cache_factors: Record<string, unknown>;
   reuse_reason: Record<string, unknown> | null;
+  provenance: Record<string, unknown>;
   omission_reason: string | null;
   slurm_job_id: string | null;
   error_code: string | null;
@@ -138,6 +140,8 @@ export interface Run {
   protein_id: string;
   status: 'pending' | 'running' | 'success' | 'failed' | 'cancel_requested' | 'cancelled';
   requested_variants: VariantRequest[];
+  error_code: string | null;
+  error_message: string | null;
   configuration: RunConfiguration | null;
   preparation: RunPreparation | null;
   created_at: string | null;

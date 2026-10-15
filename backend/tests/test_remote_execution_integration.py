@@ -322,6 +322,11 @@ class FakeTransportUnavailableDuringIngest(FakeCompletedRemote):
         raise HPCTransportError("SSH transport is unavailable")
 
 
+class FakeRunningRemote(FakeCompletedRemote):
+    def status(self, job_id: str) -> JobStatus:
+        return JobStatus(job_id=job_id, state=JobState.RUNNING)
+
+
 class FakeAuthenticationStatusRemote(FakeCompletedRemote):
     def status(self, _job_id: str) -> JobStatus:
         raise AuthenticationException("authentication failed")
@@ -441,9 +446,54 @@ def test_remote_transport_outage_keeps_accepted_stage_retryable(
     session.expire_all()
     persisted_stage = session.get(RunStage, stage.id)
     assert persisted_stage is not None
-    assert persisted_stage.status == "running"
+    # A transport outage after submission preserves the accepted job as queued;
+    # the next poll decides whether Slurm has really started it.
+    assert persisted_stage.status == "queued"
     assert persisted_stage.error_code is None
     assert session.scalar(select(StageResult)) is None
+
+
+def test_remote_running_observation_promotes_stage_and_run(client, session, tmp_path: Path):
+    protein = client.post(
+        "/api/v1/proteins",
+        json={
+            "sequence": SEQUENCE,
+            "aliases": [{"source": "uniprot", "identifier": "P00001"}],
+        },
+    )
+    assert protein.status_code == 201
+    created_run = client.post("/api/v1/runs", json={"protein_id": protein.json()["id"]})
+    assert created_run.status_code == 201
+
+    settings = Settings(
+        app_env="test",
+        database_url="sqlite://",
+        artifact_root=tmp_path / "artifacts",
+        hpc_remote_root="/gpfs/test",
+    )
+    stage = claim_ready_stage(session, settings)
+    assert stage is not None
+    remote = FakeRunningRemote(created_run.json()["id"])
+    _prepare_remote(remote, stage)
+    executor = SSHStageExecutor.__new__(SSHStageExecutor)
+    executor.settings = settings
+    executor.client = remote
+
+    executor.submit_stage(session, stage)
+    assert stage.status == "queued"
+    assert session.get(Run, stage.run_id).status == "pending"
+
+    assert executor.poll_stage(session, stage) is True
+
+    session.expire_all()
+    persisted_stage = session.get(RunStage, stage.id)
+    persisted_run = session.get(Run, stage.run_id)
+    assert persisted_stage is not None
+    assert persisted_run is not None
+    assert persisted_stage.status == "running"
+    assert persisted_stage.started_at is not None
+    assert persisted_run.status == "running"
+    assert persisted_run.started_at is not None
 
 
 @pytest.mark.parametrize(
@@ -665,6 +715,10 @@ def test_submit_poll_and_ingest_persist_a_linked_stage_result(client, session, t
     assert persisted_stage is not None
     assert persisted_stage.status == "success"
     assert persisted_stage.stage_result_id is not None
+    persisted_run = session.get(Run, created_run.json()["id"])
+    assert persisted_run is not None
+    assert persisted_run.status == "running"
+    assert persisted_run.started_at is not None
 
     result = session.get(StageResult, persisted_stage.stage_result_id)
     assert result is not None

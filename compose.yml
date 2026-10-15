@@ -97,6 +97,13 @@ services:
       HPC_VPN_RECONNECT_SECONDS: ${HPC_VPN_RECONNECT_SECONDS:-60}
       HPC_SSH_HOST: ${HPC_SSH_HOST:-}
       HPC_SSH_PORT: ${HPC_SSH_PORT:-22}
+    # BSC publishes the login DNS through the VPN. Keep the Docker resolver
+    # for gateway startup and use the explicit BSC servers for post-tunnel
+    # SSH health checks; the VPN image cannot rewrite resolv.conf because its
+    # root filesystem is intentionally read-only.
+    dns:
+      - ${HPC_VPN_DNS_PRIMARY:-84.88.52.35}
+      - ${HPC_VPN_DNS_SECONDARY:-84.88.52.36}
     volumes:
       - type: bind
         # /dev/null keeps the config mount optional when credentials come

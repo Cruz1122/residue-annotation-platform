@@ -452,7 +452,9 @@ def test_ambiguous_submit_persists_job_id_for_polling_without_retrying_submit(
         .where(RunStage.stage_id == "sequence_frustration")
     )
     assert stage is not None
-    assert stage.status == RunStageStatus.RUNNING
+    # An accepted submission has not proved execution yet; polling must observe
+    # Slurm RUNNING before the product exposes that phase.
+    assert stage.status == RunStageStatus.QUEUED
     assert stage.slurm_job_id == "job-accepted"
     assert executor.submit_calls == 1
 

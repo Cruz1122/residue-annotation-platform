@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { runPhase } from './run-phase.js';
 import { presentRunStages, progressSummary, validateDisabledStages } from './stage-visibility.js';
 
 const DEPENDENCIES = {
@@ -72,4 +73,16 @@ test('the counter includes all registry stages unless the backend marks one disa
   assert.equal(summary.enabled, 18);
   assert.equal(summary.completed, 1);
   assert.equal(summary.percentage, 6);
+});
+
+test('retryable preparation stays visible as pending instead of terminal failure', () => {
+  const phase = runPhase({
+    status: 'pending',
+    error_message: 'retry later',
+    preparation: { status: 'blocked', error_message: 'Falta el caché externo.' },
+    stages: [],
+  });
+  assert.equal(phase.label, 'Preparación pendiente');
+  assert.equal(phase.detail, 'Falta el caché externo.');
+  assert.equal(phase.tone, 'failed');
 });
