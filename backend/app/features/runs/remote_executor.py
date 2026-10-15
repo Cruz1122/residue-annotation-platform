@@ -14,6 +14,7 @@ from uuid import uuid4
 
 from paramiko.ssh_exception import AuthenticationException, BadHostKeyException
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.config import Settings
@@ -40,11 +41,17 @@ from app.infrastructure.hpc.base import (
     HPCTransportError,
     JobRequest,
     JobState,
+    PrefetchRequest,
+    PrefetchResult,
 )
 from app.infrastructure.hpc.factory import build_hpc_client
 from app.infrastructure.hpc.native import NativeSlurmClient
 from app.infrastructure.hpc.ssh import SSHConfigurationError, SSHSlurmClient, _remote_path_under
-from app.infrastructure.hpc.transfer import InputTransferError, remote_pipeline_input_path
+from app.infrastructure.hpc.transfer import (
+    InputTransferError,
+    remote_pipeline_input_namespace,
+    remote_pipeline_input_path,
+)
 
 
 class RemoteStageExecutionError(RuntimeError):
@@ -52,6 +59,19 @@ class RemoteStageExecutionError(RuntimeError):
 
 
 _DEFERRED_ARTIFACT_CLEANUP_KEY = "remote_executor.deferred_artifact_cleanup"
+
+
+def _is_stage_result_cache_conflict(error: IntegrityError) -> bool:
+    """Identify only the cache publication uniqueness constraint."""
+
+    original = getattr(error, "orig", None)
+    constraint_name = getattr(getattr(original, "diag", None), "constraint_name", None)
+    if constraint_name == "uq_stage_result_cache":
+        return True
+    message = str(original or error).lower()
+    return "uq_stage_result_cache" in message or (
+        "unique constraint" in message and "stage_results" in message
+    )
 
 
 class SSHStageExecutor:
@@ -99,14 +119,31 @@ class SSHStageExecutor:
     def _script(self, run: Run, stage: RunStage, accession: str, marker_path: str) -> str:
         python = shlex.quote(self.settings.hpc_pipeline_python)
         main = shlex.quote(self.settings.hpc_pipeline_main)
-        # The remote CLI's positional argument is the scientific identity
-        # (for example ``P01130``), not the platform's internal UUID. The
-        # platform run id remains local state and is already used to isolate
-        # the marker directory under ``.platform_jobs``.
-        requested_protein = shlex.quote(accession)
+        # The remote CLI's positional argument selects the uploads namespace.
+        # Keep that directory isolated per platform run; the scientific
+        # accession is passed explicitly below and remains the identity
+        # authority. The platform run id also isolates the local marker under
+        # ``.platform_jobs``.
+        requested_protein = shlex.quote(remote_pipeline_input_namespace(run.id))
         quoted_accession = shlex.quote(accession)
         stage_id = shlex.quote(stage.stage_id)
         marker = shlex.quote(marker_path)
+        skip_stage_ids = {
+            definition.id
+            for definition in STAGE_BY_ID.values()
+            if (definition.gpu or 0) > self.settings.hpc_pipeline_gpu_budget
+        }
+        if (
+            run.configuration is not None
+            and run.configuration.structure_source == "provided_pdb"
+            and not self.settings.hpc_pipeline_pdb_substitution_enabled
+        ):
+            skip_stage_ids.update({"structure_modeling", "conformational_ensemble"})
+        skip_flags = " ".join(
+            f"--skip-stage {shlex.quote(skip_stage_id)}" for skip_stage_id in sorted(skip_stage_ids)
+        )
+        if skip_flags:
+            skip_flags = f" {skip_flags}"
         return "\n".join(
             [
                 "set -u",
@@ -115,7 +152,7 @@ class SSHStageExecutor:
                     f"{python} {main} {requested_protein} --accession {quoted_accession} "
                     f"--stages {stage_id} --max-parallel "
                     f"{self.settings.hpc_pipeline_max_parallel} --cpu-budget "
-                    f"{self.settings.hpc_pipeline_cpu_budget} --fail-fast"
+                    f"{self.settings.hpc_pipeline_cpu_budget} --fail-fast{skip_flags}"
                 ),
                 "pipeline_status=$?",
                 "result_run=",
@@ -138,6 +175,7 @@ class SSHStageExecutor:
     ) -> dict[str, str]:
         environment: dict[str, str] = {}
         variables = {"fasta": "PIPELINE_SELECTED_FASTA", "structure": "PIPELINE_SELECTED_PDB"}
+        input_namespace = remote_pipeline_input_namespace(run.id)
         for upload in run.uploads:
             if upload.transfer_status != "uploaded":
                 continue
@@ -152,7 +190,7 @@ class SSHStageExecutor:
             try:
                 expected_path = remote_pipeline_input_path(
                     self.settings,
-                    accession,
+                    input_namespace,
                     run.id,
                     upload.id,
                     Path(upload.original_filename).suffix.lower(),
@@ -242,6 +280,53 @@ class SSHStageExecutor:
             "the protein needs a UniProt accession before remote execution"
         )
 
+    def prepare_external(
+        self,
+        session: Session,
+        stage: RunStage,
+        requirements: tuple[str, ...],
+    ) -> PrefetchResult:
+        """Prepare only the external caches required by the selected stage."""
+
+        if not requirements:
+            return PrefetchResult(status="success", requirements=())
+        run = stage.run
+        accession = self._accession(run)
+        preparation_key = (
+            run.preparation.preparation_key
+            if run.preparation is not None and run.preparation.preparation_key
+            else hashlib.sha256(
+                json.dumps(
+                    {
+                        "run_id": run.id,
+                        "stage_id": stage.stage_id,
+                        "requirements": list(requirements),
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+        )
+        job_directory = self._job_directory(run.id)
+        self.client.ensure_directory(job_directory)
+        receipt_path = self._remote_child(
+            job_directory,
+            f"{stage.stage_id}.prefetch.{preparation_key}.result",
+        )
+        environment = self._pipeline_input_environment(run, accession, stage)
+        environment["PIPELINE_PREFETCH_REQUIREMENTS_JSON"] = json.dumps(
+            list(requirements), ensure_ascii=False, separators=(",", ":")
+        )
+        environment["PIPELINE_PREPARATION_KEY"] = preparation_key
+        request = PrefetchRequest(
+            accession=accession,
+            requirements=requirements,
+            working_directory=self.root,
+            environment={"PYTHONUNBUFFERED": "1", **environment},
+            receipt_path=receipt_path,
+        )
+        return self.client.prepare_external(request)
+
     def submit_stage(self, session: Session, stage: RunStage) -> None:
         definition = STAGE_BY_ID[stage.stage_id]
         if (definition.cpu or 1) > self.settings.hpc_pipeline_cpu_budget:
@@ -253,6 +338,13 @@ class SSHStageExecutor:
                 f"configured GPU budget is below the {stage.stage_id} contract"
             )
         run = stage.run
+        if self.settings.hpc_input_transfer_enabled and not any(
+            upload.input_type == "fasta" and upload.transfer_status == "uploaded"
+            for upload in run.uploads
+        ):
+            raise RemoteStageExecutionError(
+                "remote execution requires an attached FASTA input for the confirmed sequence"
+            )
         cache_key, _ = _validated_local_cache_plan(stage)
         accession = self._accession(run)
         input_environment = self._pipeline_input_environment(run, accession, stage)
@@ -288,6 +380,16 @@ class SSHStageExecutor:
         )
         handle = self.client.submit(request)
         stage.slurm_job_id = handle.job_id
+        if stage.status == RunStageStatus.QUEUED:
+            # The row lock acquired by ``reserve_remote_submission`` remains
+            # held while the scheduler call is in flight. Publish the job id
+            # and RUNNING state in the same commit so cancellation cannot
+            # terminalize a queued stage after Slurm has accepted the job.
+            transition_stage(session, stage, RunStageStatus.RUNNING)
+        elif stage.status != RunStageStatus.RUNNING:
+            raise RemoteStageExecutionError(
+                "remote submission completed for a stage that is no longer active"
+            )
         session.commit()
 
     def poll_stage(self, session: Session, stage: RunStage) -> bool:
@@ -605,11 +707,7 @@ class SSHStageExecutor:
 
         store = ArtifactStore(self.settings)
         local_cache_key, local_cache_factors = _validated_local_cache_plan(stage)
-        cache_key = str(manifest["cache_key"])
-        if cache_key != local_cache_key:
-            raise RemoteStageExecutionError(
-                "remote cache key does not match the confirmed configuration"
-            )
+        remote_cache_key = str(manifest["cache_key"])
         manifest_artifact_names = {str(name) for name in manifest["artifacts"]}
         expected_artifact_names = {
             str(artifact_type) for artifact_type in STAGE_BY_ID[stage.stage_id].produced_artifacts
@@ -626,7 +724,7 @@ class SSHStageExecutor:
         reusable = self._find_reusable_result(
             session,
             stage,
-            cache_key,
+            remote_cache_key,
             store,
             expected_artifact_types=expected_artifact_types,
         )
@@ -638,7 +736,7 @@ class SSHStageExecutor:
             # validation and download step. A bad provenance file must not
             # become a committed deletion when poll_stage marks the stage
             # failed afterward.
-            self._purge_stale_results(session, stage, cache_key)
+            self._purge_stale_results(session, stage, remote_cache_key)
 
             annotations_relative = manifest.get("annotations")
             annotations_path = (
@@ -671,11 +769,20 @@ class SSHStageExecutor:
                 raise RemoteStageExecutionError("remote provenance is unreadable") from exc
             if not isinstance(provenance, dict):
                 raise RemoteStageExecutionError("remote provenance must be an object")
-            remote_binding = _validate_remote_provenance_binding(
-                stage,
-                cache_key,
-                provenance,
-            )
+            if isinstance(provenance.get("platform_binding"), dict):
+                remote_binding = _validate_remote_provenance_binding(
+                    stage,
+                    local_cache_key,
+                    provenance,
+                )
+            else:
+                remote_binding = _validate_legacy_remote_cache_contract(
+                    stage,
+                    local_cache_key,
+                    remote_cache_key,
+                    manifest,
+                    provenance,
+                )
 
             # Each ingest attempt owns a distinct namespace. If a stale worker
             # loses a database race, its rollback cleanup cannot remove files that
@@ -703,7 +810,7 @@ class SSHStageExecutor:
             result = StageResult(
                 protein_id=stage.run.protein_id,
                 stage_id=stage.stage_id,
-                cache_key=cache_key,
+                cache_key=remote_cache_key,
                 status="success",
                 provenance={
                     "source": "mn5-slurm",
@@ -723,8 +830,14 @@ class SSHStageExecutor:
                         for name, entry in manifest["artifacts"].items()
                         if entry.get("sha256") is None and entry.get("size") is not None
                     ),
-                    "cache_key": cache_key,
+                    "cache_key": remote_cache_key,
+                    "platform_cache_key": local_cache_key,
                     "cache_factors": local_cache_factors,
+                    "remote_cache_key": remote_cache_key,
+                    "remote_cache_payload": _redact_remote_paths(
+                        _remote_operational_block(provenance).get("cache_payload", {}),
+                        self.root,
+                    ),
                     "required_artifacts": sorted(expected_artifact_types),
                 },
                 owner_id=stage.run.owner_id,
@@ -742,7 +855,20 @@ class SSHStageExecutor:
                     )
                 )
             session.add(result)
-            session.flush()
+            try:
+                session.flush()
+            except IntegrityError as exc:
+                recovered = self._recover_concurrent_cache_publication(
+                    session,
+                    stage,
+                    remote_cache_key,
+                    store,
+                    stored_keys,
+                    exc,
+                )
+                if recovered is not None:
+                    return recovered
+                raise
 
             # Parse and insert the published rows in bounded batches instead of
             # materializing the whole file plus every row in memory.
@@ -783,7 +909,20 @@ class SSHStageExecutor:
             # Publication becomes visible in the same transaction that links
             # the verified result to the run stage in ``poll_stage``.
             result.published_at = now_utc()
-            session.flush()
+            try:
+                session.flush()
+            except IntegrityError as exc:
+                recovered = self._recover_concurrent_cache_publication(
+                    session,
+                    stage,
+                    remote_cache_key,
+                    store,
+                    stored_keys,
+                    exc,
+                )
+                if recovered is not None:
+                    return recovered
+                raise
             return result.id, False
         except Exception:
             session.info.pop(_DEFERRED_ARTIFACT_CLEANUP_KEY, None)
@@ -794,6 +933,42 @@ class SSHStageExecutor:
                 except OSError:
                     pass
             raise
+
+    def _recover_concurrent_cache_publication(
+        self,
+        session: Session,
+        stage: RunStage,
+        cache_key: str,
+        store: ArtifactStore,
+        stored_keys: list[str],
+        error: IntegrityError,
+    ) -> tuple[str, bool] | None:
+        """Reuse a committed winner when two workers publish one key.
+
+        The unique database constraint is the serialization primitive. A
+        losing transaction must roll back before querying the winner; its
+        temporary downloads are then safe to remove because they are stored
+        under a per-ingest namespace.
+        """
+
+        if not _is_stage_result_cache_conflict(error):
+            return None
+        session.rollback()
+        winner = self._find_reusable_result(
+            session,
+            stage,
+            cache_key,
+            store,
+            expected_artifact_types=expected_artifact_types_for_stage(stage.stage_id),
+        )
+        if winner is None:
+            return None
+        for storage_key in stored_keys:
+            try:
+                store.resolve(storage_key).unlink(missing_ok=True)
+            except (ArtifactPathError, OSError):
+                continue
+        return winner.id, True
 
     def _consume_annotation_file(
         self,
@@ -940,7 +1115,9 @@ class SSHStageExecutor:
             raise RemoteStageExecutionError("remote artifact size does not match its manifest")
         try:
             os.replace(temporary, target)
-            os.chmod(target, 0o600)
+            # The backend API and the VPN worker use different non-root UIDs
+            # but share the internal app GID on the artifact volume.
+            os.chmod(target, 0o640)
         except Exception:
             temporary.unlink(missing_ok=True)
             raise
@@ -1176,6 +1353,113 @@ def _validate_remote_provenance_binding(
             "remote provenance does not match the confirmed run configuration"
         )
     return binding
+
+
+def _validate_legacy_remote_cache_contract(
+    stage: RunStage,
+    platform_cache_key: str,
+    remote_cache_key: str,
+    manifest: dict[str, Any],
+    provenance: dict[str, Any],
+) -> dict[str, object]:
+    """Validate the deployed MN5 provenance contract without weakening identity checks.
+
+    The checked-out MN5 pipeline predates ``platform_binding``. It still
+    publishes a self-contained ``stage-cache-v2`` payload, so the adapter can
+    bind that remote identity to the confirmed local run by checking the
+    canonical sequence, query/reference axes, dependencies, parameters, and
+    the manifest's canonical-axis metadata. Remote code and resource hashes
+    remain part of the remote key and are retained as provenance; they are not
+    guessed from the local web checkout.
+    """
+
+    configuration = stage.run.configuration
+    if configuration is None:
+        raise RemoteStageExecutionError("remote result requires a confirmed run configuration")
+    operational = _remote_operational_block(provenance)
+    payload = operational.get("cache_payload")
+    if not isinstance(payload, dict):
+        raise RemoteStageExecutionError("remote provenance lacks its cache payload")
+    if payload.get("schema") != "stage-cache-v2":
+        raise RemoteStageExecutionError("remote provenance cache schema is unsupported")
+    if payload.get("stage_id") != stage.stage_id:
+        raise RemoteStageExecutionError("remote provenance cache stage is invalid")
+    if str(payload.get("contract_version")) != STAGE_BY_ID[stage.stage_id].stage_version:
+        raise RemoteStageExecutionError("remote provenance stage contract is incompatible")
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode()
+    if hashlib.sha256(encoded).hexdigest() != remote_cache_key:
+        raise RemoteStageExecutionError("remote provenance cache key is not self-consistent")
+    if operational.get("cache_key") != remote_cache_key:
+        raise RemoteStageExecutionError("remote provenance cache key does not match its manifest")
+
+    expected_sequence_sha256 = configuration.sequence_sha256
+    metadata = manifest.get("metadata")
+    if (
+        not isinstance(metadata, dict)
+        or metadata.get("canonical_sequence_sha256") != expected_sequence_sha256
+    ):
+        raise RemoteStageExecutionError(
+            "remote result canonical sequence does not match the confirmed configuration"
+        )
+    if operational.get("sequence_sha256") != expected_sequence_sha256:
+        raise RemoteStageExecutionError(
+            "remote provenance sequence does not match the confirmed configuration"
+        )
+    for field in ("sequence_sha256", "query_sequence_sha256", "reference_sequence_sha256"):
+        if payload.get(field) != expected_sequence_sha256:
+            raise RemoteStageExecutionError(
+                f"remote provenance {field} does not match the confirmed configuration"
+            )
+
+    local_factors = stage.cache_factors if isinstance(stage.cache_factors, dict) else {}
+    expected_dependencies = local_factors.get("dependency_cache_keys", {})
+    if payload.get("dependency_cache_keys") != expected_dependencies:
+        raise RemoteStageExecutionError(
+            "remote provenance dependency identities do not match the confirmed configuration"
+        )
+    expected_parameters = local_factors.get("scientific_parameters", {})
+    remote_parameters = payload.get("scientific_parameters")
+    if not isinstance(remote_parameters, dict) or any(
+        remote_parameters.get(key) != value for key, value in expected_parameters.items()
+    ):
+        raise RemoteStageExecutionError(
+            "remote provenance scientific parameters do not match the confirmed configuration"
+        )
+
+    return {
+        "schema": "mn5-cache-binding-v1",
+        "platform_cache_key": platform_cache_key,
+        "remote_cache_key": remote_cache_key,
+        "stage_id": stage.stage_id,
+        "configuration_id": configuration.id,
+        "run_id": stage.run_id,
+        "sequence_sha256": expected_sequence_sha256,
+        "dependency_cache_keys": expected_dependencies,
+        # MN5 may enrich an empty user parameter set with pinned resource
+        # fingerprints (for example PharmCAT/PharmVar bundle hashes). Every
+        # confirmed parameter must still match exactly, while those remote
+        # resource identities remain part of the audited remote payload.
+        "scientific_parameters": remote_parameters,
+        "confirmed_scientific_parameters": expected_parameters,
+        "remote_stage_code_sha256": payload.get("stage_code_sha256"),
+        "remote_resource_identity": payload.get("resource_identity"),
+    }
+
+
+def _remote_operational_block(provenance: dict[str, Any]) -> dict[str, Any]:
+    """Return the deployed operational provenance block.
+
+    Current MN5 results wrap the cache identity below ``operational``. The
+    fallback preserves compatibility with the earlier flat shape while still
+    requiring the same complete cache-payload checks at the call site.
+    """
+
+    operational = provenance.get("operational")
+    if operational is None:
+        return provenance
+    if not isinstance(operational, dict):
+        raise RemoteStageExecutionError("remote operational provenance must be an object")
+    return operational
 
 
 def _redact_remote_paths(value: Any, remote_root: str) -> Any:

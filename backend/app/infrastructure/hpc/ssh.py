@@ -20,11 +20,16 @@ from app.core.config import Settings
 from app.infrastructure.hpc.archive import ArchiveError, BoundedTarWriter
 from app.infrastructure.hpc.base import (
     HPCConfigurationError,
+    HPCSubmissionAmbiguousError,
     HPCTransportError,
     JobHandle,
     JobRequest,
     JobState,
     JobStatus,
+    PrefetchRequest,
+    PrefetchResult,
+    parse_prefetch_result,
+    render_prefetch_command,
 )
 
 
@@ -246,6 +251,11 @@ class SSHSlurmClient:
                 output = stdout.read().decode("utf-8", errors="replace").strip()
                 error = stderr.read().decode("utf-8", errors="replace").strip()
                 if exit_status != 0:
+                    if exit_status == 75:
+                        match = re.search(r"SUBMISSION_AMBIGUOUS:([A-Za-z0-9_-]+)", error)
+                        if match:
+                            raise HPCSubmissionAmbiguousError(match.group(1))
+                        raise HPCTransportError("Slurm submission receipt is ambiguous")
                     message = error or output or f"remote command exited with status {exit_status}"
                     raise RuntimeError(message[:1000])
                 return output
@@ -476,6 +486,14 @@ class SSHSlurmClient:
             value = self.read_text(receipt_path, 256).strip()
         except FileNotFoundError:
             return None
+        except RuntimeError as exc:
+            # ``read_bytes`` validates every component before opening the
+            # file. A receipt is expected not to exist on the first submit;
+            # preserve that case without weakening path validation for any
+            # other remote result.
+            if str(exc) == "remote path component is unavailable":
+                return None
+            raise
         if not value:
             raise RuntimeError("Slurm submission receipt is empty")
         job_id = value.splitlines()[0].split(";", 1)[0].strip()
@@ -508,12 +526,70 @@ class SSHSlurmClient:
                 "  ''|*[!A-Za-z0-9_-]*) exit 78 ;;",
                 "esac",
                 "umask 077",
-                'printf "%s\\n" "$job_id" > "$temporary"',
-                'mv -f -- "$temporary" "$receipt"',
+                'if ! printf "%s\\n" "$job_id" > "$temporary"; then',
+                '  printf "SUBMISSION_AMBIGUOUS:%s\\n" "$job_id" >&2',
+                "  exit 75",
+                "fi",
+                'if ! mv -f -- "$temporary" "$receipt"; then',
+                '  printf "SUBMISSION_AMBIGUOUS:%s\\n" "$job_id" >&2',
+                "  exit 75",
+                "fi",
                 'printf "%s\\n" "$job_id"',
             ]
         )
         return self._command(script)
+
+    def _read_prefetch_receipt(
+        self,
+        receipt_path: str,
+        request: PrefetchRequest,
+    ) -> PrefetchResult | None:
+        try:
+            output = self.read_text(receipt_path, 64 * 1024)
+        except FileNotFoundError:
+            return None
+        except RuntimeError as exc:
+            if str(exc) == "remote path component is unavailable":
+                return None
+            raise
+        result = parse_prefetch_result(output, request)
+        return result if result.status == "success" else None
+
+    def _prepare_with_receipt(self, request: PrefetchRequest) -> str:
+        receipt = _remote_path_under(self.settings.hpc_remote_root, request.receipt_path or "")
+        temporary = _remote_path_under(
+            self.settings.hpc_remote_root,
+            f"{receipt}.tmp-{uuid4().hex}",
+        )
+        command = render_prefetch_command(self.settings.hpc_pipeline_prefetch_command, request)
+        script = "\n".join(
+            [
+                "set -eu",
+                f"temporary={shlex.quote(temporary)}",
+                f"receipt={shlex.quote(receipt)}",
+                "trap 'rm -f -- \"$temporary\"' EXIT",
+                f"output=$({command})",
+                "umask 077",
+                'printf "%s\\n" "$output" > "$temporary"',
+                'mv -f -- "$temporary" "$receipt"',
+                'printf "%s\\n" "$output"',
+            ]
+        )
+        return self._command(script)
+
+    def prepare_external(self, request: PrefetchRequest) -> PrefetchResult:
+        """Run the explicitly configured, selective pipeline prefetch alias."""
+
+        if request.receipt_path:
+            existing = self._read_prefetch_receipt(request.receipt_path, request)
+            if existing is not None:
+                return existing
+            output = self._prepare_with_receipt(request)
+        else:
+            output = self._command(
+                render_prefetch_command(self.settings.hpc_pipeline_prefetch_command, request)
+            )
+        return parse_prefetch_result(output, request)
 
     def submit(self, request: JobRequest) -> JobHandle:
         workdir = _remote_path_under(self.settings.hpc_remote_root, request.working_directory)

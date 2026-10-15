@@ -8,7 +8,7 @@ from app.features.runs.cache import (
     find_verified_cache_hit,
     planned_stage_cache_identity,
 )
-from app.features.runs.models import Artifact, Run, RunStage, StageResult
+from app.features.runs.models import Artifact, Run, RunStage, StageResult, Upload
 from app.features.runs.state import RunStageStatus, RunStatus
 from app.features.runs.worker_service import (
     claim_ready_stage,
@@ -197,6 +197,82 @@ def test_provided_structure_satisfies_the_registry_dependency_without_af3(client
     assert states["variant_ddg"] == RunStageStatus.SKIPPED
     omissions = {item["stage_id"]: item for item in run.configuration.omitted_stages}
     assert omissions["conformational_ensemble"]["reason"] == "technical_prerequisite_not_provided"
+
+
+def test_remote_gpp_pdb_run_is_cpu_only_and_generates_canonical_fasta(
+    client, session, tmp_path: Path
+):
+    protein = client.post(
+        "/api/v1/proteins",
+        json={
+            "sequence": "ACDE",
+            "aliases": [{"source": "uniprot", "identifier": "P00001"}],
+        },
+    )
+    assert protein.status_code == 201
+    structure_id = _upload(client, "model.pdb", _pdb("ACDE"), "structure")
+    remote_settings = Settings(
+        app_env="test",
+        database_url="sqlite://",
+        artifact_root=tmp_path / "artifacts",
+        hpc_execution_mode="ssh",
+        hpc_input_transfer_enabled=True,
+        hpc_pipeline_cpu_budget=120,
+        hpc_pipeline_gpu_budget=0,
+        hpc_pipeline_pdb_substitution_enabled=False,
+        hpc_available_technical_requirements="genomic_mapping",
+    )
+    app.dependency_overrides[get_settings] = lambda: remote_settings
+
+    created = client.post(
+        "/api/v1/runs",
+        json={
+            "protein_id": protein.json()["id"],
+            "upload_ids": [structure_id],
+            "structure_source": "provided_pdb",
+            "structure_chain": "A",
+            "scientific_accession": "P00001",
+        },
+        headers={"Idempotency-Key": "gpp-pdb-cpu-only"},
+    )
+
+    assert created.status_code == 201, created.text
+    configuration = created.json()["configuration"]
+    assert configuration["selected_stage_ids"] == [
+        "protein_identity",
+        "variant_predictors",
+        "pharmacogenomics",
+        "uniprot_features",
+        "evolutionary_conservation",
+        "functional_region_evidence",
+        "experimental_variant_evidence",
+    ]
+    assert configuration["prerequisites"]["dependency_overrides"] == {}
+    assert configuration["prerequisites"]["available_technical_requirements"] == [
+        "command:srun",
+        "genomic_mapping",
+        "slurm:SLURM_JOB_ID",
+    ]
+    assert configuration["input_references"]["fasta"]["source"] == "canonical_sequence"
+    assert configuration["input_references"]["structure"]["chain"] == "A"
+    assert configuration["structure_mapping"]["mapped_residue_count"] == 4
+
+    omitted = {item["stage_id"]: item for item in configuration["omitted_stages"]}
+    assert omitted["sequence_frustration"]["reason"] == "gpu_unavailable"
+    assert omitted["membrane_topology"]["reason"] == "gpu_unavailable"
+    assert omitted["structure_modeling"]["reason"] == ("remote_pdb_substitution_not_supported")
+    assert omitted["conformational_ensemble"]["reason"] == "bioemu_skipped"
+    assert omitted["structural_regime"]["reason"] == "dependency_not_applicable"
+    assert omitted["variant_ddg"]["reason"] == "variants_not_provided"
+
+    generated = session.get(Upload, configuration["fasta_upload_id"])
+    assert generated is not None
+    assert generated.input_type == "fasta"
+    assert generated.sha256 == hashlib.sha256(b">P00001\nACDE\n").hexdigest()
+    assert configuration["fasta_sha256"] == generated.sha256
+    assert (
+        remote_settings.artifact_root / generated.storage_key
+    ).read_bytes() == b">P00001\nACDE\n"
 
 
 def test_idempotent_retry_returns_same_run_but_new_request_creates_new_run(client, session):

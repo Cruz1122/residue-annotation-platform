@@ -24,19 +24,25 @@ def resolve_stage_selection(
     scientific_accession: str | None,
     scientific_parameters: dict[str, Any],
     available_technical_requirements: set[str] | None = None,
+    defer_technical_requirements: bool = False,
+    available_gpu_budget: int | None = None,
+    allow_provided_pdb_substitution: bool = True,
 ) -> StageSelection:
     """Resolve applicability from the product registry and confirmed inputs.
 
-    The registry remains the dependency graph.  A provided PDB is recorded as
-    an explicit input substitution for the AF3-producing node so structural
-    descendants remain visible/applicable without inventing a second UI DAG.
+    The registry remains the dependency graph. A provided PDB can be recorded
+    as an explicit input substitution for the AF3-producing node only when the
+    selected execution profile has reviewed support for that substitution.
+    Resource capabilities are applied before dependency propagation so a
+    CPU-only profile can persist a valid partial selection without pretending
+    that GPU stages can run on CPU.
     """
 
     omitted: list[dict[str, object]] = []
     selected: list[str] = []
     dependency_overrides: dict[str, str] = {}
     available_requirements = set(available_technical_requirements or ())
-    if structure_source == "provided_pdb":
+    if structure_source == "provided_pdb" and allow_provided_pdb_substitution:
         dependency_overrides["structure_modeling"] = "provided_pdb_upload"
 
     for definition in STAGE_DEFINITIONS:
@@ -44,9 +50,31 @@ def resolve_stage_selection(
             omitted.append(
                 {
                     "stage_id": definition.id,
-                    "reason": "provided_pdb_selected",
-                    "message": "AlphaFold 3 is omitted because the provided structure is selected",
+                    "reason": (
+                        "provided_pdb_selected"
+                        if allow_provided_pdb_substitution
+                        else "remote_pdb_substitution_not_supported"
+                    ),
+                    "message": (
+                        "AlphaFold 3 is omitted because the provided structure is selected"
+                        if allow_provided_pdb_substitution
+                        else "The remote executor cannot substitute a PDB for AlphaFold 3"
+                    ),
                     "prerequisites": ["provided_pdb_upload", "structure_mapping"],
+                }
+            )
+            continue
+        if (
+            definition.id == "conformational_ensemble"
+            and structure_source == "provided_pdb"
+            and not allow_provided_pdb_substitution
+        ):
+            omitted.append(
+                {
+                    "stage_id": definition.id,
+                    "reason": "bioemu_skipped",
+                    "message": "BioEmu is omitted because the remote PDB-only path is unsupported",
+                    "prerequisites": ["structure_modeling", "msa_cache:af3-msa-v1"],
                 }
             )
             continue
@@ -66,6 +94,23 @@ def resolve_stage_selection(
                 }
             )
             continue
+        required_gpu = definition.gpu or 0
+        if available_gpu_budget is not None and required_gpu > available_gpu_budget:
+            omitted.append(
+                {
+                    "stage_id": definition.id,
+                    "reason": "gpu_unavailable",
+                    "message": (
+                        "The selected execution profile cannot provide the stage GPU contract"
+                    ),
+                    "prerequisites": ["gpu"],
+                    "resources": {
+                        "required_gpu": required_gpu,
+                        "available_gpu": available_gpu_budget,
+                    },
+                }
+            )
+            continue
         if (definition.requires_variant or definition.id == "variant_ddg") and not variants:
             omitted.append(
                 {
@@ -76,11 +121,15 @@ def resolve_stage_selection(
                 }
             )
             continue
-        missing_requirements = [
-            requirement
-            for requirement in definition.technical_requirements
-            if requirement not in available_requirements
-        ]
+        missing_requirements = (
+            []
+            if defer_technical_requirements
+            else [
+                requirement
+                for requirement in definition.technical_requirements
+                if requirement not in available_requirements
+            ]
+        )
         if missing_requirements:
             omitted.append(
                 {
@@ -137,7 +186,10 @@ def resolve_stage_selection(
             },
             "structure_source": structure_source,
             "dependency_overrides": dependency_overrides,
+            "available_gpu_budget": available_gpu_budget,
+            "allow_provided_pdb_substitution": allow_provided_pdb_substitution,
             "available_technical_requirements": sorted(available_requirements),
+            "defer_technical_requirements": defer_technical_requirements,
             "stage_technical_requirements": {
                 definition.id: list(definition.technical_requirements)
                 for definition in STAGE_DEFINITIONS
@@ -161,14 +213,28 @@ def dependency_is_satisfied(
     structure_source: str,
     dependency_id: str,
     status: str,
+    allow_provided_pdb_substitution: bool = True,
 ) -> bool:
     if status in {"success", "reused"}:
         return True
     return (
-        structure_source == "provided_pdb"
+        allow_provided_pdb_substitution
+        and structure_source == "provided_pdb"
         and dependency_id == "structure_modeling"
         and status == "skipped"
     )
+
+
+def has_dependency_override(
+    prerequisites: dict[str, object] | None,
+    dependency_id: str,
+) -> bool:
+    """Return whether the immutable run configuration grants an override."""
+
+    if not isinstance(prerequisites, dict):
+        return False
+    overrides = prerequisites.get("dependency_overrides")
+    return isinstance(overrides, dict) and dependency_id in overrides
 
 
 def cache_factors_for_stage(

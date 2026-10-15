@@ -1,10 +1,11 @@
 x-worker-common: &worker-common
   init: true
   restart: unless-stopped
-  # The SSH secret bind mount keeps the host file owner/mode. Match that
-  # owner explicitly instead of running the worker as root; set these values
-  # to the UID/GID that owns the protected secret files on the host.
-  user: "${HPC_WORKER_UID:-1000}:${HPC_WORKER_GID:-1000}"
+  # The SSH secret bind mount keeps the host file owner/mode. Match its UID
+  # explicitly instead of running the worker as root. Use the backend app
+  # group as the worker's primary GID so both services can read the shared
+  # artifact volume without making uploaded scientific inputs world-readable.
+  user: "${HPC_WORKER_UID:-1000}:${HPC_APP_GID:-999}"
   cap_drop:
     - ALL
   security_opt:
@@ -41,6 +42,23 @@ x-platform-environment: &platform-environment
   AUTH_RATE_LIMIT_VERIFY: ${AUTH_RATE_LIMIT_VERIFY:-10}
   AUTH_RATE_LIMIT_IP: ${AUTH_RATE_LIMIT_IP:-50}
   FRONTEND_BASE_URL: ${FRONTEND_BASE_URL:-http://localhost:4742}
+  HPC_EXECUTION_MODE: ${HPC_EXECUTION_MODE:-disabled}
+  # Remote Compose profiles use the run-scoped input namespace by default;
+  # an explicit false is still available for an operator-approved ambient
+  # input deployment.
+  HPC_INPUT_TRANSFER_ENABLED: ${HPC_INPUT_TRANSFER_ENABLED:-true}
+  HPC_INPUT_REMOTE_SUBDIR: ${HPC_INPUT_REMOTE_SUBDIR:-uploads}
+  HPC_SLURM_PARTITION: ${HPC_SLURM_PARTITION:-}
+  HPC_SLURM_QOS: ${HPC_SLURM_QOS:-}
+  HPC_SLURM_TIME: ${HPC_SLURM_TIME:-00:30:00}
+  HPC_PIPELINE_PREFETCH_COMMAND: ${HPC_PIPELINE_PREFETCH_COMMAND:-}
+  HPC_AVAILABLE_TECHNICAL_REQUIREMENTS: ${HPC_AVAILABLE_TECHNICAL_REQUIREMENTS:-}
+  HPC_PREFLIGHT_RETRY_SECONDS: ${HPC_PREFLIGHT_RETRY_SECONDS:-60}
+  HPC_PIPELINE_MAX_PARALLEL: ${HPC_PIPELINE_MAX_PARALLEL:-1}
+  HPC_PIPELINE_CPU_BUDGET: ${HPC_PIPELINE_CPU_BUDGET:-32}
+  HPC_PIPELINE_GPU_BUDGET: ${HPC_PIPELINE_GPU_BUDGET:-1}
+  HPC_PIPELINE_PDB_SUBSTITUTION_ENABLED: ${HPC_PIPELINE_PDB_SUBSTITUTION_ENABLED:-false}
+  HPC_MAX_INFLIGHT_STAGES: ${HPC_MAX_INFLIGHT_STAGES:-1}
   WORKER_POLL_INTERVAL_SECONDS: ${WORKER_POLL_INTERVAL_SECONDS:-2.0}
   WORKER_ID: ${WORKER_ID:-compose-worker}
   RUN_WORKER_LEASE_SECONDS: ${RUN_WORKER_LEASE_SECONDS:-900}
@@ -193,9 +211,13 @@ services:
       HPC_SLURM_TIME: ${HPC_SLURM_TIME:-00:30:00}
       HPC_PIPELINE_PYTHON: ${HPC_PIPELINE_PYTHON:-python}
       HPC_PIPELINE_MAIN: ${HPC_PIPELINE_MAIN:-main.py}
+      HPC_PIPELINE_PREFETCH_COMMAND: ${HPC_PIPELINE_PREFETCH_COMMAND:-}
+      HPC_AVAILABLE_TECHNICAL_REQUIREMENTS: ${HPC_AVAILABLE_TECHNICAL_REQUIREMENTS:-}
+      HPC_PREFLIGHT_RETRY_SECONDS: ${HPC_PREFLIGHT_RETRY_SECONDS:-60}
       HPC_PIPELINE_MAX_PARALLEL: ${HPC_PIPELINE_MAX_PARALLEL:-1}
       HPC_PIPELINE_CPU_BUDGET: ${HPC_PIPELINE_CPU_BUDGET:-32}
       HPC_PIPELINE_GPU_BUDGET: ${HPC_PIPELINE_GPU_BUDGET:-1}
+      HPC_PIPELINE_PDB_SUBSTITUTION_ENABLED: ${HPC_PIPELINE_PDB_SUBSTITUTION_ENABLED:-false}
       HPC_MAX_RESULT_BYTES: ${HPC_MAX_RESULT_BYTES:-268435456}
       HPC_MAX_ARTIFACT_ENTRIES: ${HPC_MAX_ARTIFACT_ENTRIES:-10000}
       HPC_MAX_INFLIGHT_STAGES: ${HPC_MAX_INFLIGHT_STAGES:-1}
@@ -231,6 +253,11 @@ services:
     # squeue, sacct and scancel locally and never starts a VPN or SSH client.
     # The selected image must contain the MN5 Slurm client and its auth setup.
     user: "${HPC_NATIVE_UID:-999}:${HPC_NATIVE_GID:-999}"
+    # Native execution uses a different primary account but must still read
+    # backend-owned uploads and publish artifacts for the API. The shared app
+    # group is supplemental so the native account keeps its cluster GID.
+    group_add:
+      - "${HPC_APP_GID:-999}"
     environment:
       <<: *platform-environment
       DATABASE_URL: postgresql+psycopg://residue:${POSTGRES_PASSWORD:-residue-dev}@db:5432/residue_annotation
@@ -246,6 +273,9 @@ services:
       HPC_SLURM_TIME: ${HPC_SLURM_TIME:-00:30:00}
       HPC_PIPELINE_PYTHON: ${HPC_PIPELINE_PYTHON:-python}
       HPC_PIPELINE_MAIN: ${HPC_PIPELINE_MAIN:-main.py}
+      HPC_PIPELINE_PREFETCH_COMMAND: ${HPC_PIPELINE_PREFETCH_COMMAND:-}
+      HPC_AVAILABLE_TECHNICAL_REQUIREMENTS: ${HPC_AVAILABLE_TECHNICAL_REQUIREMENTS:-}
+      HPC_PREFLIGHT_RETRY_SECONDS: ${HPC_PREFLIGHT_RETRY_SECONDS:-60}
       HPC_PIPELINE_MAX_PARALLEL: ${HPC_PIPELINE_MAX_PARALLEL:-1}
       HPC_PIPELINE_CPU_BUDGET: ${HPC_PIPELINE_CPU_BUDGET:-32}
       HPC_PIPELINE_GPU_BUDGET: ${HPC_PIPELINE_GPU_BUDGET:-1}

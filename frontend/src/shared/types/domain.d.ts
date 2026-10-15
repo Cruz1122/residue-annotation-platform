@@ -80,9 +80,31 @@ export interface RunStage {
   slurm_job_id: string | null;
   error_code: string | null;
   error_message: string | null;
+  preflight_status: string;
+  preflight_error_code: string | null;
+  preflight_error_message: string | null;
+  preflight_details: Record<string, unknown>;
+  preflight_checked_at: string | null;
+  preflight_retry_at: string | null;
   started_at: string | null;
   finished_at: string | null;
   artifacts: Artifact[];
+}
+
+export interface RunPreparation {
+  id: string;
+  run_id: string;
+  status: string;
+  required_requirements: string[];
+  satisfied_requirements: string[];
+  snapshots: Record<string, unknown>;
+  preparation_key: string | null;
+  attempt_count: number;
+  error_code: string | null;
+  error_message: string | null;
+  started_at: string | null;
+  checked_at: string | null;
+  finished_at: string | null;
 }
 
 export interface RunConfiguration {
@@ -117,6 +139,7 @@ export interface Run {
   status: 'pending' | 'running' | 'success' | 'failed' | 'cancel_requested' | 'cancelled';
   requested_variants: VariantRequest[];
   configuration: RunConfiguration | null;
+  preparation: RunPreparation | null;
   created_at: string | null;
   started_at: string | null;
   finished_at: string | null;

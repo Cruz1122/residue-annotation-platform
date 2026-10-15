@@ -14,11 +14,16 @@ from app.core.config import Settings
 from app.infrastructure.hpc.archive import ArchiveError, BoundedTarWriter
 from app.infrastructure.hpc.base import (
     HPCConfigurationError,
+    HPCSubmissionAmbiguousError,
     HPCTransportError,
     JobHandle,
     JobRequest,
     JobState,
     JobStatus,
+    PrefetchRequest,
+    PrefetchResult,
+    parse_prefetch_result,
+    render_prefetch_command,
 )
 
 _TRANSIENT_FILESYSTEM_ERRNOS = frozenset(
@@ -392,6 +397,12 @@ class NativeSlurmClient:
         except subprocess.CalledProcessError as exc:
             if exc.returncode == 127:
                 raise HPCConfigurationError("native Slurm command is unavailable") from exc
+            if exc.returncode == 75:
+                output = exc.stderr or exc.stdout or ""
+                match = re.search(r"SUBMISSION_AMBIGUOUS:([A-Za-z0-9_-]+)", output)
+                if match:
+                    raise HPCSubmissionAmbiguousError(match.group(1)) from exc
+                raise HPCTransportError("Slurm submission receipt is ambiguous") from exc
             raise
         except subprocess.TimeoutExpired as exc:
             raise HPCTransportError("native Slurm transport is unavailable") from exc
@@ -428,12 +439,63 @@ class NativeSlurmClient:
                 "  ''|*[!A-Za-z0-9_-]*) exit 78 ;;",
                 "esac",
                 "umask 077",
-                'printf "%s\\n" "$job_id" > "$temporary"',
-                'mv -f -- "$temporary" "$receipt"',
+                'if ! printf "%s\\n" "$job_id" > "$temporary"; then',
+                '  printf "SUBMISSION_AMBIGUOUS:%s\\n" "$job_id" >&2',
+                "  exit 75",
+                "fi",
+                'if ! mv -f -- "$temporary" "$receipt"; then',
+                '  printf "SUBMISSION_AMBIGUOUS:%s\\n" "$job_id" >&2',
+                "  exit 75",
+                "fi",
                 'printf "%s\\n" "$job_id"',
             ]
         )
         return self._run_shell(script)
+
+    def _read_prefetch_receipt(
+        self,
+        receipt_path: str,
+        request: PrefetchRequest,
+    ) -> PrefetchResult | None:
+        try:
+            output = self.read_text(receipt_path, 64 * 1024)
+        except FileNotFoundError:
+            return None
+        result = parse_prefetch_result(output, request)
+        return result if result.status == "success" else None
+
+    def _prepare_with_receipt(self, request: PrefetchRequest) -> str:
+        receipt = self._confined_path(request.receipt_path or "")
+        temporary = self._confined_path(f"{request.receipt_path}.tmp-{uuid4().hex}")
+        command = render_prefetch_command(self.settings.hpc_pipeline_prefetch_command, request)
+        script = "\n".join(
+            [
+                "set -eu",
+                f"temporary={shlex.quote(str(temporary))}",
+                f"receipt={shlex.quote(str(receipt))}",
+                "trap 'rm -f -- \"$temporary\"' EXIT",
+                f"output=$({command})",
+                "umask 077",
+                'printf "%s\\n" "$output" > "$temporary"',
+                'mv -f -- "$temporary" "$receipt"',
+                'printf "%s\\n" "$output"',
+            ]
+        )
+        return self._run_shell(script)
+
+    def prepare_external(self, request: PrefetchRequest) -> PrefetchResult:
+        """Run the explicitly configured, selective pipeline prefetch alias."""
+
+        if request.receipt_path:
+            existing = self._read_prefetch_receipt(request.receipt_path, request)
+            if existing is not None:
+                return existing
+            output = self._prepare_with_receipt(request)
+        else:
+            output = self._run_shell(
+                render_prefetch_command(self.settings.hpc_pipeline_prefetch_command, request)
+            )
+        return parse_prefetch_result(output, request)
 
     def submit(self, request: JobRequest) -> JobHandle:
         if not request.command:

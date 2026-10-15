@@ -11,9 +11,13 @@ from app.core.config import Settings
 from app.infrastructure.hpc.archive import ArchiveError, BoundedTarWriter
 from app.infrastructure.hpc.base import (
     HPCConfigurationError,
+    HPCSubmissionAmbiguousError,
     HPCTransportError,
     JobRequest,
     JobState,
+    PrefetchRequest,
+    parse_prefetch_result,
+    render_prefetch_command,
 )
 from app.infrastructure.hpc.native import NativeSlurmClient
 from app.infrastructure.hpc.ssh import SSHSlurmClient
@@ -100,6 +104,17 @@ def test_native_slurm_submission_receipt_recovers_without_resubmit(tmp_path, mon
     assert handle.state == JobState.QUEUED
 
 
+def test_ssh_missing_submission_receipt_is_treated_as_first_attempt(monkeypatch):
+    client = SSHSlurmClient.__new__(SSHSlurmClient)
+
+    def missing_receipt(_path, _max_bytes):
+        raise RuntimeError("remote path component is unavailable")
+
+    monkeypatch.setattr(client, "read_text", missing_receipt)
+
+    assert client._read_submission_receipt("/gpfs/project/root/receipt") is None
+
+
 def test_native_slurm_submission_receipt_is_written_by_submit_wrapper(tmp_path, monkeypatch):
     root = tmp_path / "hpc-root"
     root.mkdir()
@@ -123,7 +138,120 @@ def test_native_slurm_submission_receipt_is_written_by_submit_wrapper(tmp_path, 
     assert len(captured) == 1
     assert "sbatch --parsable" in captured[0]
     assert "mv -f --" in captured[0]
+    assert "SUBMISSION_AMBIGUOUS" in captured[0]
     assert ".sbatch" not in captured[0]
+
+
+def test_native_slurm_receipt_write_ambiguity_keeps_the_accepted_job_identifiable(
+    tmp_path,
+    monkeypatch,
+):
+    root = tmp_path / "hpc-root"
+    root.mkdir()
+    client = NativeSlurmClient(_settings(root))
+
+    def ambiguous(*_args, **_kwargs):
+        raise subprocess.CalledProcessError(
+            75,
+            ["/bin/sh"],
+            stderr="SUBMISSION_AMBIGUOUS:54321\n",
+        )
+
+    monkeypatch.setattr(subprocess, "run", ambiguous)
+    with pytest.raises(HPCSubmissionAmbiguousError) as raised:
+        client._run_shell("submission-wrapper")
+    assert raised.value.job_id == "54321"
+
+
+def test_prefetch_command_is_requirement_scoped_and_operator_configured():
+    request = PrefetchRequest(
+        accession="P0; echo unsafe",
+        requirements=("external_cache", "mavedb_access_or_cache"),
+        working_directory="/gpfs/project/root",
+        environment={"PIPELINE_PREFETCH_REQUIREMENTS_JSON": '["external_cache"]'},
+    )
+
+    with pytest.raises(HPCConfigurationError, match="must include"):
+        render_prefetch_command("python main.py --prepare-external {accession}", request)
+
+    command = render_prefetch_command(
+        "python main.py --prepare-external --accession {accession} --requirements {requirements}",
+        request,
+    )
+    assert "cd -- /gpfs/project/root" in command
+    assert "--accession 'P0; echo unsafe'" in command
+    assert '\'["external_cache","mavedb_access_or_cache"]\'' in command
+    assert "export PIPELINE_PREFETCH_REQUIREMENTS_JSON=" in command
+
+
+def test_prefetch_result_parses_optional_success_and_failure_acknowledgements():
+    request = PrefetchRequest(
+        accession="P00001",
+        requirements=("external_cache",),
+        working_directory="/gpfs/project/root",
+    )
+
+    result = parse_prefetch_result(
+        '{"status":"success","requirements":["external_cache"],'
+        '"snapshots":{"external_cache":"v1"}}',
+        request,
+    )
+    assert result.status == "success"
+    assert result.requirements == ("external_cache",)
+    assert result.snapshots == {"external_cache": "v1"}
+
+    failed = parse_prefetch_result(
+        '{"status":"failed","message":"cache unavailable"}',
+        request,
+    )
+    assert failed.status == "failed"
+    assert failed.requirements == request.requirements
+
+    for malformed in ("", "prefetch complete", '{"status":"error"}'):
+        invalid = parse_prefetch_result(malformed, request)
+        assert invalid.status == "failed"
+
+    missing_requirements = parse_prefetch_result('{"status":"success"}', request)
+    assert missing_requirements.status == "failed"
+
+
+def test_native_prefetch_receipt_reuses_acknowledgement_without_running_command(
+    tmp_path,
+    monkeypatch,
+):
+    root = tmp_path / "hpc-root"
+    root.mkdir()
+    receipt = root / ".platform_jobs" / "run-1" / "uniprot.prefetch.key.result"
+    receipt.parent.mkdir(parents=True)
+    receipt.write_text(
+        '{"status":"success","requirements":["external_cache"],"snapshots":{}}\n',
+        encoding="utf-8",
+    )
+    client = NativeSlurmClient(
+        Settings(
+            app_env="test",
+            database_url="sqlite://",
+            hpc_remote_root=str(root),
+            hpc_pipeline_prefetch_command="python main.py {accession} {requirements}",
+        )
+    )
+    monkeypatch.setattr(
+        client,
+        "_run_shell",
+        lambda _script: (_ for _ in ()).throw(AssertionError("prefetch must be reused")),
+    )
+
+    result = client.prepare_external(
+        PrefetchRequest(
+            accession="P00001",
+            requirements=("external_cache",),
+            working_directory=str(root),
+            receipt_path=str(receipt),
+        )
+    )
+
+    assert result.status == "success"
+    assert result.requirements == ("external_cache",)
 
 
 def test_ssh_slurm_submission_receipt_recovers_without_resubmit(tmp_path, monkeypatch):

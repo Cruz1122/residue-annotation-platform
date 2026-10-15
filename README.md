@@ -90,7 +90,7 @@ HPC_KNOWN_HOSTS_FILE=/ruta/local/known_hosts \
 docker compose up --build -d
 ```
 
-El password de VPN puede vivir en un archivo de una sola línea con permisos `0600`, o en un archivo de configuración `openfortivpn` protegido. El servicio `vpn` es el único que recibe `NET_ADMIN`; `worker-vpn` ejecuta como el UID/GID no root configurado en `HPC_WORKER_UID`/`HPC_WORKER_GID`, que debe ser propietario de los secretos protegidos, y recibe el grupo de artefactos para escribir sólo su volumen. El backend, frontend y `worker-vpn` nunca reciben `NET_ADMIN`, no tienen red directa al host y sólo `worker-vpn` monta, en modo lectura, el password SSH y `known_hosts`; no se monta `.env` ni el filesystem del host.
+El password de VPN puede vivir en un archivo de una sola línea con permisos `0600`, o en un archivo de configuración `openfortivpn` protegido. El servicio `vpn` es el único que recibe `NET_ADMIN`; `worker-vpn` ejecuta como el UID no root configurado en `HPC_WORKER_UID`, que debe ser propietario de los secretos protegidos, y usa el GID interno `HPC_APP_GID` para compartir artefactos privados con el backend. El backend, frontend y `worker-vpn` nunca reciben `NET_ADMIN`, no tienen red directa al host y sólo `worker-vpn` monta, en modo lectura, el password SSH y `known_hosts`; no se monta `.env` ni el filesystem del host.
 
 ### Ejecución directa en MareNostrum
 
@@ -106,6 +106,21 @@ docker compose up --build -d
 ```
 
 En este modo no se configuran `HPC_VPN_*`, `HPC_SSH_*`, archivos de passwords ni `known_hosts`. El worker fija `HPC_EXECUTION_MODE=native` y ejecuta `sbatch --wrap` directamente en el entorno local de Slurm; la aplicación no crea ni deja un archivo `.sbatch` local. En el modo `vpn`, el worker fija `HPC_EXECUTION_MODE=ssh` y el túnel VPN es una dependencia de salud; no se deben activar ambos perfiles a la vez.
+
+Antes de cualquier `sbatch`, el worker ejecuta un preflight persistido sobre la
+configuración confirmada, los hashes de inputs, dependencias, accession,
+recursos y capacidades aprobadas. Los requisitos externos (`external_cache`,
+MaveDB, homología y `msa_cache:*`) sólo se preparan cuando el stage
+seleccionado los necesita. Para habilitar esa preparación, el operador debe
+validar en el checkout de MN5 un comando con `{accession}` y
+`{requirements}`, y configurarlo como `HPC_PIPELINE_PREFETCH_COMMAND`. Su
+última línea debe devolver un acknowledgement JSON con `status=success` y
+exactamente los requisitos solicitados; si no está configurado, no reconoce
+algún requisito o falla, la etapa queda en `ready` con preparación bloqueada y
+no se envía ningún job. El comando no se acepta desde el payload del usuario.
+Los requisitos locales adicionales se declaran mediante
+`HPC_AVAILABLE_TECHNICAL_REQUIREMENTS` sólo después de comprobarlos en el
+host autorizado.
 
 ## Desarrollo sin Docker
 
@@ -215,7 +230,7 @@ Estos checks no requieren VPN, GPU, secretos, `SLURM_JOB_ID` ni acceso a MN5. Lo
 
 `.env.example` sólo contiene valores no secretos y referencias a ficheros externos. `.env`, `run/secrets/`, bases SQLite, artefactos y salidas de build están ignorados por Git. Las credenciales no se pasan en argumentos ni se registran: Compose monta sólo los archivos necesarios como read-only. El contenedor VPN se limita a `NET_ADMIN` y `DAC_READ_SEARCH` para leer su secreto local protegido; el worker corre como usuario no root, sin capabilities adicionales y sin `NET_ADMIN`. El backend y frontend no reciben capabilities Linux adicionales, el root filesystem de los servicios sensibles es read-only y la verificación SSH exige `known_hosts`; una clave ausente o cambiada hace fallar cerrado. La autenticación de desarrollo usa una identidad local configurable; en `APP_ENV=production` faltan `X-User-Id` y `X-Project-Id` y el backend falla cerrado. La autorización se comprueba al leer proteínas, runs y artefactos.
 
-La autenticación de cuenta usa Bearer tokens en producción; el fallback por headers sólo existe en development/test. En producción, `AUTH_JWT_SECRET` debe ser explícito y tener al menos 32 caracteres, y `CORS_ORIGINS` debe contener únicamente orígenes HTTPS concretos, sin wildcard. Los refresh tokens y tokens de verificación/reset se almacenan únicamente como hashes, los passwords se derivan con scrypt y las acciones de auth generan auditoría sin secretos. La verificación y recuperación se entregan mediante Resend cuando `EMAIL_PROVIDER=resend`; la API key permanece en el entorno y `EMAIL_FROM` debe usar un dominio verificado en producción. La regla de dominio es máximo una run no terminal por usuario. La VPN se establece en un contenedor separado del backend y sólo ese contenedor recibe `NET_ADMIN`. La inspección MN5, cuando esté autorizada, utiliza la interfaz separada `ReadOnlyMN5Inspector` y el factory `build_read_only_inspector`, que exige habilitación explícita y selecciona `mock`, `ssh_sftp` o `native` sin fallback implícito; todos los drivers usan paths relativos y exponen sólo lectura, sin shell ni operaciones SFTP de escritura. Los uploads de run se transfieren por SCP con host keys verificadas; consultar [`02 — Ejecución científica en MareNostrum 5`](specs/02-ejecucion-cientifica.md), el [threat model](docs/security-threat-model.md) y el [contrato histórico de inspección MN5](docs/specs-archive/2026-10-14/contracts/mn5-readonly-inspection.md).
+La autenticación de cuenta usa Bearer tokens en producción; el fallback por headers sólo existe en development/test. En producción, `AUTH_JWT_SECRET` debe ser explícito y tener al menos 32 caracteres, y `CORS_ORIGINS` debe contener únicamente orígenes HTTPS concretos, sin wildcard. Los refresh tokens y tokens de verificación/reset se almacenan únicamente como hashes, los passwords se derivan con scrypt y las acciones de auth generan auditoría sin secretos. La verificación y recuperación se entregan mediante Resend cuando `EMAIL_PROVIDER=resend`; la API key permanece en el entorno y `EMAIL_FROM` debe usar un dominio verificado en producción. La regla de dominio es máximo una run no terminal por usuario. La VPN se establece en un contenedor separado del backend y sólo ese contenedor recibe `NET_ADMIN`. La inspección MN5, cuando esté autorizada, utiliza la interfaz separada `ReadOnlyMN5Inspector` y el factory `build_read_only_inspector`, que exige habilitación explícita y selecciona `mock`, `ssh_sftp` o `native` sin fallback implícito; todos los drivers usan paths relativos y exponen sólo lectura, sin shell ni operaciones SFTP de escritura. Los uploads de run se transfieren por SCP con host keys verificadas y se materializan bajo un namespace `uploads/platform-run-<run_id>` aislado de las entradas preexistentes de la accesión; consultar [`02 — Ejecución científica en MareNostrum 5`](specs/02-ejecucion-cientifica.md), el [threat model](docs/security-threat-model.md) y el [contrato histórico de inspección MN5](docs/specs-archive/2026-10-14/contracts/mn5-readonly-inspection.md).
 
 ## Límites actuales
 

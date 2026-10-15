@@ -46,6 +46,21 @@ def safe_storage_path(root: Path, storage_key: str) -> Path:
 class ArtifactStore:
     def __init__(self, settings: Settings):
         self.root = settings.artifact_root.resolve()
+        # Keep the shared volume traversable by the backend and the native
+        # worker's supplemental app group. The setgid bit makes descendants
+        # inherit that group even when the native account has another primary
+        # cluster GID.
+        self.root.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(self.root, 0o2770)
+        except PermissionError:
+            # The VPN/native worker intentionally runs with a different UID
+            # and reaches this directory through the supplemental app group.
+            # It cannot chmod a backend-owned volume root, but it must not
+            # silently accept a root that is not group-traversable either.
+            mode = self.root.stat().st_mode
+            if not (mode & stat.S_ISGID) or (mode & 0o070) != 0o070:
+                raise
 
     def resolve(self, storage_key: str) -> Path:
         path = safe_storage_path(self.root, storage_key)

@@ -14,6 +14,7 @@ from app.infrastructure.hpc.transfer import (
     InputTransferError,
     SCPInputTransfer,
     remote_input_path,
+    remote_pipeline_input_namespace,
     remote_pipeline_input_path,
 )
 from sqlalchemy import select
@@ -332,6 +333,13 @@ def test_remote_pipeline_input_path_matches_remote_upload_contract():
         assert "only as .pdb" in str(exc)
     else:
         raise AssertionError("remote mmCIF input unexpectedly accepted")
+
+
+def test_remote_pipeline_input_namespace_is_run_scoped():
+    assert remote_pipeline_input_namespace("run-1") == "platform-run-run-1"
+
+    with pytest.raises(InputTransferError):
+        remote_pipeline_input_namespace("../escape")
 
 
 def test_prepare_run_inputs_rejects_remote_mmcif_before_opening_ssh(session, tmp_path, monkeypatch):

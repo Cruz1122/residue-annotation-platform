@@ -1,4 +1,11 @@
-from app.infrastructure.hpc.base import JobHandle, JobRequest, JobState, JobStatus
+from app.infrastructure.hpc.base import (
+    JobHandle,
+    JobRequest,
+    JobState,
+    JobStatus,
+    PrefetchRequest,
+    PrefetchResult,
+)
 
 
 class HPCUnavailableError(RuntimeError):
@@ -14,3 +21,6 @@ class DisabledHPCClient:
 
     def cancel(self, job_id: str) -> JobStatus:
         return JobStatus(job_id=job_id, state=JobState.UNKNOWN, message="HPC is not configured")
+
+    def prepare_external(self, request: PrefetchRequest) -> PrefetchResult:
+        raise HPCUnavailableError("HPC prefetch is not configured")

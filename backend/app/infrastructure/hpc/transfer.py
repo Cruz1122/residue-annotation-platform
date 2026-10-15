@@ -74,9 +74,9 @@ def remote_pipeline_input_path(
 ) -> str:
     """Build a path selected by the remote pipeline's input contract.
 
-    The MareNostrum CLI resolves ``uploads/<protein_id>`` and accepts an
+    The MareNostrum CLI resolves ``uploads/<input_namespace>`` and accepts an
     explicit ``PIPELINE_SELECTED_*`` path only when it remains below that
-    directory.  Keep each platform run in a hidden, run-scoped child so an
+    directory. Keep each platform run in a hidden, run-scoped child so an
     uploaded input cannot collide with the pipeline's canonical input files
     or another platform run.
     """
@@ -123,6 +123,19 @@ def remote_pipeline_input_path(
     )
     _remote_path_under(root, candidate)
     return str(candidate)
+
+
+def remote_pipeline_input_namespace(run_id: str) -> str:
+    """Return the isolated ``uploads/`` directory key for one platform run.
+
+    The scientific accession is passed separately through ``--accession``.
+    Using a run-scoped namespace here prevents unrelated pre-existing FASTA or
+    PDB files under ``uploads/<accession>`` from changing normal-mode input
+    detection on the remote pipeline.
+    """
+
+    _safe_component(run_id, "run id")
+    return f"platform-run-{run_id}"
 
 
 class SCPInputTransfer:

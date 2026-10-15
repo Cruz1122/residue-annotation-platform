@@ -69,6 +69,12 @@ class StageRead(BaseModel):
     slurm_job_id: str | None = None
     error_code: str | None = None
     error_message: str | None = None
+    preflight_status: str = "pending"
+    preflight_error_code: str | None = None
+    preflight_error_message: str | None = None
+    preflight_details: dict[str, object] = Field(default_factory=dict)
+    preflight_checked_at: datetime | None = None
+    preflight_retry_at: datetime | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None
     artifacts: list[ArtifactRead] = Field(default_factory=list)
@@ -112,6 +118,24 @@ class RunConfigurationRead(BaseModel):
     confirmed_at: datetime | None = None
 
 
+class RunPreparationRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    run_id: str
+    status: str
+    required_requirements: list[str] = Field(default_factory=list)
+    satisfied_requirements: list[str] = Field(default_factory=list)
+    snapshots: dict[str, object] = Field(default_factory=dict)
+    preparation_key: str | None = None
+    attempt_count: int = 0
+    error_code: str | None = None
+    error_message: str | None = None
+    started_at: datetime | None = None
+    checked_at: datetime | None = None
+    finished_at: datetime | None = None
+
+
 class RunRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -120,6 +144,7 @@ class RunRead(BaseModel):
     status: str
     requested_variants: list[dict[str, object]]
     configuration: RunConfigurationRead | None = None
+    preparation: RunPreparationRead | None = None
     created_at: datetime | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None

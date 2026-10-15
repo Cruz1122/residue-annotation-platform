@@ -145,12 +145,23 @@ class Settings(BaseSettings):
     hpc_slurm_time: str = "00:30:00"
     hpc_pipeline_python: str = "python"
     hpc_pipeline_main: str = "main.py"
+    # A deployment must provide and validate the exact remote pipeline alias
+    # before external caches can be prepared. It receives the quoted
+    # ``{accession}`` and JSON ``{requirements}`` placeholders.
+    hpc_pipeline_prefetch_command: str | None = None
+    hpc_available_technical_requirements: str = ""
+    hpc_preflight_retry_seconds: int = Field(default=60, ge=1, le=86_400)
     hpc_pipeline_max_parallel: int = Field(default=1, ge=1, le=64)
     # The registry contains a 20-CPU relaxation stage. A smaller configured
     # budget must fail a run before any remote submit rather than producing a
     # predictable Slurm failure after consuming a slot.
     hpc_pipeline_cpu_budget: int = Field(default=32, ge=1, le=256)
     hpc_pipeline_gpu_budget: int = Field(default=1, ge=0, le=32)
+    # A provided PDB may replace the AF3-producing node only when the remote
+    # scientific executor has been reviewed for that substitution. Local
+    # profiles retain their existing PDB dependency behavior explicitly in
+    # run selection; remote profiles fail closed by default.
+    hpc_pipeline_pdb_substitution_enabled: bool = False
     hpc_max_result_bytes: int = Field(default=256 * 1024 * 1024, ge=1)
     hpc_max_artifact_entries: int = Field(default=10_000, ge=1, le=1_000_000)
     hpc_max_inflight_stages: int = Field(default=1, ge=1, le=64)
@@ -172,6 +183,14 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         return self.app_env == "production"
+
+    @property
+    def hpc_available_technical_requirement_set(self) -> set[str]:
+        return {
+            value.strip()
+            for value in self.hpc_available_technical_requirements.split(",")
+            if value.strip()
+        }
 
     @model_validator(mode="after")
     def validate_email_delivery(self) -> "Settings":

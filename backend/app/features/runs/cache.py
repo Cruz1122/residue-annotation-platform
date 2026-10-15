@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from app.features.runs.models import RunStage, StageResult
+from app.features.runs.preflight import is_prefetch_requirement
 from app.features.runs.selection import cache_factors_for_stage
 from app.features.stages.registry import STAGE_BY_ID
 
@@ -89,6 +90,7 @@ def planned_stage_cache_identity(
     """
 
     definition = STAGE_BY_ID[stage.stage_id]
+    versions = _versions_with_verified_preparation(stage, configuration.versions or {})
     factors = cache_factors_for_stage(
         definition,
         sequence_sha256=configuration.sequence_sha256,
@@ -100,7 +102,7 @@ def planned_stage_cache_identity(
         scientific_accession=configuration.scientific_accession,
         scientific_parameters=configuration.scientific_parameters or {},
         prerequisites=configuration.prerequisites or {},
-        versions=configuration.versions or {},
+        versions=versions,
         dependency_cache_keys=dependency_cache_keys,
     )
     resource_identity = factors["resource_identity"]
@@ -133,6 +135,49 @@ def planned_stage_cache_identity(
     return key, factors
 
 
+def _versions_with_verified_preparation(
+    stage: RunStage,
+    configured_versions: dict[str, object],
+) -> dict[str, object]:
+    """Bind verified external snapshots to the immutable cache identity.
+
+    Configuration input may declare the shape of external resources, but it
+    cannot prove that this run actually prepared the exact snapshot. The
+    durable preparation receipt is therefore folded into ``versions`` only
+    after every prefetch requirement has been acknowledged with a snapshot.
+    Runs that have not completed preparation retain the pending/unverified
+    configuration version and cannot become a cache hit for external stages.
+    """
+
+    requirements = tuple(
+        sorted(
+            requirement
+            for requirement in STAGE_BY_ID[stage.stage_id].technical_requirements
+            if is_prefetch_requirement(requirement)
+        )
+    )
+    versions = dict(configured_versions)
+    if not requirements:
+        return versions
+    preparation = stage.run.preparation
+    if preparation is None:
+        return versions
+    satisfied = set(preparation.satisfied_requirements or [])
+    snapshots = preparation.snapshots if isinstance(preparation.snapshots, dict) else {}
+    missing_snapshots = (
+        requirement
+        for requirement in requirements
+        if requirement not in satisfied or requirement not in snapshots
+    )
+    if any(missing_snapshots):
+        return versions
+    versions["external_snapshots"] = {
+        requirement: snapshots[requirement] for requirement in requirements
+    }
+    versions["reproducibility_status"] = "external_snapshots_verified"
+    return versions
+
+
 def find_verified_cache_hit(
     session: Session,
     stage: RunStage,
@@ -156,7 +201,6 @@ def find_verified_cache_hit(
         .options(selectinload(StageResult.artifacts))
         .where(StageResult.protein_id == stage.run.protein_id)
         .where(StageResult.stage_id == stage.stage_id)
-        .where(StageResult.cache_key == cache_key)
         .where(StageResult.status == "success")
         .where(
             (StageResult.owner_id == stage.run.owner_id)
@@ -167,8 +211,15 @@ def find_verified_cache_hit(
         if not result.artifacts:
             continue
         provenance = result.provenance if isinstance(result.provenance, dict) else {}
+        # The remote pipeline has its own code/resource cache identity. A
+        # result may therefore be indexed by the remote key while retaining
+        # the locally planned key as an alias for pre-submit reuse. Legacy
+        # and offline results continue to match through ``result.cache_key``.
+        if result.cache_key != cache_key and provenance.get("platform_cache_key") != cache_key:
+            continue
         if require_provenance:
-            if provenance.get("cache_key") != cache_key:
+            provenance_cache_key = provenance.get("cache_key")
+            if provenance_cache_key != cache_key and provenance_cache_key != result.cache_key:
                 continue
             if (
                 provenance.get("source") == "mn5-slurm"

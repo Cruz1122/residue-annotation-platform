@@ -30,28 +30,45 @@ def test_run_is_created_with_persisted_stage_graph(client, session):
     assert session.query(RunStage).count() == 18
 
 
-def test_run_creation_rejects_hpc_budget_below_registry(monkeypatch, client):
-    import app.features.runs.service as runs_service
-    from app.core.config import Settings
+def test_cpu_only_remote_run_uses_selected_stage_resources(client):
+    from app.core.config import Settings, get_settings
+    from app.main import app
 
-    monkeypatch.setattr(
-        runs_service,
-        "get_settings",
-        lambda: Settings(
-            app_env="test",
-            database_url="sqlite://",
-            hpc_pipeline_cpu_budget=32,
-            hpc_pipeline_gpu_budget=0,
-        ),
+    app.dependency_overrides[get_settings] = lambda: Settings(
+        app_env="test",
+        database_url="sqlite://",
+        hpc_execution_mode="ssh",
+        hpc_input_transfer_enabled=True,
+        hpc_pipeline_cpu_budget=120,
+        hpc_pipeline_gpu_budget=0,
     )
-    protein_id = _create_protein(client)
-
-    response = client.post("/api/v1/runs", json={"protein_id": protein_id})
-
-    assert response.status_code == 503
-    assert response.json()["detail"] == (
-        "configured HPC budget cannot execute the registered pipeline"
+    protein = client.post(
+        "/api/v1/proteins",
+        json={"sequence": SEQUENCE, "aliases": [{"source": "uniprot", "identifier": "P00001"}]},
     )
+    assert protein.status_code == 201
+
+    response = client.post(
+        "/api/v1/runs",
+        json={"protein_id": protein.json()["id"], "scientific_accession": "P00001"},
+    )
+
+    assert response.status_code == 201, response.text
+    configuration = response.json()["configuration"]
+    assert configuration["selected_stage_ids"] == [
+        "protein_identity",
+        "variant_predictors",
+        "pharmacogenomics",
+        "uniprot_features",
+        "evolutionary_conservation",
+        "functional_region_evidence",
+        "experimental_variant_evidence",
+    ]
+    omitted = {item["stage_id"]: item for item in configuration["omitted_stages"]}
+    assert omitted["sequence_frustration"]["reason"] == "gpu_unavailable"
+    assert omitted["membrane_topology"]["reason"] == "gpu_unavailable"
+    assert omitted["structure_modeling"]["reason"] == "gpu_unavailable"
+    assert omitted["conformational_ensemble"]["reason"] == "gpu_unavailable"
 
 
 def test_variant_reference_is_validated(client):

@@ -197,7 +197,10 @@ def write_upload(
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, target)
-        os.chmod(target, 0o600)
+        # The VPN worker runs as the host-owned non-root UID, not as the
+        # backend image's ``app`` UID. Keep the artifact private while
+        # granting the shared internal app group read access.
+        os.chmod(target, 0o640)
     except OSError as exc:
         try:
             temporary.unlink(missing_ok=True)

@@ -4,6 +4,7 @@ import hashlib
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from uuid import uuid4
 
 from fastapi import HTTPException, status
 from sqlalchemy import select
@@ -28,6 +29,7 @@ from app.features.runs.models import (
     Run,
     RunConfiguration,
     RunIdempotencyKey,
+    RunPreparation,
     RunStage,
     StageResult,
     Upload,
@@ -36,6 +38,7 @@ from app.features.runs.schemas import (
     ArtifactRead,
     RunConfigurationRead,
     RunCreate,
+    RunPreparationRead,
     RunRead,
     StageRead,
     UploadRead,
@@ -43,6 +46,7 @@ from app.features.runs.schemas import (
 from app.features.runs.selection import omission_by_stage, resolve_stage_selection
 from app.features.runs.state import RunStageStatus, RunStatus, can_transition
 from app.features.stages.registry import STAGE_BY_ID, STAGE_DEFINITIONS
+from app.features.uploads.service import UploadValidationError, write_upload
 
 
 def now_utc() -> datetime:
@@ -117,6 +121,7 @@ def _available_technical_requirements(
     available: set[str] = set()
     if settings.hpc_execution_mode in {"ssh", "native"}:
         available.update({"slurm:SLURM_JOB_ID", "command:srun"})
+    available.update(settings.hpc_available_technical_requirement_set)
     return available
 
 
@@ -173,6 +178,19 @@ def _stage_read(stage: RunStage) -> StageRead:
             if stage.error_message is not None
             else None
         ),
+        preflight_status=stage.preflight_status,
+        preflight_error_code=stage.preflight_error_code,
+        preflight_error_message=(
+            sanitize_error_message(
+                stage.preflight_error_message,
+                roots=(get_settings().hpc_remote_root,),
+            )
+            if stage.preflight_error_message is not None
+            else None
+        ),
+        preflight_details=stage.preflight_details or {},
+        preflight_checked_at=stage.preflight_checked_at,
+        preflight_retry_at=stage.preflight_retry_at,
         started_at=stage.started_at,
         finished_at=stage.finished_at,
         artifacts=artifacts,
@@ -215,6 +233,32 @@ def serialize_run(run: Run) -> RunRead:
         status=run.status,
         requested_variants=run.requested_variants or [],
         configuration=configuration,
+        preparation=(
+            RunPreparationRead(
+                id=run.preparation.id,
+                run_id=run.preparation.run_id,
+                status=run.preparation.status,
+                required_requirements=run.preparation.required_requirements or [],
+                satisfied_requirements=run.preparation.satisfied_requirements or [],
+                snapshots=run.preparation.snapshots or {},
+                preparation_key=run.preparation.preparation_key,
+                attempt_count=run.preparation.attempt_count,
+                error_code=run.preparation.error_code,
+                error_message=(
+                    sanitize_error_message(
+                        run.preparation.error_message,
+                        roots=(get_settings().hpc_remote_root,),
+                    )
+                    if run.preparation.error_message is not None
+                    else None
+                ),
+                started_at=run.preparation.started_at,
+                checked_at=run.preparation.checked_at,
+                finished_at=run.preparation.finished_at,
+            )
+            if run.preparation is not None
+            else None
+        ),
         created_at=run.created_at,
         started_at=run.started_at,
         finished_at=run.finished_at,
@@ -243,6 +287,7 @@ def get_owned_run(session: Session, run_id: str, principal: Principal) -> Run:
             .selectinload(RunStage.stage_result)
             .selectinload(StageResult.artifacts),
             selectinload(Run.configuration),
+            selectinload(Run.preparation),
             selectinload(Run.uploads),
         )
         .where(Run.id == run_id)
@@ -281,7 +326,7 @@ def create_run(
     """
 
     settings = settings or get_settings()
-    policy_settings = get_settings()
+    policy_settings = settings
     normalized_idempotency_key = idempotency_key.strip() if idempotency_key else None
     if normalized_idempotency_key and len(normalized_idempotency_key) > 255:
         raise HTTPException(
@@ -321,16 +366,6 @@ def create_run(
     if existing is not None:
         return existing
 
-    max_cpu = max((stage.cpu or 1 for stage in STAGE_DEFINITIONS), default=1)
-    max_gpu = max((stage.gpu or 0 for stage in STAGE_DEFINITIONS), default=0)
-    if (
-        max_cpu > policy_settings.hpc_pipeline_cpu_budget
-        or max_gpu > policy_settings.hpc_pipeline_gpu_budget
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="configured HPC budget cannot execute the registered pipeline",
-        )
     active_slot = session.scalar(
         select(ActiveRunSlot).where(ActiveRunSlot.owner_id == principal.user_id).with_for_update()
     )
@@ -459,6 +494,7 @@ def create_run(
         if not isinstance(scientific_parameters, dict):
             raise ConfigurationValidationError("scientific_parameters must be an object")
         available_requirements = _available_technical_requirements(settings, scientific_parameters)
+        defer_technical_requirements = settings.hpc_execution_mode in {"ssh", "native"}
         selection = resolve_stage_selection(
             structure_source=structure_source,
             has_structure=structure_upload is not None,
@@ -466,12 +502,70 @@ def create_run(
             scientific_accession=scientific_accession,
             scientific_parameters=scientific_parameters,
             available_technical_requirements=available_requirements,
+            defer_technical_requirements=defer_technical_requirements,
+            available_gpu_budget=settings.hpc_pipeline_gpu_budget,
+            allow_provided_pdb_substitution=(
+                settings.hpc_execution_mode not in {"ssh", "native"}
+                or settings.hpc_pipeline_pdb_substitution_enabled
+            ),
         )
     except (ConfigurationValidationError, UnicodeDecodeError) as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=str(exc),
         ) from exc
+
+    selected_definitions = [STAGE_BY_ID[stage_id] for stage_id in selection.selected_stage_ids]
+    max_cpu = max((stage.cpu or 1 for stage in selected_definitions), default=1)
+    max_gpu = max((stage.gpu or 0 for stage in selected_definitions), default=0)
+    if (
+        max_cpu > policy_settings.hpc_pipeline_cpu_budget
+        or max_gpu > policy_settings.hpc_pipeline_gpu_budget
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="configured HPC budget cannot execute the selected pipeline",
+        )
+
+    generated_fasta_storage_key: str | None = None
+    generated_fasta = False
+    if (
+        fasta_upload is None
+        and settings.hpc_execution_mode in {"ssh", "native"}
+        and settings.hpc_input_transfer_enabled
+    ):
+        # Remote profiles transfer an explicit FASTA namespace to the
+        # scientific CLI. A PDB-only confirmation still has a canonical,
+        # persisted sequence, so materialize that sequence as a run-owned
+        # internal upload instead of accepting a run that the worker cannot
+        # submit later.
+        canonical_fasta = f">{scientific_accession or protein.id}\n{protein.sequence}\n".encode()
+        try:
+            generated_fasta_storage_key, generated_size, generated_sha256 = write_upload(
+                settings,
+                canonical_fasta,
+                "canonical-sequence.fasta",
+                "fasta",
+            )
+        except UploadValidationError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="could not materialize the canonical FASTA for remote execution",
+            ) from exc
+        fasta_upload = Upload(
+            id=str(uuid4()),
+            owner_id=principal.user_id,
+            project_id=principal.project_id,
+            input_type="fasta",
+            original_filename="canonical-sequence.fasta",
+            storage_key=generated_fasta_storage_key,
+            sha256=generated_sha256,
+            size=generated_size,
+            media_type="text/plain",
+        )
+        uploads.append(fasta_upload)
+        generated_fasta = True
+        fasta_sha256 = fasta_upload.sha256
 
     omitted_stages = list(selection.omitted_stages)
     omitted_reasons = omission_by_stage(omitted_stages)
@@ -485,6 +579,7 @@ def create_run(
         "fasta": (
             {
                 "upload_id": fasta_upload.id,
+                "source": "canonical_sequence" if generated_fasta else "uploaded",
                 "filename": fasta_upload.original_filename,
                 "sha256": fasta_upload.sha256,
                 "size": fasta_upload.size,
@@ -544,8 +639,22 @@ def create_run(
         owner_id=principal.user_id,
         project_id=principal.project_id,
     )
-    session.add(run)
+    required_requirements = sorted(
+        {
+            requirement
+            for stage_id in selection.selected_stage_ids
+            for requirement in STAGE_BY_ID[stage_id].technical_requirements
+        }
+    )
+    run.preparation = RunPreparation(required_requirements=required_requirements)
     try:
+        if generated_fasta and fasta_upload is not None:
+            # Insert the generated upload before the configuration row that
+            # references its foreign key. It is still attached to the run in
+            # the same transaction once the run id is allocated below.
+            session.add(fasta_upload)
+            session.flush()
+        session.add(run)
         session.flush()
         for upload in uploads:
             upload.run_id = run.id
@@ -581,6 +690,11 @@ def create_run(
         session.commit()
     except IntegrityError as exc:
         session.rollback()
+        if generated_fasta_storage_key is not None:
+            try:
+                (settings.artifact_root / generated_fasta_storage_key).unlink(missing_ok=True)
+            except OSError:
+                pass
         existing = resolve_existing_idempotency()
         if existing is not None:
             return existing
@@ -589,6 +703,14 @@ def create_run(
         )
         existing_run = session.get(Run, slot.run_id) if slot is not None else None
         raise _active_run_conflict(existing_run) from exc
+    except Exception:
+        session.rollback()
+        if generated_fasta_storage_key is not None:
+            try:
+                (settings.artifact_root / generated_fasta_storage_key).unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
     session.refresh(run)
     return get_owned_run(session, run.id, principal)
 

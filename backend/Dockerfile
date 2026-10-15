@@ -20,7 +20,7 @@ ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-RUN mkdir -p /app/data/artifacts && chmod 0770 /app/data/artifacts
+RUN mkdir -p /app/data/artifacts && chmod 2770 /app/data/artifacts
 RUN chown -R app:app /app
 USER app
 

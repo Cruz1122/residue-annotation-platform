@@ -1,6 +1,6 @@
 # 02 — Ejecución científica en MareNostrum 5
 
-**Estado:** especificación funcional objetivo. El checkout actual tiene la frontera de worker/HPC y contratos de manifest, pero la ejecución científica end-to-end permanece pendiente de evidencia autorizada.
+**Estado:** golden path real de `protein_identity` demostrado en MN5 mediante VPN/SSH/Slurm, publicación verificada por la API y reuso posterior sin un segundo job. La aceptación científica de los stages restantes, el prefetch externo y el baseline de producción siguen pendientes; esta spec no declara producción científica completa.
 
 ## Objetivo
 
@@ -46,13 +46,26 @@ Los recursos locales de predictores, farmacogenómica y evidencia funcional no s
 
 Si un prerrequisito obligatorio no está disponible, el worker no envía un job que fallará de forma previsible. Registra el motivo, conserva la run recuperable y lo muestra como preparación fallida o pendiente según si puede reintentarse.
 
+La preparación es durable: `RunPreparation` conserva los requisitos de la run,
+los que ya fueron satisfechos, snapshots, clave de preparación, intentos y
+errores; cada `RunStage` conserva el estado y el próximo instante de reintento
+del preflight. El adapter remoto sólo recibe los requisitos faltantes de la
+etapa reclamada. La última línea del comando debe ser un acknowledgement JSON
+con `status=success` y exactamente los requisitos solicitados; texto plano,
+estados ambiguos y snapshots fuera de tamaño se rechazan. Si el comando de
+prefetch no está configurado, no reconoce algún requisito o falla, la etapa
+vuelve a `ready` con preflight bloqueado y el worker no llama a `sbatch`.
+
 ### Construcción y envío del job
 
 - El comando se construye desde `RunConfig`, no desde el estado del navegador ni de variables efímeras.
 - Se utiliza la CLI real de `main.py` observada en el pipeline remoto; no se inventan flags ni nombres de stage.
 - La solicitud conserva accession, inputs materializados, fuente AF3/PDB, variants, stages, dependencias, recursos, directorios, logs y correlación con `run_id`.
 - El worker usa `sbatch` sólo después de que inputs, prefetch, recursos y configuración hayan pasado sus gates.
+- Cuando el pipeline remoto resuelve entradas normales bajo `uploads/<protein_id>`, el worker usa un namespace `uploads/platform-run-<run_id>` aislado por run y pasa la accesión científica por `--accession`; esto evita que FASTA/PDB preexistentes bajo otra carpeta cambien la entrada confirmada.
 - El identificador Slurm se persiste inmediatamente y se puede recuperar si la respuesta de submit se pierde, evitando un doble submit.
+- Una pérdida ambigua durante `submit` no se reintenta dentro del mismo tick: la etapa queda reintentable y la siguiente invocación reconcilia primero el receipt determinista.
+- Si Slurm acepta el job pero falla la publicación del receipt, el wrapper devuelve un marcador `SUBMISSION_AMBIGUOUS:<job_id>` y el worker persiste ese `job_id` para polling/cancelación en vez de volver a enviar.
 - Slurm es fuente de verdad del estado del job remoto; PostgreSQL es fuente de verdad del estado de producto y de las transiciones persistidas de cada `RunStage`.
 
 ### Reuso antes de calcular
@@ -93,6 +106,7 @@ Un worker reiniciado reconcilia jobs ya aceptados antes de volver a enviar traba
 - El worker valida paths confinados, integridad, `aa_position` y `aa_ref`, tipos de anotación, status de salida y requisitos del stage.
 - PostgreSQL almacena estados, referencias, metadata y anotaciones necesarias para la API; los artefactos pesados permanecen en la frontera de almacenamiento autorizada y no se exponen por SSH al navegador.
 - Un crash antes del manifest final no es `success`. Un manifest corrupto o incompleto tampoco.
+- El adapter acepta el contrato MN5 desplegado, cuyo bloque de cache/provenance vive bajo `provenance.operational`, y lo enlaza con la clave local planificada mediante comprobaciones estrictas de secuencia, ejes query/reference, dependencias, parámetros, manifest y consistencia de la clave remota.
 - El inspector read-only de MN5 continúa separado del ejecutor y sólo puede consultar la raíz autorizada `/gpfs/projects/bsc08/bsc001997/vcfs_1000geno/hilo_integrado_anotacion`; la ejecución autorizada tiene su propio contrato y no convierte el inspector en feature de usuario.
 
 ## Contratos esenciales
@@ -135,7 +149,14 @@ La publicación se hace de forma atómica. No se crea una fila `success` parcial
 - El worker actual implementa claims, leases, heartbeat, recuperación y finalización: [`backend/app/features/runs/worker_service.py`](../backend/app/features/runs/worker_service.py).
 - La frontera SSH/native construye y reconcilia jobs, ingesta manifests y verifica reuso por clave e integridad: [`backend/app/features/runs/remote_executor.py`](../backend/app/features/runs/remote_executor.py).
 - El inventario remoto documenta la CLI, los 18 IDs, recursos, prerrequisitos y cachés externas: [`docs/mn5-stage-code-inventory.md`](../docs/mn5-stage-code-inventory.md).
-- La auditoría registra que no se ejecutaron jobs, `sbatch`, `scancel` ni escrituras en MN5/GPFS durante la revisión: [`AUDIT_REPORT.md`](../AUDIT_REPORT.md).
+- El preflight y la preparación durable están implementados en [`backend/app/features/runs/preflight.py`](../backend/app/features/runs/preflight.py), [`backend/app/features/runs/worker_service.py`](../backend/app/features/runs/worker_service.py) y la migración [`0008_run_preparation`](../backend/alembic/versions/0008_run_preparation.py).
+- La regresión local cubre “prefetch ausente ⇒ no submit”, prefetch selectivo y pérdida de transporte sin doble intento en [`backend/tests/test_preflight_execution.py`](../backend/tests/test_preflight_execution.py); el contrato de render/acknowledgement está cubierto en [`backend/tests/test_hpc_clients.py`](../backend/tests/test_hpc_clients.py).
+- El smoke autorizado de esta implementación ejecutó la run `adb90655-878f-4a4b-9bc3-197f38701a5e` para `P22309` con FASTA de 542 bytes y SHA `0262c498…`; el job `47310214` fue aceptado por Slurm con cuenta `bsc08`, QoS `acc_bscls`, partición `acc`, nodo `as06r1b18` y terminó `COMPLETED|0:0`.
+- La regresión real PDB-only `a86eae8d-28a7-47a9-88ca-a62d93bbe861` para `P69905` materializó un FASTA canónico run-owned (`0a5e2e95-5688-45de-8c68-2602e8d1564a`, 151 bytes, SHA `f26f7d9a…`), lo transfirió al namespace aislado del run y obtuvo el job Slurm `47311609`; se canceló mientras esperaba cola para no consumir recursos, por lo que no se presenta como evidencia de publicación científica.
+- El log remoto registró `pdb=None`, la secuencia `dd312bcf…` confirmada localmente, `CACHE MISS`, `DONE` con 533 filas y cobertura `533/533`; el manifest y el bloque `operational` de provenance pasaron las validaciones de integridad y binding del adapter.
+- PostgreSQL publicó `StageResult` `66ce5738-b8d4-4c56-be37-3dde1f9e39e1` con 13 artefactos y 46,531 bytes; la API devolvió 533 anotaciones `qc_status=verified`, desde `aa_position=1` hasta `533`, y el artefacto TSV descargado por FastAPI conservó 10,587 bytes y su SHA registrado.
+- La run `f0acc8f7-5b38-4466-822e-7e96d8afa773` reutilizó ese mismo `StageResult` con `slurm_job_id=null`, autorización owner/project e integridad de artefactos verificada; no se creó un segundo job. Ambas runs se cancelaron después del root para no iniciar stages posteriores no preparados.
+- Durante el smoke se corrigieron y quedaron cubiertos el aislamiento frente a inputs remotos ambientales, la transferencia con permisos compartidos backend/worker, el receipt de submit ausente, el provenance MN5 anidado y la carrera cancelación/preflight. Estos hechos no sustituyen un baseline científico aprobado.
 
 ## Estado actual
 
@@ -143,39 +164,48 @@ La publicación se hace de forma atómica. No se crea una fila `success` parcial
 
 - Existe un worker separado con estados, claims PostgreSQL, leases, heartbeat, cancelación y recuperación de etapas colgadas.
 - Existen perfiles offline, SSH y native, transferencia confinada de inputs y validación local de manifests.
+- El perfil SSH fue ejercitado contra el entorno autorizado: VPN activa, autenticación SSH con host key, transferencia SCP, `sbatch`, polling Slurm, lectura bounded del resultado, publicación en PostgreSQL y lectura posterior por FastAPI.
+- `RunConfiguration` conserva la intención científica confirmada: identidad, accession, hashes de inputs, fuente/mapping estructural, variantes, stages seleccionados/omitidos, parámetros, requisitos y versiones.
+- El worker ejecuta un preflight persistido antes de transferir/submit: valida identidad, hashes, accession, estructura, dependencias, recursos y requisitos técnicos; bloquea de forma recuperable lo que requiere intervención operativa.
+- El prefetch externo es selectivo y explícito para SSH/native: exige un comando configurado por el operador con `{accession}` y `{requirements}`, persiste su acknowledgement/snapshots y no permite que el payload de usuario elija un shell command.
 - La frontera remota puede recuperar un `job_id` tras pérdida de respuesta y evita doble submit en ese camino.
-- El executor remoto ingesta manifests y tiene lookup de `StageResult` reusable por `(protein_id, stage_id, cache_key)` con comprobación de artefactos.
+- El executor remoto ingesta manifests y tiene lookup de `StageResult` reusable por `(protein_id, stage_id, cache_key)` con comprobación de artefactos; para MN5 conserva la clave remota y una alias local de la configuración confirmada.
 - El registry local contiene 18 stages, dependencias, recursos y gates técnicos; el inventario remoto se revisó de forma read-only.
 
 ### Pendiente o no demostrado
 
 - [`backend/app/features/runs/worker_service.py`](../backend/app/features/runs/worker_service.py) no contiene adapters científicos locales: el executor offline falla de forma auditable en vez de inventar éxito.
-- La configuración actual de run no conserva todos los parámetros necesarios para construir el comando real ni para calcular una clave completa antes de submit.
-- El camino remoto construye una orden desde el accession y stages, pero el checkout local no contiene `main.py` científico; su compatibilidad sólo puede validarse contra el checkout remoto autorizado.
-- El prefetch aparece en la documentación del pipeline, pero no existe un gate integrado que impida `sbatch` cuando faltan cachés externas necesarias.
-- La ejecución real del golden path `run → worker → VPN/SSH/native → Slurm → manifest → PostgreSQL → API` no está demostrada. La auditoría la deja como gate pendiente.
+- La compatibilidad del command builder con `main.py` y el registry MN5 quedó demostrada para `protein_identity`; el checkout local no contiene ese `main.py` científico y los demás stages aún necesitan su propia evidencia.
+- El golden path `run → worker → VPN/SSH → Slurm → manifest → PostgreSQL → API` está demostrado sólo para `protein_identity`; no se debe extrapolar automáticamente al resto del DAG.
 - No se ha validado científicamente la equivalencia entre todos los stages ni la reutilización por cada combinación de fuente estructural, recursos y parámetros.
+
+La suite local verificable para esta base queda en `246 passed, 11 skipped` en
+backend (los skips son escenarios PostgreSQL sin
+`POSTGRES_TEST_DATABASE_URL`), `10 passed` en frontend y `astro check` sin
+diagnósticos. Esto demuestra contratos y recuperación local; junto con el
+smoke MN5 anterior demuestra el golden path de identidad, pero no sustituye
+una comparación contra baseline científico ni la aceptación del DAG completo.
 
 ## Requisitos funcionales
 
 ### Imprescindible
 
-- **EJE-001 — Preparación desde configuración.** El worker MUST leer una `RunConfig` persistida y no reconstruir la intención desde el frontend.
-- **EJE-002 — Preflight.** Antes de enviar, MUST validar identidad, inputs, accession, estructura/fuente, stages, dependencias, recursos y prerrequisitos externos de los stages seleccionados.
-- **EJE-003 — Prefetch selectivo.** En modo local, MUST preparar sólo cachés externas que los stages seleccionados necesitan y MUST impedir el submit si un prerrequisito obligatorio falla.
+- **EJE-001 — Preparación desde configuración.** Implementado localmente: el worker lee una `RunConfig` persistida y no reconstruye la intención desde el frontend.
+- **EJE-002 — Preflight.** Implementado localmente: antes de enviar, valida identidad, inputs, accession, estructura/fuente, stages, dependencias, recursos y prerrequisitos externos de los stages seleccionados.
+- **EJE-003 — Prefetch selectivo.** Implementado localmente para SSH/native: sólo prepara cachés externas que la etapa necesita y bloquea el submit si falla un prerrequisito obligatorio. La invocación real del alias queda pendiente de validación en MN5.
 - **EJE-004 — Ejecución por perfil.** El sistema MUST distinguir local VPN/SSH, MN5 native y offline/mock, sin enviar secretos al navegador ni tratar el mock como ciencia real.
-- **EJE-005 — CLI real.** El job MUST invocar la CLI y los stages reales del pipeline aprobado, con inputs, variantes, fuente estructural, recursos y directorios derivados de la configuración persistida.
-- **EJE-006 — Submit idempotente.** El worker MUST persistir y reconciliar el identificador Slurm antes de reintentar un submit, evitando doble submit tras timeout, caída o reinicio.
-- **EJE-007 — Reuso previo.** Antes de `sbatch`, MUST evaluar hits válidos de la matriz de caché y marcar el `RunStage` `reused` sin crear un job científico para ese stage.
-- **EJE-008 — Estados durables.** MUST persistir preparación, espera de recursos, ejecución, reuso, success, fallo, omisión y cancelación sin confundir `ready` con un resultado científico.
-- **EJE-009 — Manifest verificable.** MUST publicar sólo resultados con manifest final, provenance, hashes/tamaños, identidad canónica y anotaciones válidas.
+- **EJE-005 — CLI real.** Demostrado para `protein_identity`: la orden persistida usó el CLI desplegado, namespace FASTA aislado, `--accession P22309`, stage, límites de paralelismo/CPU y `--fail-fast`; el log confirmó `pdb=None` y la secuencia esperada.
+- **EJE-006 — Submit idempotente.** Implementado en la frontera local y ejercitado con un `job_id` real persistido y reconciliado hasta `COMPLETED`; el escenario real de perder la respuesta de `sbatch` todavía sólo tiene cobertura local.
+- **EJE-007 — Reuso previo.** Implementado localmente: antes de `sbatch`, evalúa hits válidos de la matriz de caché y marca el `RunStage` `reused` sin crear un job científico para ese stage.
+- **EJE-008 — Estados durables.** Implementado localmente: persiste preparación, espera de recursos, ejecución, reuso, success, fallo, omisión y cancelación sin confundir `ready` con un resultado científico.
+- **EJE-009 — Manifest verificable.** Demostrado para `protein_identity`: el worker rechazó la publicación implícita y sólo creó `StageResult` después de manifest final, provenance anidado, hashes/tamaños, identidad canónica, 13 artefactos y 533 filas de anotación válidas.
 
 ### Necesario para cerrar la entrega
 
-- **EJE-010 — Recuperación.** Tras reinicio o pérdida temporal de conectividad, MUST reconciliar jobs aceptados, renovar claims/leases y continuar o fallar de manera auditable sin duplicar cálculos.
-- **EJE-011 — Separación de artefactos.** MUST mantener artefactos pesados fuera de PostgreSQL cuando el contrato de almacenamiento lo requiera y servirlos sólo mediante FastAPI autorizado.
-- **EJE-012 — Provenance completa.** Cada stage publicado o reutilizado MUST conservar versiones de código/modelo/recursos, inputs, upstream keys, `cache_key` y correlación con la run.
-- **EJE-013 — Golden path.** MUST existir una prueba autorizada y reproducible de `protein_identity` desde la creación de la run hasta la API, antes de declarar integrados los demás stages.
+- **EJE-010 — Recuperación.** Implementado localmente para reinicio, leases, claims y pérdida temporal de transporte; el smoke real reconcilió polling y publicación de un `job_id` aceptado, pero no simuló una caída durante ese job.
+- **EJE-011 — Separación de artefactos.** Demostrado para el root real: los artefactos permanecieron fuera de PostgreSQL y FastAPI sirvió el TSV mediante el endpoint autorizado con tamaño/hash verificables.
+- **EJE-012 — Provenance completa.** El smoke validó el bloque operativo MN5, clave remota, clave local alias, secuencias query/reference, dependencias, parámetros y recurso/código remoto para `protein_identity`; la cobertura de modelos/recursos del DAG completo sigue pendiente.
+- **EJE-013 — Golden path.** Cumplido para `protein_identity`: la run real llegó desde creación y transferencia hasta Slurm, manifest, provenance, PostgreSQL y 533 anotaciones verificadas por API. Esto no declara integrados los demás stages.
 - **EJE-014 — Expansión controlada.** La incorporación de cada stage posterior MUST exigir su propio contrato, baseline, manifest y evidencia; el registro de 18 IDs por sí solo no es aceptación.
 
 ### Posterior, sin bloquear la primera corrida
@@ -201,27 +231,22 @@ La publicación se hace de forma atómica. No se crea una fila `success` parcial
 - Una run correctamente configurada llega al pipeline real en MN5 por un perfil autorizado y se obtiene un `job_id` persistido.
 - La prueba local demuestra que el preflight no envía `sbatch` cuando falta una caché externa obligatoria o un input incompatible.
 - La prueba de recuperación tras perder la respuesta de submit reconcilia el job existente y no crea un segundo job.
-- El golden path de `protein_identity` publica un manifest real, provenance, artefactos y anotaciones verificables en PostgreSQL y los expone por FastAPI.
-- Una segunda run de la misma proteína reutiliza sólo los stages cuyo hit satisface la matriz científica; los demás se envían con su propia asociación.
+- El golden path de `protein_identity` publica un manifest real, provenance, artefactos y anotaciones verificables en PostgreSQL y los expone por FastAPI. **Demostrado:** 47310214, 13 artefactos y 533 filas.
+- Una segunda run de la misma proteína reutiliza sólo los stages cuyo hit satisface la matriz científica; los demás se envían con su propia asociación. **Demostrado para `protein_identity`:** `f0acc8f7…` quedó `reused`, sin `slurm_job_id` nuevo y con integridad verificada.
 - Un artefacto alterado, ausente o un manifest inválido producen miss/fallo auditable, nunca `success` parcial.
 - La desconexión VPN/SSH no marca como fallido un job Slurm ya aceptado sin reconciliación.
 - La evidencia distingue pruebas mock/locales de una ejecución autorizada en MN5. No se declara integración end-to-end únicamente porque pasen tests unitarios.
 
 ## Trabajo pendiente
 
-1. Completar `RunConfig` y el cálculo de selección/cache antes de que el worker reclame un stage.
-2. Implementar el preflight que resuelva accession, inputs, recursos, fuente estructural y cachés necesarias por stage.
-3. Integrar el prefetch real y su resultado durable en los modos local y native, respetando la frontera read-only del inspector.
-4. Reconciliar el command builder con la `main.py` y el registry del checkout MN5 autorizado.
-5. Hacer que el lookup de `StageResult` ocurra antes de submit y que las carreras de publicación sean transaccionales.
-6. Ejecutar, con autorización, el golden path de `protein_identity` y conservar logs, manifests, hashes y timings mínimos.
-7. Validar el primer stage y después expandir uno a uno, comenzando por dependencias de identidad y evidencia, y luego por estructura/ensemble/variantes.
-8. Probar reinicio del worker, timeout de submit, pérdida VPN/SSH, fallo de Slurm, manifest corrupto y cancelación.
-9. Registrar baseline científico y aprobación independiente antes de anunciar que un stage produce resultados confiables.
+1. Validar el alias de prefetch, módulos, capacidades técnicas, cuotas y la compatibilidad exacta del command builder contra el checkout autorizado de MN5 para cada stage que lo necesite.
+2. Probar en staging autorizado reinicio del worker durante un job real, timeout de submit, pérdida VPN/SSH, fallo de Slurm, manifest corrupto y cancelación con un job real.
+3. Registrar baseline científico y aprobación independiente antes de anunciar que un stage produce resultados confiables.
+4. Validar uno a uno los 17 stages restantes, comenzando por dependencias de identidad y evidencia, y luego por estructura/ensemble/variantes; cada uno necesita su manifest, provenance, baseline y política de reuso.
 
 ## Fuera de alcance
 
-- Ejecutar jobs reales durante esta reestructuración documental.
+- Ejecutar el DAG científico completo y declararlo producción durante esta entrega.
 - Exponer VPN, SSH, Slurm, GPFS, prefetch o un navegador de archivos al usuario.
 - Desplegar microservicios, Kubernetes o una cola nueva.
 - Implementar adaptadores científicos ficticios para simular los 18 stages.

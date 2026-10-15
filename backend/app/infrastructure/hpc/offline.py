@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from uuid import uuid4
 
-from app.infrastructure.hpc.base import JobHandle, JobRequest, JobState, JobStatus
+from app.infrastructure.hpc.base import (
+    JobHandle,
+    JobRequest,
+    JobState,
+    JobStatus,
+    PrefetchRequest,
+    PrefetchResult,
+)
 
 
 class OfflineHPCClient:
@@ -32,3 +39,10 @@ class OfflineHPCClient:
         status = JobStatus(job_id=job_id, state=JobState.CANCELLED, message="cancelled offline")
         self.jobs[job_id] = status
         return status
+
+    def prepare_external(self, request: PrefetchRequest) -> PrefetchResult:
+        return PrefetchResult(
+            status="failed",
+            requirements=request.requirements,
+            message="offline execution has no scientific prefetch runner",
+        )

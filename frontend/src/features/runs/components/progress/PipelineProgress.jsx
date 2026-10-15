@@ -122,6 +122,10 @@ function buildEdges(stages, positions) {
 
 function StageRuntime({ stage, now }) {
   if (stage.status === 'disabled') return <span>Desactivado</span>;
+  if (stage.preflight_status === 'blocked') {
+    return <span>Preparación pendiente · {stage.preflight_error_message ?? 'prerrequisito no disponible'}</span>;
+  }
+  if (stage.preflight_status === 'running') return <span>Comprobando prerrequisitos…</span>;
   if (stage.status === 'skipped' && stage.omission_reason) {
     return <span>No aplica · {OMISSION_REASON_TEXT[stage.omission_reason] ?? stage.omission_reason}</span>;
   }
@@ -317,6 +321,7 @@ export default function PipelineProgress({ proteinId }) {
         </div>
       </header>
       {run.status === 'pending' && <p class="progress-waiting">El worker todavía no ha tomado esta corrida. Cancélala si quieres liberar el cupo y registrar otra.</p>}
+      {run.preparation?.status === 'blocked' && <p class="progress-waiting">La preparación está pendiente: {run.preparation.error_message ?? 'falta un prerrequisito operativo'}.</p>}
       {run.stages?.some((stage) => stage.error_code === 'stage_execution_unavailable') && <p class="progress-waiting">Esta corrida no se envió al clúster. El worker local no abre la VPN ni lanza Slurm: el túnel lo gestiona el host y el envío exige el perfil SSH.</p>}
       {error && <p class="progress-inline-error" role="alert">{error}</p>}
       <div ref={viewportRef} class="pipeline-scroll" onWheel={(event) => {

@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 from app.core.config import Settings
 from app.features.annotations.models import ANNOTATION_TABLES
+from app.features.artifacts.storage import ArtifactStore
 from app.features.runs.cache import (
     expected_artifact_types_for_stage,
     planned_stage_cache_identity,
@@ -15,6 +16,7 @@ from app.features.runs.remote_executor import (
     RemoteStageExecutionError,
     SSHStageExecutor,
     _expected_remote_provenance_binding,
+    _validate_legacy_remote_cache_contract,
     _validated_local_cache_plan,
 )
 from app.features.runs.worker_service import claim_ready_stage
@@ -27,9 +29,13 @@ from app.infrastructure.hpc.base import (
     JobState,
     JobStatus,
 )
-from app.infrastructure.hpc.transfer import remote_pipeline_input_path
+from app.infrastructure.hpc.transfer import (
+    remote_pipeline_input_namespace,
+    remote_pipeline_input_path,
+)
 from paramiko.ssh_exception import AuthenticationException, BadHostKeyException
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 SEQUENCE = "ACDEFGHIKLMNPQRSTVWY"
 
@@ -368,6 +374,35 @@ def test_remote_failure_message_redacts_untrusted_paths(tmp_path: Path):
     assert "secret-value" not in message
 
 
+def test_remote_script_is_cpu_only_and_defensively_skips_gpu_pipeline_stages(tmp_path: Path):
+    settings = Settings(
+        app_env="test",
+        database_url="sqlite://",
+        artifact_root=tmp_path / "artifacts",
+        hpc_remote_root="/gpfs/test",
+        hpc_pipeline_cpu_budget=120,
+        hpc_pipeline_gpu_budget=0,
+        hpc_pipeline_pdb_substitution_enabled=False,
+    )
+    executor = SSHStageExecutor.__new__(SSHStageExecutor)
+    executor.settings = settings
+    run = SimpleNamespace(
+        id="run-1",
+        configuration=SimpleNamespace(structure_source="provided_pdb"),
+    )
+    stage = SimpleNamespace(stage_id="protein_identity")
+
+    script = executor._script(run, stage, "P00001", "/gpfs/test/.platform_jobs/run-1/result")
+
+    assert "--cpu-budget 120" in script
+    assert "--stages protein_identity" in script
+    assert "--skip-stage conformational_ensemble" in script
+    assert "--skip-stage membrane_topology" in script
+    assert "--skip-stage sequence_frustration" in script
+    assert "--skip-stage structure_modeling" in script
+    assert "--gres=gpu:" not in script
+
+
 @pytest.mark.parametrize(
     "remote_type",
     [FakeTransportUnavailableRemote, FakeTransportUnavailableDuringIngest],
@@ -406,7 +441,7 @@ def test_remote_transport_outage_keeps_accepted_stage_retryable(
     session.expire_all()
     persisted_stage = session.get(RunStage, stage.id)
     assert persisted_stage is not None
-    assert persisted_stage.status == "queued"
+    assert persisted_stage.status == "running"
     assert persisted_stage.error_code is None
     assert session.scalar(select(StageResult)) is None
 
@@ -611,9 +646,12 @@ def test_submit_poll_and_ingest_persist_a_linked_stage_result(client, session, t
         f"/gpfs/test/.platform_jobs/{created_run.json()['id']}/protein_identity.submitted"
     )
     remote_script = remote.requests[0].command[2]
-    assert "python main.py P00001 --accession P00001" in remote_script
+    assert (
+        f"python main.py {remote_pipeline_input_namespace(created_run.json()['id'])} "
+        "--accession P00001"
+    ) in remote_script
     pipeline_line = next(line for line in remote_script.splitlines() if line.startswith("python"))
-    assert created_run.json()["id"] not in pipeline_line
+    assert remote_pipeline_input_namespace(created_run.json()["id"]) in pipeline_line
     assert "set -u" in remote_script
     assert "pipeline_status=$?" in remote_script
     assert 'exit "$pipeline_status"' in remote_script
@@ -840,7 +878,12 @@ def test_remote_submit_selects_transferred_pipeline_inputs(client, session, tmp_
     attached = run.uploads[0]
     attached.transfer_status = "uploaded"
     attached.remote_path = remote_pipeline_input_path(
-        settings, "P00001", run.id, attached.id, ".fasta", input_type="fasta"
+        settings,
+        remote_pipeline_input_namespace(run.id),
+        run.id,
+        attached.id,
+        ".fasta",
+        input_type="fasta",
     )
     session.commit()
     session.refresh(run)
@@ -864,6 +907,40 @@ def test_remote_submit_selects_transferred_pipeline_inputs(client, session, tmp_
     assert configuration_manifest["versions"] == run.configuration.versions
     assert "PIPELINE_STRUCTURE_MAPPING_JSON" in remote.requests[0].environment
     assert "PIPELINE_UPSTREAM_CACHE_KEYS_JSON" in remote.requests[0].environment
+
+
+def test_remote_submit_rejects_ambient_inputs_when_transfer_is_enabled(
+    client, session, tmp_path: Path
+):
+    protein = client.post(
+        "/api/v1/proteins",
+        json={
+            "sequence": SEQUENCE,
+            "aliases": [{"source": "uniprot", "identifier": "P00001"}],
+        },
+    )
+    assert protein.status_code == 201
+    created_run = client.post("/api/v1/runs", json={"protein_id": protein.json()["id"]})
+    assert created_run.status_code == 201
+
+    settings = Settings(
+        app_env="test",
+        database_url="sqlite://",
+        artifact_root=tmp_path / "artifacts",
+        hpc_remote_root="/gpfs/test",
+        hpc_input_transfer_enabled=True,
+    )
+    stage = claim_ready_stage(session, settings)
+    assert stage is not None
+    remote = FakeCompletedRemote(created_run.json()["id"])
+    executor = SSHStageExecutor.__new__(SSHStageExecutor)
+    executor.settings = settings
+    executor.client = remote
+
+    _prepare_remote(remote, stage)
+    with pytest.raises(RemoteStageExecutionError, match="attached FASTA input"):
+        executor.submit_stage(session, stage)
+    assert remote.requests == []
 
 
 def test_truncated_remote_manifest_fails_stage_without_publishing(client, session, tmp_path: Path):
@@ -969,6 +1046,63 @@ def test_remote_provenance_binding_must_match_confirmed_configuration(
     assert session.scalar(select(StageResult)) is None
 
 
+def test_legacy_mn5_cache_payload_binds_remote_identity_to_local_configuration(
+    client, session, tmp_path: Path
+):
+    protein = client.post("/api/v1/proteins", json={"sequence": SEQUENCE})
+    assert protein.status_code == 201
+    created_run = client.post("/api/v1/runs", json={"protein_id": protein.json()["id"]})
+    assert created_run.status_code == 201
+
+    settings = Settings(
+        app_env="test",
+        database_url="sqlite://",
+        artifact_root=tmp_path / "artifacts",
+        hpc_remote_root="/gpfs/test",
+    )
+    stage = claim_ready_stage(session, settings)
+    assert stage is not None
+    local_cache_key = _prepare_remote(FakeCompletedRemote(stage.run_id), stage)
+    expected_sequence = stage.run.configuration.sequence_sha256
+    payload = {
+        "schema": "stage-cache-v2",
+        "stage_id": stage.stage_id,
+        "contract_version": STAGE_BY_ID[stage.stage_id].stage_version,
+        "stage_code_sha256": "a" * 64,
+        "sequence_sha256": expected_sequence,
+        "query_sequence_sha256": expected_sequence,
+        "reference_sequence_sha256": expected_sequence,
+        "dependency_cache_keys": {},
+        "resource_identity": "remote-resource",
+        "scientific_parameters": {"remote_resource_version": "pinned-by-mn5"},
+    }
+    remote_cache_key = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode()
+    ).hexdigest()
+    manifest = {"metadata": {"canonical_sequence_sha256": expected_sequence}}
+    provenance = {
+        "operational": {
+            "cache_key": remote_cache_key,
+            "sequence_sha256": expected_sequence,
+            "cache_payload": payload,
+        }
+    }
+
+    binding = _validate_legacy_remote_cache_contract(
+        stage,
+        local_cache_key,
+        remote_cache_key,
+        manifest,
+        provenance,
+    )
+
+    assert binding["platform_cache_key"] == local_cache_key
+    assert binding["remote_cache_key"] == remote_cache_key
+    assert binding["remote_stage_code_sha256"] == "a" * 64
+    assert binding["scientific_parameters"] == {"remote_resource_version": "pinned-by-mn5"}
+    assert binding["confirmed_scientific_parameters"] == {}
+
+
 def test_remote_ingest_requires_a_locally_planned_cache_identity(client, session, tmp_path: Path):
     protein = client.post("/api/v1/proteins", json={"sequence": SEQUENCE})
     assert protein.status_code == 201
@@ -1044,6 +1178,57 @@ def test_remote_ingest_rejects_cache_factor_drift(client, session, tmp_path: Pat
         executor._ingest_result(session, stage)
 
     assert session.scalar(select(StageResult)) is None
+
+
+def test_concurrent_cache_publication_reuses_committed_winner(
+    client, session, tmp_path: Path, monkeypatch
+):
+    protein = client.post(
+        "/api/v1/proteins",
+        json={"sequence": SEQUENCE, "aliases": [{"source": "uniprot", "identifier": "P00001"}]},
+    )
+    assert protein.status_code == 201
+    created_run = client.post("/api/v1/runs", json={"protein_id": protein.json()["id"]})
+    assert created_run.status_code == 201
+    settings = Settings(
+        app_env="test",
+        database_url="sqlite://",
+        artifact_root=tmp_path / "artifacts",
+        hpc_remote_root="/gpfs/test",
+    )
+    stage = claim_ready_stage(session, settings)
+    assert stage is not None
+    executor = SSHStageExecutor.__new__(SSHStageExecutor)
+    executor.settings = settings
+    cache_key = _prepare_remote(executor, stage)
+    store = ArtifactStore(settings)
+    temporary_key = "remote/loser/annotations.tsv"
+    temporary_path = store.resolve(temporary_key)
+    temporary_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path.write_bytes(b"losing publication")
+    winner = SimpleNamespace(id="winner-stage-result")
+    monkeypatch.setattr(
+        executor,
+        "_find_reusable_result",
+        lambda *_args, **_kwargs: winner,
+    )
+    error = IntegrityError(
+        "INSERT",
+        {},
+        Exception("UNIQUE constraint failed: stage_results.uq_stage_result_cache"),
+    )
+
+    recovered = executor._recover_concurrent_cache_publication(
+        session,
+        stage,
+        cache_key,
+        store,
+        [temporary_key],
+        error,
+    )
+
+    assert recovered == (winner.id, True)
+    assert not temporary_path.exists()
 
 
 def test_cache_plan_requires_every_declared_dependency(client, session):

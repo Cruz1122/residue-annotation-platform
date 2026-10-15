@@ -146,16 +146,25 @@ docker compose --profile vpn run --rm --no-deps \
     find /app/data/artifacts -xdev -exec chown --no-dereference 999:999 {} +
     find /app/data/artifacts -xdev -type d -exec chmod g+rwx {} +
     find /app/data/artifacts -xdev -type f -exec chmod g+rw {} +
+    chmod 2770 /app/data/artifacts
   '
 ```
 
 Verify that the artifact root and a representative existing artifact are
 readable/writable by the configured non-root worker before restarting the
 profile. For a new volume, the image initializes `/app/data/artifacts` with
-`999:999` and mode `0770`, so this migration is not required. If the host
-secret files are owned by a different UID, set `HPC_WORKER_UID` and
-`HPC_WORKER_GID` to that owner before starting the VPN profile; do not loosen
+`999:999` and mode `2770` (setgid), so descendants inherit the shared app
+group and this migration is not required. If the host
+secret files are owned by a different UID, set `HPC_WORKER_UID` to that owner
+before starting the VPN profile; the worker uses `HPC_APP_GID` for the shared
+artifact volume. Do not loosen
 their `0600` mode.
+
+For the native MN5 profile, keep `HPC_NATIVE_GID` as the cluster account's
+primary group and set `HPC_APP_GID` to the backend image group. Compose adds
+that group as a supplemental group to `worker-mn5`; verify the artifact root
+retains its setgid bit (`stat -c '%A %G %n' /app/data/artifacts`) after a
+volume migration.
 
 ## Controlled deployment and rollback
 

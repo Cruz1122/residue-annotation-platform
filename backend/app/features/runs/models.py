@@ -53,6 +53,11 @@ class Run(Base):
     uploads: Mapped[list[Upload]] = relationship(
         back_populates="run", cascade="all, delete-orphan", order_by="Upload.created_at"
     )
+    preparation: Mapped[RunPreparation | None] = relationship(
+        back_populates="run",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
 
 
 class Upload(Base):
@@ -137,6 +142,38 @@ class RunConfiguration(Base):
     run: Mapped[Run] = relationship(back_populates="configuration")
 
 
+class RunPreparation(Base):
+    """Durable state for preflight and external-cache preparation.
+
+    Scientific configuration remains immutable in ``RunConfiguration``. This
+    separate record captures operational progress and can safely be retried
+    after a worker restart without changing the user's confirmed intent.
+    """
+
+    __tablename__ = "run_preparations"
+    __table_args__ = (UniqueConstraint("run_id", name="uq_run_preparation_run_id"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("runs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
+    required_requirements: Mapped[list[str]] = mapped_column(JSON, default=list)
+    satisfied_requirements: Mapped[list[str]] = mapped_column(JSON, default=list)
+    snapshots: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
+    preparation_key: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    attempt_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    run: Mapped[Run] = relationship(back_populates="preparation")
+
+
 class RunIdempotencyKey(Base):
     """Binds a client retry key to exactly one confirmed run."""
 
@@ -195,6 +232,11 @@ class RunStage(Base):
             "status",
             "poll_claim_expires_at",
         ),
+        Index(
+            "ix_run_stages_preflight_retry",
+            "preflight_status",
+            "preflight_retry_at",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -221,6 +263,18 @@ class RunStage(Base):
     )
     error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    preflight_status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="pending", server_default="pending"
+    )
+    preflight_error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    preflight_error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    preflight_details: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
+    preflight_checked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    preflight_retry_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
