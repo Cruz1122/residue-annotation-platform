@@ -54,12 +54,14 @@ Una solicitud explícita de nueva ejecución y un reintento técnico de la misma
 - Una nueva solicitud siempre crea un `run_id` distinto, una configuración propia, historial propio, estado propio y asociaciones `RunStage` propias.
 - Un reintento HTTP con la misma clave de idempotencia, o una repetición causada por pérdida de respuesta, debe resolver la run ya creada y no crear otra por accidente.
 - La entidad `Protein` puede deduplicarse por identidad biológica. La deduplicación de la proteína nunca debe deduplicar la run.
-- Un `StageResult` publicado puede asociarse a más de una run cuando la equivalencia científica está demostrada. El reuso no convierte dos runs en una sola.
+- Un `StageResult` publicado puede asociarse a más de una run del mismo ámbito de autorización cuando la equivalencia científica está demostrada. El reuso no convierte dos runs en una sola.
+- La identidad de Protein se comparte globalmente por hash de secuencia normalizada; cada proyecto que la registra puede usarla. Los aliases iguales se deduplican en esa identidad compartida.
+- Las cachés científicas de MN5 pueden reutilizar stages entre solicitudes/proyectos sólo cuando la clave científica, provenance y recursos coincidan. La plataforma mantiene los `StageResult` y artefactos publicados dentro del ámbito owner/project de cada run; un hit remoto no autoriza leer artefactos privados de otro proyecto.
 - El límite actual de una run no terminal por usuario es una política de concurrencia, no una regla de unicidad de proteína ni un mecanismo de deduplicación. Debe mantenerse separado de la semántica de runs independientes hasta que el equipo decida si permite solicitudes concurrentes.
 
 ### Política de reuso por stage
 
-La posibilidad de reutilizar no se decide sólo porque dos solicitudes nombren la misma proteína. El hit requiere, como mínimo, un `stage_id` y una `cache_key` científica idénticos, un resultado `success`, todos los artefactos requeridos presentes e íntegros y autorización para que la nueva run pueda verlos.
+La posibilidad de reutilizar no se decide sólo porque dos solicitudes nombren la misma proteína. El hit requiere, como mínimo, un `stage_id` y una `cache_key` científica idénticos, un resultado `success`, todos los artefactos requeridos presentes e íntegros y autorización para que la nueva run pueda verlos. En MN5, un hit de caché de ejecución puede ahorrar el cálculo entre proyectos; el resultado que se ingresa en la plataforma para la nueva run permanece dentro del ámbito owner/project de esa run.
 
 La clave debe incluir todos los factores que puedan cambiar el resultado: versión y código del stage, identidad de recursos y modelos, parámetros científicos normalizados, hashes de secuencia query/reference cuando apliquen y las claves de los resultados upstream. El logging, el formato de logs y otros controles no científicos no deben invalidar una equivalencia.
 
@@ -94,7 +96,7 @@ Los resultados compartidos se indexan como `StageResult` independiente de la run
 
 - `Run`: solicitud del usuario y estado global.
 - `RunStage`: una instancia de cada stage aplicable dentro de una run.
-- `StageResult`: output científico reusable identificado por proteína, stage y `cache_key`.
+- `StageResult`: output científico reusable identificado por proteína, stage y `cache_key`, persistido por ámbito de proyecto para conservar la privacidad de artefactos.
 - `Artifact`: bytes o referencias de output con tamaño, hash, tipo y provenance.
 - Estado `reused`: el `RunStage` queda terminado y enlaza un `StageResult` válido; no representa una ejecución nueva del cálculo.
 
@@ -104,7 +106,7 @@ La autorización se comprueba antes de vincular o servir un resultado. Compartir
 
 - El registro local contiene 18 `StageDefinition`, dependencias, artefactos consumidos y parámetros de caché: [`backend/app/features/stages/registry.py`](../backend/app/features/stages/registry.py).
 - La clave canónica contempla `stage_id`, versión/código, secuencias, dependencias, recursos y parámetros científicos: [`backend/app/features/runs/cache.py`](../backend/app/features/runs/cache.py).
-- La persistencia actual impone unicidad por `(protein_id, stage_id, cache_key)` y permite que `RunStage` apunte a `StageResult`: [`backend/app/features/runs/models.py`](../backend/app/features/runs/models.py).
+- La persistencia impone unicidad por `(protein_id, stage_id, cache_key, project_id)` y permite que `RunStage` apunte a un `StageResult` propio del ámbito autorizado: [`backend/app/features/runs/models.py`](../backend/app/features/runs/models.py).
 - El contrato de manifest exige clave, provenance e integridad antes de publicar: [`specs-archive/2026-10-14/contracts/hpc-manifest-cache.md`](../docs/specs-archive/2026-10-14/contracts/hpc-manifest-cache.md).
 
 ## Estado actual
@@ -173,7 +175,7 @@ La autorización se comprueba antes de vincular o servir un resultado. Compartir
 - Dos confirmaciones idénticas realizadas como solicitudes independientes producen `run_id`, historial, estado y `RunStage` distintos. Una sola petición repetida técnicamente no produce una segunda run.
 - Para una segunda run, sólo se marca `reused` cada stage cuyo `cache_key`, provenance, autorización y artefactos íntegros coincidan. Un miss ejecuta el stage; no se aceptan hits por proteína sola.
 - Un cambio de AF3 a PDB, de variante, de versión de stage, de recurso, de parámetro científico o de estructura invalida el reuso afectado.
-- Una prueba de autorización demuestra que un usuario/proyecto no puede reutilizar ni descargar un resultado privado fuera de su ámbito.
+- Una prueba de autorización demuestra que un usuario/proyecto no puede reutilizar ni descargar un `StageResult` o artefacto privado fuera de su ámbito, aunque la identidad Protein sea compartida.
 
 ## Trabajo pendiente
 

@@ -131,7 +131,7 @@ flowchart LR
 
 ### Reuso y publicación
 
-La unicidad actual de `StageResult` por `(protein_id, stage_id, cache_key)` es un índice de resultado, no un identificador de run. El worker debe conservar esa separación y aplicar el mismo criterio de equivalencia tanto para hits previos como para carreras donde dos runs intenten publicar el mismo resultado.
+La unicidad de `StageResult` por `(protein_id, stage_id, cache_key, project_id)` es un índice de resultado por ámbito autorizado, no un identificador de run. El worker debe conservar esa separación y aplicar el mismo criterio de equivalencia tanto para hits previos como para carreras donde dos runs del mismo ámbito intenten publicar el mismo resultado. La caché científica del backend MN5 puede evitar cálculos equivalentes entre proyectos; la ingestión registra el resultado/artefactos de cada run bajo su propio ámbito y no concede acceso cruzado.
 
 El resultado reutilizable debe tener:
 

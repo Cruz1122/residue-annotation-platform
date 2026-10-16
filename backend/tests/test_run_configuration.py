@@ -435,6 +435,70 @@ def test_cache_identity_ignores_logging_only_parameters(client, session):
     assert first_factors == second_factors
 
 
+def test_stage_results_with_same_scientific_cache_key_are_scoped_by_project(client, session):
+    project_a = {"X-User-Id": "user-a", "X-Project-Id": "project-a"}
+    project_b = {"X-User-Id": "user-b", "X-Project-Id": "project-b"}
+    protein_a = client.post(
+        "/api/v1/proteins", headers=project_a, json={"sequence": "ACDEFGHIKLMN"}
+    )
+    assert protein_a.status_code == 201
+    run_a_response = client.post(
+        "/api/v1/runs", headers=project_a, json={"protein_id": protein_a.json()["id"]}
+    )
+    assert run_a_response.status_code == 201
+
+    protein_b = client.post(
+        "/api/v1/proteins", headers=project_b, json={"sequence": "ACDEFGHIKLMN"}
+    )
+    assert protein_b.status_code == 200
+    run_b_response = client.post(
+        "/api/v1/runs", headers=project_b, json={"protein_id": protein_b.json()["id"]}
+    )
+    assert run_b_response.status_code == 201
+
+    run_a = session.get(Run, run_a_response.json()["id"])
+    run_b = session.get(Run, run_b_response.json()["id"])
+    assert run_a is not None and run_b is not None
+    stage_a = next(item for item in run_a.stages if item.stage_id == "protein_identity")
+    stage_b = next(item for item in run_b.stages if item.stage_id == "protein_identity")
+    cache_key_a, _ = planned_stage_cache_identity(stage_a, run_a.configuration, {})
+    cache_key_b, _ = planned_stage_cache_identity(stage_b, run_b.configuration, {})
+    assert cache_key_a == cache_key_b
+
+    session.add_all(
+        [
+            StageResult(
+                protein_id=run_a.protein_id,
+                stage_id=stage_a.stage_id,
+                cache_key=cache_key_a,
+                status="success",
+                provenance={},
+                owner_id=run_a.owner_id,
+                project_id=run_a.project_id,
+            ),
+            StageResult(
+                protein_id=run_b.protein_id,
+                stage_id=stage_b.stage_id,
+                cache_key=cache_key_b,
+                status="success",
+                provenance={},
+                owner_id=run_b.owner_id,
+                project_id=run_b.project_id,
+            ),
+        ]
+    )
+    session.flush()
+
+    rows = session.scalars(
+        select(StageResult).where(
+            StageResult.protein_id == run_a.protein_id,
+            StageResult.stage_id == stage_a.stage_id,
+            StageResult.cache_key == cache_key_a,
+        )
+    ).all()
+    assert {row.project_id for row in rows} == {"project-a", "project-b"}
+
+
 def test_history_keeps_independent_runs_and_configurations(client, session):
     protein_id = _protein(client)
     first = client.post("/api/v1/runs", json={"protein_id": protein_id})

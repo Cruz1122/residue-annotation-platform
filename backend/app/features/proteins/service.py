@@ -4,13 +4,13 @@ import hashlib
 import re
 from dataclasses import dataclass
 
-from sqlalchemy import select
+from sqlalchemy import insert, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.auth import Principal
 from app.core.config import Settings
-from app.features.proteins.models import Protein, ProteinIdentifier
+from app.features.proteins.models import Protein, ProteinIdentifier, ProteinProjectAccess
 from app.features.proteins.schemas import ProteinAliasInput
 
 AMINO_ACIDS = frozenset("ACDEFGHIKLMNPQRSTVWY")
@@ -71,6 +71,22 @@ def _serialize(protein: Protein) -> dict[str, object]:
     }
 
 
+def protein_accessible_to(session: Session, principal: Principal, protein: Protein) -> bool:
+    """Return whether the principal owns, administers, or joined this Protein."""
+
+    if principal.can_access(protein.owner_id, protein.project_id):
+        return True
+    return (
+        session.scalar(
+            select(ProteinProjectAccess.protein_id).where(
+                ProteinProjectAccess.protein_id == protein.id,
+                ProteinProjectAccess.project_id == principal.project_id,
+            )
+        )
+        is not None
+    )
+
+
 def register_protein(
     session: Session,
     principal: Principal,
@@ -104,8 +120,27 @@ def register_protein(
         else:
             created = True
 
-    if not principal.can_access(protein.owner_id, protein.project_id):
-        raise PermissionError("protein belongs to another project")
+    dialect = session.get_bind().dialect.name
+    if dialect == "postgresql":
+        from sqlalchemy.dialects.postgresql import insert as dialect_insert
+
+        access_statement = dialect_insert(ProteinProjectAccess)
+    elif dialect == "sqlite":
+        from sqlalchemy.dialects.sqlite import insert as dialect_insert
+
+        access_statement = dialect_insert(ProteinProjectAccess)
+    else:
+        access_statement = insert(ProteinProjectAccess)
+    access_statement = access_statement.values(
+        protein_id=protein.id,
+        project_id=principal.project_id,
+    )
+    if dialect in {"postgresql", "sqlite"}:
+        session.execute(
+            access_statement.on_conflict_do_nothing(index_elements=["protein_id", "project_id"])
+        )
+    elif session.get(ProteinProjectAccess, (protein.id, principal.project_id)) is None:
+        session.add(ProteinProjectAccess(protein_id=protein.id, project_id=principal.project_id))
 
     known_aliases = {(item.source, item.identifier) for item in protein.identifiers}
     candidate_aliases = list(aliases)

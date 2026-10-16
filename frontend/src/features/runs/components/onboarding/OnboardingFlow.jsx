@@ -556,15 +556,6 @@ export default function OnboardingFlow() {
         </div>
       ) : (
         <>
-          <p class="onboarding-subtitle">Opcional · selecciona posiciones y cambia el aminoácido mutante. Los cambios persisten automáticamente.</p>
-
-          <section class="configuration-summary" aria-label="Resumen de la configuración">
-            <div><span>Entrada</span><strong>{upload.fasta.status === 'done' && pdbAttached ? 'FASTA + PDB' : pdbAttached ? 'PDB' : 'FASTA'}</strong></div>
-            <div><span>Fuente estructural</span><strong>{structureSource === 'provided_pdb' ? 'Usar PDB proporcionado' : 'Generar con AlphaFold 3'}</strong></div>
-            <div><span>Variantes</span><strong>{hasVariants ? `${variantsRef.current.size} seleccionada${variantsRef.current.size === 1 ? '' : 's'}` : 'Ninguna · stages dependientes omitidos'}</strong></div>
-            <p>El backend calculará el DAG científico real, sus prerrequisitos y las posibilidades de reuso antes de ejecutar.</p>
-          </section>
-
           <section class="variant-stage" aria-label="Cadena completa para seleccionar variantes">
             <header class="variant-sequence-head">
               <strong>Cadena A</strong>

@@ -61,6 +61,48 @@ def test_run_history_keeps_two_runs_of_one_protein_independent(client):
     assert len(by_id[first_id]["stages"]) == len(by_id[second_id]["stages"]) == 18
 
 
+def test_projects_create_independent_runs_from_the_same_shared_protein(client, session):
+    project_a = {"X-User-Id": "user-a", "X-Project-Id": "project-a"}
+    project_b = {"X-User-Id": "user-b", "X-Project-Id": "project-b"}
+    first_protein = client.post("/api/v1/proteins", headers=project_a, json={"sequence": SEQUENCE})
+    assert first_protein.status_code == 201
+    first_run = client.post(
+        "/api/v1/runs", headers=project_a, json={"protein_id": first_protein.json()["id"]}
+    )
+    assert first_run.status_code == 201, first_run.text
+
+    second_protein = client.post(
+        "/api/v1/proteins", headers=project_b, json={"sequence": SEQUENCE.lower()}
+    )
+    assert second_protein.status_code == 200, second_protein.text
+    assert second_protein.json()["id"] == first_protein.json()["id"]
+    second_run = client.post(
+        "/api/v1/runs", headers=project_b, json={"protein_id": second_protein.json()["id"]}
+    )
+
+    assert second_run.status_code == 201, second_run.text
+    assert second_run.json()["id"] != first_run.json()["id"]
+    second_run_row = session.get(Run, second_run.json()["id"])
+    assert second_run_row is not None
+    assert second_run_row.owner_id == "user-b"
+    assert second_run_row.project_id == "project-b"
+    assert client.get("/api/v1/runs", headers=project_a).json()[0]["id"] == first_run.json()["id"]
+    assert client.get("/api/v1/runs", headers=project_b).json()[0]["id"] == second_run.json()["id"]
+    assert (
+        client.get(f"/api/v1/runs/{first_run.json()['id']}", headers=project_b).status_code == 403
+    )
+    assert (
+        client.get(f"/api/v1/runs/{second_run.json()['id']}", headers=project_a).status_code == 403
+    )
+    unlinked_project = {"X-User-Id": "user-c", "X-Project-Id": "project-c"}
+    unlinked_run = client.post(
+        "/api/v1/runs",
+        headers=unlinked_project,
+        json={"protein_id": first_protein.json()["id"]},
+    )
+    assert unlinked_run.status_code == 403
+
+
 def test_run_history_supports_authorized_pagination(client):
     protein_id = _create_protein(client)
     run_ids = []

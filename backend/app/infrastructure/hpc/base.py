@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import shlex
 from dataclasses import dataclass, field
 from enum import StrEnum
+from pathlib import PurePosixPath
 from typing import Protocol
+from uuid import uuid4
 
 
 class HPCTransportError(Exception):
@@ -22,6 +25,79 @@ class HPCSubmissionAmbiguousError(HPCTransportError):
 
 class HPCConfigurationError(RuntimeError):
     """A permanent HPC configuration failure requiring operator action."""
+
+
+class HPCRequestTooLargeError(RuntimeError):
+    """A permanent Slurm request-size failure that must not be retried unchanged."""
+
+
+_INLINE_ENV_VALUE_LIMIT = 4 * 1024
+_INLINE_ENV_SCRIPT_LIMIT = 16 * 1024
+
+
+def split_job_environment(
+    environment: dict[str, str],
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Keep large environment payloads out of the Slurm ``--wrap`` argument."""
+
+    inline = dict(environment)
+    externalized: dict[str, str] = {}
+
+    def export_size(key: str, value: str) -> int:
+        return len(f"export {key}={shlex.quote(value)};\n".encode())
+
+    for key, value in list(inline.items()):
+        if len(value.encode("utf-8")) > _INLINE_ENV_VALUE_LIMIT:
+            externalized[key] = inline.pop(key)
+
+    while sum(export_size(key, value) for key, value in inline.items()) > _INLINE_ENV_SCRIPT_LIMIT:
+        key = max(inline, key=lambda name: export_size(name, inline[name]))
+        externalized[key] = inline.pop(key)
+
+    return inline, externalized
+
+
+def render_environment_script(environment: dict[str, str]) -> bytes:
+    """Serialize environment names/values for a private, sourced shell file."""
+
+    return "".join(
+        f"export {key}={shlex.quote(value)};\n" for key, value in environment.items()
+    ).encode("utf-8")
+
+
+def job_environment_path(
+    working_directory: str,
+    submission_receipt_path: str | None,
+    stage_id: str,
+) -> str:
+    """Return a unique, stage-scoped private environment file path."""
+
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", stage_id):
+        raise HPCConfigurationError("HPC stage id is invalid for environment transport")
+    parent = (
+        PurePosixPath(submission_receipt_path).parent
+        if submission_receipt_path
+        else PurePosixPath(working_directory)
+    )
+    return str(parent / f".{stage_id}.environment.{uuid4().hex}.sh")
+
+
+def prefetch_environment_path(request: PrefetchRequest) -> str:
+    identity = request.receipt_path or "|".join(
+        (request.working_directory, request.accession, *request.requirements)
+    )
+    digest = hashlib.sha256(identity.encode("utf-8"))
+    for key, value in sorted(request.environment.items()):
+        digest.update(key.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(value.encode("utf-8"))
+    suffix = digest.hexdigest()[:16]
+    parent = (
+        PurePosixPath(request.receipt_path).parent
+        if request.receipt_path
+        else PurePosixPath(request.working_directory)
+    )
+    return str(parent / f".prefetch-{suffix}.environment.sh")
 
 
 class JobState(StrEnum):
@@ -95,7 +171,12 @@ _PREFETCH_MAX_OUTPUT_BYTES = 64 * 1024
 _PREFETCH_MAX_SNAPSHOT_BYTES = 16 * 1024
 
 
-def render_prefetch_command(template: str | None, request: PrefetchRequest) -> str:
+def render_prefetch_command(
+    template: str | None,
+    request: PrefetchRequest,
+    *,
+    environment_file: str | None = None,
+) -> str:
     """Render an operator-approved, requirement-scoped prefetch command.
 
     The scientific pipeline's exact prefetch alias is deployment-specific. It
@@ -118,11 +199,19 @@ def render_prefetch_command(template: str | None, request: PrefetchRequest) -> s
         shlex.quote(json.dumps(list(request.requirements), separators=(",", ":"))),
     )
     rendered = rendered.replace("{working_directory}", shlex.quote(request.working_directory))
-    exports: list[str] = []
-    for key, value in request.environment.items():
+    for key in request.environment:
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
             raise HPCConfigurationError("prefetch environment contains an invalid variable name")
+    inline_environment, external_environment = split_job_environment(request.environment)
+    if external_environment and environment_file is None:
+        raise HPCConfigurationError(
+            "large prefetch environment requires a confined environment file"
+        )
+    exports: list[str] = []
+    for key, value in inline_environment.items():
         exports.append(f"export {key}={shlex.quote(value)}")
+    if environment_file is not None:
+        exports.append(f". {shlex.quote(environment_file)}")
     return " && ".join(
         [f"cd -- {shlex.quote(request.working_directory)}", *exports, rendered]
     ).strip()
@@ -206,5 +295,9 @@ class HPCClient(Protocol):
     def status(self, job_id: str) -> JobStatus: ...
 
     def cancel(self, job_id: str) -> JobStatus: ...
+
+    def remove_environment_file(self, remote_path: str) -> None: ...
+
+    def remove_stage_environment_files(self, directory: str, stage_id: str) -> None: ...
 
     def prepare_external(self, request: PrefetchRequest) -> PrefetchResult: ...

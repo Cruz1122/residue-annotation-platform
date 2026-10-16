@@ -35,6 +35,14 @@ class Run(Base):
     owner_id: Mapped[str] = mapped_column(String(128), index=True)
     project_id: Mapped[str] = mapped_column(String(128), index=True)
     requested_variants: Mapped[list[dict[str, object]]] = mapped_column(JSON, default=list)
+    # One Slurm allocation owns the complete scientific orchestration for a
+    # run.  RunStage.slurm_job_id remains populated for compatibility with the
+    # stage API and historical rows, but new remote submissions are keyed here.
+    remote_job_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    remote_poll_claim_token: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    remote_poll_claim_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -201,7 +209,13 @@ class RunIdempotencyKey(Base):
 class StageResult(Base):
     __tablename__ = "stage_results"
     __table_args__ = (
-        UniqueConstraint("protein_id", "stage_id", "cache_key", name="uq_stage_result_cache"),
+        UniqueConstraint(
+            "protein_id",
+            "stage_id",
+            "cache_key",
+            "project_id",
+            name="uq_stage_result_cache",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)

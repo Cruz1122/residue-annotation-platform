@@ -142,7 +142,7 @@ class Settings(BaseSettings):
     hpc_slurm_account: str | None = None
     hpc_slurm_partition: str | None = None
     hpc_slurm_qos: str | None = None
-    hpc_slurm_time: str = "00:30:00"
+    hpc_slurm_time: str = "24:00:00"
     hpc_pipeline_python: str = "python"
     hpc_pipeline_main: str = "main.py"
     # A deployment must provide and validate the exact remote pipeline alias
@@ -155,8 +155,8 @@ class Settings(BaseSettings):
     # The registry contains a 20-CPU relaxation stage. A smaller configured
     # budget must fail a run before any remote submit rather than producing a
     # predictable Slurm failure after consuming a slot.
-    hpc_pipeline_cpu_budget: int = Field(default=32, ge=1, le=256)
-    hpc_pipeline_gpu_budget: int = Field(default=1, ge=0, le=32)
+    hpc_pipeline_cpu_budget: int = Field(default=80, ge=1, le=256)
+    hpc_pipeline_gpu_budget: int = Field(default=4, ge=0, le=32)
     # A provided PDB may replace the AF3-producing node only when the remote
     # scientific executor has been reviewed for that substitution. Local
     # profiles retain their existing PDB dependency behavior explicitly in

@@ -97,7 +97,9 @@ export default function ProteinLibrary() {
       {catalogEmpty && (
         <EmptyState
           icon="dna"
+          label="Catálogo vacío"
           title="Aún no tienes proteínas registradas."
+          copy="Registra una proteína para iniciar y conservar tus corridas de análisis."
         >
           <a class="library-create" href="/"><LucideIcon name="plus" />Registrar proteína</a>
         </EmptyState>
@@ -108,7 +110,12 @@ export default function ProteinLibrary() {
         </div>
       )}
       {state === 'ready' && !catalogEmpty && !filtered.length && (
-        <EmptyState icon="scan-search" title="No hay proteínas que coincidan con la búsqueda." />
+        <EmptyState
+          icon="scan-search"
+          label="Sin resultados"
+          title="No hay proteínas que coincidan con la búsqueda."
+          copy="Prueba con otro ID, alias o hash de secuencia."
+        />
       )}
       <RunHistory runs={runs} proteins={proteins} state={state} />
     </section>

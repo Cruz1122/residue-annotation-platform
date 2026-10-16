@@ -38,6 +38,26 @@ test('the presentation keeps the registry graph valid without inventing disabled
   assert.doesNotThrow(() => validateDisabledStages(stages()));
 });
 
+test('omitted AF3 dependencies reconnect to protein identity for a stable progress graph', () => {
+  const selectedStages = stages().filter((stage) => stage.id !== 'structure_modeling');
+  const presented = presentRunStages(selectedStages);
+  const byId = new Map(presented.map((stage) => [stage.id, stage]));
+
+  assert.deepEqual(byId.get('conformational_ensemble').dependencies, ['protein_identity']);
+  assert.deepEqual(byId.get('structural_regime').dependencies, ['protein_identity']);
+  assert.doesNotThrow(() => validateDisabledStages(presented));
+});
+
+test('skipped AF3 stays on the second layer connected to protein identity', () => {
+  const withSkippedStructure = stages().map((stage) => (
+    stage.id === 'structure_modeling' ? { ...stage, status: 'skipped' } : stage
+  ));
+  const presented = presentRunStages(withSkippedStructure);
+  const structureModeling = presented.find((stage) => stage.id === 'structure_modeling');
+
+  assert.deepEqual(structureModeling.dependencies, ['protein_identity']);
+});
+
 test('a disabled parent is rejected', () => {
   assert.throws(
     () => validateDisabledStages(stages(), new Set([
@@ -85,4 +105,12 @@ test('retryable preparation stays visible as pending instead of terminal failure
   assert.equal(phase.label, 'Preparación pendiente');
   assert.equal(phase.detail, 'Falta el caché externo.');
   assert.equal(phase.tone, 'failed');
+});
+
+test('wait time is normalized to seconds, minutes, and hours', async () => {
+  const { formatWaitTime } = await import('./run-phase.js');
+  assert.equal(formatWaitTime(59_000), '59s');
+  assert.equal(formatWaitTime(60_000), '1m');
+  assert.equal(formatWaitTime(3_600_000), '1h');
+  assert.equal(formatWaitTime(Number.NaN), '0s');
 });

@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import exists, func, or_, select, update
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.config import Settings, get_settings
@@ -33,6 +34,8 @@ from app.features.runs.preflight import (
     ensure_preparation_record,
     execution_uploads,
     inspect_stage_preflight,
+    is_prefetch_requirement,
+    preparation_key,
 )
 from app.features.runs.selection import dependency_is_satisfied, has_dependency_override
 from app.features.runs.service import mark_run_running, transition_stage
@@ -40,6 +43,7 @@ from app.features.runs.state import RunStageStatus, RunStatus
 from app.features.stages.registry import STAGE_BY_ID
 from app.infrastructure.hpc.base import (
     HPCConfigurationError,
+    HPCRequestTooLargeError,
     HPCSubmissionAmbiguousError,
     HPCTransportError,
     PrefetchResult,
@@ -55,6 +59,9 @@ from app.infrastructure.hpc.transfer import (
 
 class StageExecutionUnavailable(RuntimeError):
     pass
+
+
+logger = logging.getLogger("app.worker")
 
 
 class ScientificStageExecutor:
@@ -273,6 +280,15 @@ def _handle_preflight_failure(
     current = session.get(RunStage, stage.id) if stage.id is not None else stage
     if current is None:
         return
+    logger.warning(
+        "stage_preflight_failed run_id=%s stage_id=%s retryable=%s "
+        "error_code=%s message=%s",
+        current.run_id,
+        current.stage_id,
+        failure.retryable,
+        failure.code,
+        sanitize_error_message(failure.message, roots=(settings.hpc_remote_root,)),
+    )
     current.preflight_status = "blocked" if failure.retryable else "failed"
     current.preflight_error_code = failure.code
     current.preflight_error_message = sanitize_error_message(
@@ -790,6 +806,14 @@ def _fail_stage(
         roots=(remote_root,) if remote_root else (),
     )
     session.commit()
+    logger.error(
+        "stage_failed run_id=%s stage_id=%s job_id=%s error_code=%s message=%s",
+        stage.run_id,
+        stage.stage_id,
+        stage.slurm_job_id or "-",
+        error_code,
+        stage.error_message,
+    )
     log_worker_event(
         "stage_failed",
         run_id=stage.run_id,
@@ -873,6 +897,10 @@ def _remote_stage_claim_statement(now: datetime):
         .join(Run, Run.id == RunStage.run_id)
         .options(selectinload(RunStage.run).selectinload(Run.protein))
         .where(RunStage.slurm_job_id.is_not(None))
+        # New orchestration runs are polled once through Run.remote_job_id.
+        # This legacy query must not observe every stage row of that shared
+        # allocation and accidentally submit/cancel it multiple times.
+        .where(Run.remote_job_id.is_(None))
         .where(RunStage.status.in_([RunStageStatus.QUEUED, RunStageStatus.RUNNING]))
         .where(Run.status.in_([RunStatus.PENDING, RunStatus.RUNNING, RunStatus.CANCEL_REQUESTED]))
         .where(
@@ -923,6 +951,7 @@ def _remote_inflight_count(session: Session) -> int:
             .select_from(RunStage)
             .join(Run, Run.id == RunStage.run_id)
             .where(RunStage.slurm_job_id.is_not(None))
+            .where(Run.remote_job_id.is_(None))
             .where(RunStage.status.in_([RunStageStatus.QUEUED, RunStageStatus.RUNNING]))
             .where(
                 Run.status.in_([RunStatus.PENDING, RunStatus.RUNNING, RunStatus.CANCEL_REQUESTED])
@@ -930,6 +959,124 @@ def _remote_inflight_count(session: Session) -> int:
         )
         or 0
     )
+
+
+def _remote_run_claim_statement(now: datetime):
+    return (
+        select(Run)
+        .options(
+            selectinload(Run.stages),
+            selectinload(Run.configuration),
+            selectinload(Run.protein),
+            selectinload(Run.uploads),
+            selectinload(Run.preparation),
+        )
+        .where(Run.remote_job_id.is_not(None))
+        .where(Run.status.in_([RunStatus.PENDING, RunStatus.RUNNING, RunStatus.CANCEL_REQUESTED]))
+        .where(
+            or_(
+                exists(
+                    select(RunStage.id)
+                    .where(RunStage.run_id == Run.id)
+                    .where(RunStage.status.in_([RunStageStatus.QUEUED, RunStageStatus.RUNNING]))
+                ),
+                Run.status == RunStatus.CANCEL_REQUESTED,
+            )
+        )
+        .where(
+            or_(
+                Run.remote_poll_claim_token.is_(None),
+                Run.remote_poll_claim_expires_at.is_(None),
+                Run.remote_poll_claim_expires_at < now,
+            )
+        )
+        .order_by(Run.created_at)
+        .limit(1)
+        .with_for_update(skip_locked=True)
+    )
+
+
+def claim_remote_run(session: Session, settings: Settings) -> tuple[Run, str] | None:
+    """Claim one shared Slurm allocation for status/reconciliation."""
+
+    now = _utcnow()
+    run = session.scalar(_remote_run_claim_statement(now))
+    if run is None:
+        return None
+    token = str(uuid4())
+    run.remote_poll_claim_token = token
+    run.remote_poll_claim_expires_at = _lease_deadline(settings, now)
+    for stage in run.stages:
+        if stage.status in {RunStageStatus.QUEUED, RunStageStatus.RUNNING}:
+            stage.lease_expires_at = _lease_deadline(settings, now)
+    session.commit()
+    return run, token
+
+
+def release_remote_run_claim(session: Session, run_id: str, token: str) -> None:
+    session.execute(
+        update(Run)
+        .where(Run.id == run_id)
+        .where(Run.remote_poll_claim_token == token)
+        .values(remote_poll_claim_token=None, remote_poll_claim_expires_at=None)
+    )
+    session.commit()
+
+
+def _claim_ready_run_statement(now: datetime):
+    return (
+        select(Run)
+        .options(
+            selectinload(Run.stages),
+            selectinload(Run.configuration),
+            selectinload(Run.protein),
+            selectinload(Run.uploads),
+            selectinload(Run.preparation),
+        )
+        .where(Run.remote_job_id.is_(None))
+        .where(Run.status == RunStatus.PENDING)
+        .where(
+            exists(
+                select(RunStage.id)
+                .where(RunStage.run_id == Run.id)
+                .where(RunStage.status == RunStageStatus.READY)
+                .where(
+                    or_(
+                        RunStage.preflight_status != "blocked",
+                        RunStage.preflight_retry_at.is_(None),
+                        RunStage.preflight_retry_at <= now,
+                    )
+                )
+            )
+        )
+        .order_by(Run.created_at)
+        .limit(1)
+        .with_for_update(skip_locked=True)
+    )
+
+
+def claim_ready_run(session: Session, settings: Settings) -> Run | None:
+    """Reserve a pending run before its single shared Slurm submission."""
+
+    run = session.scalar(_claim_ready_run_statement(_utcnow()))
+    if run is None:
+        return None
+    roots = [stage for stage in run.stages if stage.status == RunStageStatus.READY]
+    if not roots:
+        session.commit()
+        return None
+    root = min(roots, key=lambda stage: stage.created_at)
+    root.attempt_count += 1
+    root.lease_expires_at = _lease_deadline(settings, _utcnow())
+    transition_stage(session, root, RunStageStatus.QUEUED)
+    session.commit()
+    log_worker_event(
+        "run_claimed",
+        run_id=run.id,
+        stage_id=root.stage_id,
+        status=str(root.status),
+    )
+    return run
 
 
 def _finalize_runs(session: Session, run_ids: set[str]) -> None:
@@ -944,7 +1091,276 @@ def _finalize_active_runs(session: Session) -> None:
         session.scalars(select(Run).where(Run.status.in_([RunStatus.PENDING, RunStatus.RUNNING])))
     )
     for run in active_runs:
-        finalize_run(session, run)
+            finalize_run(session, run)
+
+
+def _active_selected_run_stages(run: Run) -> list[RunStage]:
+    selected = set(run.configuration.selected_stage_ids if run.configuration else ())
+    return [
+        stage
+        for stage in run.stages
+        if stage.stage_id in selected
+        and stage.status
+        not in {
+            RunStageStatus.SUCCESS,
+            RunStageStatus.REUSED,
+            RunStageStatus.SKIPPED,
+            RunStageStatus.CANCELLED,
+        }
+    ]
+
+
+def _prepare_shared_run_for_execution(
+    session: Session,
+    run: Run,
+    settings: Settings,
+    executor: object,
+) -> None:
+    """Preflight every selected stage before the one shared allocation.
+
+    Dependency status is intentionally not required here: MN5's ``main.py``
+    resolves and executes the complete selected DAG inside the allocation.
+    The platform still validates identity, inputs, resources, and runtime
+    capabilities for every selected node before submitting anything.
+    """
+
+    stages = _active_selected_run_stages(run)
+    if not stages:
+        raise PreflightFailure(
+            "no_selected_stages",
+            "the confirmed run has no active selected stages",
+            retryable=False,
+        )
+    reports: list[tuple[RunStage, StagePreflight]] = []
+    for stage in stages:
+        reports.append(
+            (
+                stage,
+                inspect_stage_preflight(stage, settings, check_dependencies=False),
+            )
+        )
+    required = tuple(
+        sorted({item for _, report in reports for item in report.required_requirements})
+    )
+    prefetch = tuple(sorted(item for item in required if is_prefetch_requirement(item)))
+    preparation = run.preparation
+    satisfied = set(preparation.satisfied_requirements if preparation is not None else [])
+    snapshots = preparation.snapshots if preparation is not None else {}
+    if not isinstance(snapshots, dict):
+        snapshots = {}
+    missing = tuple(
+        item for item in prefetch if item not in satisfied or item not in snapshots
+    )
+    aggregate = StagePreflight(
+        stage_id="run",
+        required_requirements=required,
+        prefetch_requirements=prefetch,
+        missing_prefetch_requirements=missing,
+        preparation_key=preparation_key(run, prefetch),
+    )
+    _ensure_external_preparation(session, stages[0], settings, executor, aggregate)
+    for stage, _ in reports:
+        report = inspect_stage_preflight(stage, settings, check_dependencies=False)
+        if report.missing_prefetch_requirements:
+            raise PreflightFailure(
+                "prefetch_incomplete",
+                "required external prerequisites are still unavailable",
+                retryable=True,
+                details={"missing_requirements": list(report.missing_prefetch_requirements)},
+            )
+        _mark_preflight_passed(session, stage, report)
+
+
+def _fail_shared_run(
+    session: Session,
+    run: Run,
+    error_code: str,
+    message: str,
+    settings: Settings,
+) -> None:
+    safe_message = sanitize_error_message(message, roots=(settings.hpc_remote_root,))
+    for stage in _active_selected_run_stages(run):
+        if stage.status not in {
+            RunStageStatus.PENDING,
+            RunStageStatus.READY,
+            RunStageStatus.QUEUED,
+            RunStageStatus.RUNNING,
+        }:
+            continue
+        try:
+            transition_stage(session, stage, RunStageStatus.FAILED)
+        except ValueError:
+            continue
+        stage.error_code = error_code
+        stage.error_message = safe_message
+    run.status = RunStatus.FAILED
+    run.error_code = error_code
+    run.error_message = safe_message
+    session.commit()
+    logger.error(
+        "run_failed run_id=%s job_id=%s error_code=%s message=%s",
+        run.id,
+        run.remote_job_id or "-",
+        error_code,
+        safe_message,
+    )
+
+
+def _handle_shared_preflight_failure(
+    session: Session,
+    run: Run,
+    settings: Settings,
+    failure: PreflightFailure,
+) -> None:
+    safe_message = sanitize_error_message(failure.message, roots=(settings.hpc_remote_root,))
+    stages = _active_selected_run_stages(run)
+    for stage in stages:
+        stage.preflight_status = "blocked" if failure.retryable else "failed"
+        stage.preflight_error_code = failure.code
+        stage.preflight_error_message = safe_message
+        stage.preflight_details = failure.details
+        stage.preflight_checked_at = _utcnow()
+    if failure.retryable:
+        for stage in stages:
+            if stage.status == RunStageStatus.QUEUED:
+                try:
+                    transition_stage(session, stage, RunStageStatus.READY)
+                except ValueError:
+                    continue
+            stage.lease_expires_at = None
+            stage.preflight_retry_at = _utcnow() + timedelta(
+                seconds=settings.hpc_preflight_retry_seconds
+            )
+        run.status = RunStatus.PENDING
+        session.commit()
+        logger.warning(
+            "run_preflight_failed run_id=%s retryable=true error_code=%s message=%s",
+            run.id,
+            failure.code,
+            safe_message,
+        )
+        return
+    _fail_shared_run(session, run, failure.code, safe_message, settings)
+
+
+def _process_shared_remote_run(
+    session: Session,
+    settings: Settings,
+    executor: object,
+) -> bool | None:
+    """Reconcile or submit a run-level orchestration job.
+
+    ``None`` means there is no run-level work and lets the legacy per-stage
+    adapter handle historical rows during a rolling deployment. A real
+    ``SSHStageExecutor``/``NativeStageExecutor`` always exposes submit_run.
+    """
+
+    if not callable(getattr(executor, "submit_run", None)):
+        return None
+
+    claimed = claim_remote_run(session, settings)
+    if claimed is not None:
+        run, claim_token = claimed
+        try:
+            if run.status == RunStatus.CANCEL_REQUESTED:
+                executor.cancel_run(session, run)
+            else:
+                executor.poll_run(session, run)
+        finally:
+            log_worker_event(
+                "remote_run_reconciled",
+                run_id=run.id,
+                job_id=run.remote_job_id,
+                status=str(run.status),
+            )
+            release_remote_run_claim(session, run.id, claim_token)
+        refresh_ready_states(session, {run.id})
+        _finalize_runs(session, {run.id})
+        return True
+
+    shared_inflight = int(
+        session.scalar(
+            select(func.count())
+            .select_from(Run)
+            .where(Run.remote_job_id.is_not(None))
+            .where(
+                Run.status.in_([RunStatus.PENDING, RunStatus.RUNNING, RunStatus.CANCEL_REQUESTED])
+            )
+        )
+        or 0
+    )
+    if shared_inflight >= settings.hpc_max_inflight_stages:
+        return False
+
+    run = claim_ready_run(session, settings)
+    if run is None:
+        return False
+    try:
+        prepare_run_inputs(session, run, settings)
+        _prepare_shared_run_for_execution(session, run, settings, executor)
+        executor.submit_run(session, run)
+        return True
+    except PreflightFailure as exc:
+        current = session.get(Run, run.id)
+        if current is not None:
+            _handle_shared_preflight_failure(session, current, settings, exc)
+        _finalize_runs(session, {run.id})
+        return True
+    except HPCSubmissionAmbiguousError as exc:
+        # submit_run persists the accepted job id before re-raising, so the
+        # next tick can poll it without issuing a duplicate sbatch.
+        logger.warning(
+            "remote_run_submit_ambiguous run_id=%s job_id=%s",
+            run.id,
+            exc.job_id,
+        )
+        return True
+    except HPCTransportError as exc:
+        current = session.get(Run, run.id)
+        if current is not None:
+            for stage in _active_selected_run_stages(current):
+                if stage.status == RunStageStatus.QUEUED:
+                    transition_stage(session, stage, RunStageStatus.READY)
+                stage.lease_expires_at = None
+            current.status = RunStatus.PENDING
+            session.commit()
+        logger.warning(
+            "remote_run_submit_retryable run_id=%s error_type=%s message=%s",
+            run.id,
+            type(exc).__name__,
+            sanitize_error_message(str(exc), roots=(settings.hpc_remote_root,)),
+        )
+        return True
+    except HPCRequestTooLargeError as exc:
+        current = session.get(Run, run.id)
+        if current is not None:
+            _fail_shared_run(session, current, "hpc_request_too_large", str(exc), settings)
+        return True
+    except HPCConfigurationError as exc:
+        current = session.get(Run, run.id)
+        if current is not None:
+            _handle_shared_preflight_failure(
+                session,
+                current,
+                settings,
+                PreflightFailure(
+                    "hpc_configuration_unavailable",
+                    "the HPC execution profile is not configured",
+                    retryable=True,
+                    details={"error_type": type(exc).__name__},
+                ),
+            )
+        return True
+    except InputTransferError as exc:
+        current = session.get(Run, run.id)
+        if current is not None:
+            _fail_shared_run(session, current, "input_transfer_failed", str(exc), settings)
+        return True
+    except Exception as exc:
+        current = session.get(Run, run.id)
+        if current is not None:
+            _fail_shared_run(session, current, "remote_submit_failed", str(exc), settings)
+        return True
 
 
 def _process_remote(session: Session, settings: Settings) -> bool:
@@ -967,6 +1383,24 @@ def _process_remote(session: Session, settings: Settings) -> bool:
             error_code="hpc_configuration_unavailable",
         )
         return False
+    shared_result = _process_shared_remote_run(session, settings, executor)
+    if shared_result is not None:
+        if shared_result:
+            return True
+        # A real run-level executor must not fall back to creating a stage job
+        # for a newly confirmed run. Only historical accepted stage rows are
+        # eligible for the compatibility path below.
+        legacy_active = session.scalar(
+            select(RunStage.id)
+            .join(Run, Run.id == RunStage.run_id)
+            .where(Run.remote_job_id.is_(None))
+            .where(RunStage.slurm_job_id.is_not(None))
+            .where(RunStage.status.in_([RunStageStatus.QUEUED, RunStageStatus.RUNNING]))
+        )
+        if legacy_active is None:
+            refresh_ready_states(session)
+            _finalize_active_runs(session)
+            return False
     inflight_count = _remote_inflight_count(session)
     processed = False
     for _ in range(settings.hpc_max_inflight_stages):
@@ -1043,11 +1477,18 @@ def _process_remote(session: Session, settings: Settings) -> bool:
                 refresh_ready_states(session, {failed.run_id})
                 _finalize_runs(session, {failed.run_id})
             break
-        except HPCTransportError:
+        except HPCTransportError as exc:
             # The remote submit adapter writes a deterministic receipt before
             # returning. Keep this stage retryable so the next invocation of
             # the same request reads that receipt instead of issuing a second
             # sbatch call after an ambiguous network failure.
+            logger.warning(
+                "remote_submit_retryable run_id=%s stage_id=%s error_type=%s message=%s",
+                stage.run_id,
+                stage.stage_id,
+                type(exc).__name__,
+                sanitize_error_message(str(exc), roots=(settings.hpc_remote_root,)),
+            )
             failed = session.get(RunStage, stage.id)
             if failed is not None and failed.status in {
                 RunStageStatus.QUEUED,
@@ -1074,6 +1515,18 @@ def _process_remote(session: Session, settings: Settings) -> bool:
             # next invocation is the retry boundary and can reconcile the
             # deterministic submission receipt first.
             break
+        except HPCRequestTooLargeError as exc:
+            failed = session.get(RunStage, stage.id)
+            if failed is not None:
+                _fail_stage(
+                    session,
+                    failed,
+                    "hpc_request_too_large",
+                    str(exc),
+                    remote_root=settings.hpc_remote_root,
+                )
+                refresh_ready_states(session, {failed.run_id})
+                _finalize_runs(session, {failed.run_id})
         except HPCConfigurationError:
             failed = session.get(RunStage, stage.id)
             if failed is not None:

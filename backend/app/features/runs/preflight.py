@@ -137,6 +137,8 @@ def _validate_input_integrity(stage: RunStage, settings: Settings) -> None:
 def inspect_stage_preflight(
     stage: RunStage,
     settings: Settings,
+    *,
+    check_dependencies: bool = True,
 ) -> StagePreflight:
     """Validate local intent and return the external requirements still needed.
 
@@ -216,29 +218,30 @@ def inspect_stage_preflight(
             retryable=False,
             details={"required_gpu": definition.gpu or 0},
         )
-    dependency_statuses = {item.stage_id: str(item.status) for item in run.stages}
-    for dependency_id in definition.dependencies:
-        dependency_status = dependency_statuses.get(dependency_id)
-        provided_structure_override = (
-            configuration.structure_source == "provided_pdb"
-            and dependency_id == "structure_modeling"
-            and dependency_status == str(RunStageStatus.SKIPPED)
-            and has_dependency_override(configuration.prerequisites, dependency_id)
-        )
-        if (
-            dependency_status
-            not in {
-                str(RunStageStatus.SUCCESS),
-                str(RunStageStatus.REUSED),
-            }
-            and not provided_structure_override
-        ):
-            raise PreflightFailure(
-                "dependency_unavailable",
-                f"stage dependency {dependency_id} has no usable published result",
-                retryable=True,
-                details={"dependency_id": dependency_id, "status": dependency_status},
+    if check_dependencies:
+        dependency_statuses = {item.stage_id: str(item.status) for item in run.stages}
+        for dependency_id in definition.dependencies:
+            dependency_status = dependency_statuses.get(dependency_id)
+            provided_structure_override = (
+                configuration.structure_source == "provided_pdb"
+                and dependency_id == "structure_modeling"
+                and dependency_status == str(RunStageStatus.SKIPPED)
+                and has_dependency_override(configuration.prerequisites, dependency_id)
             )
+            if (
+                dependency_status
+                not in {
+                    str(RunStageStatus.SUCCESS),
+                    str(RunStageStatus.REUSED),
+                }
+                and not provided_structure_override
+            ):
+                raise PreflightFailure(
+                    "dependency_unavailable",
+                    f"stage dependency {dependency_id} has no usable published result",
+                    retryable=True,
+                    details={"dependency_id": dependency_id, "status": dependency_status},
+                )
 
     _validate_input_integrity(stage, settings)
     requirements = tuple(sorted(definition.technical_requirements))

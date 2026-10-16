@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import logging
 import re
 import shlex
 import socket
@@ -20,6 +21,7 @@ from app.core.config import Settings
 from app.infrastructure.hpc.archive import ArchiveError, BoundedTarWriter
 from app.infrastructure.hpc.base import (
     HPCConfigurationError,
+    HPCRequestTooLargeError,
     HPCSubmissionAmbiguousError,
     HPCTransportError,
     JobHandle,
@@ -28,9 +30,15 @@ from app.infrastructure.hpc.base import (
     JobStatus,
     PrefetchRequest,
     PrefetchResult,
+    job_environment_path,
     parse_prefetch_result,
+    prefetch_environment_path,
+    render_environment_script,
     render_prefetch_command,
+    split_job_environment,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class SSHConfigurationError(HPCConfigurationError):
@@ -98,7 +106,13 @@ def _rethrow_transport_error(error: Exception) -> None:
         message = str(error).lower()
         if any(
             marker in message
-            for marker in ("connection", "socket is closed", "session not active", "timed out")
+            for marker in (
+                "connection",
+                "socket is closed",
+                "session not active",
+                "no existing session",
+                "timed out",
+            )
         ):
             raise HPCTransportError("SSH transport is unavailable") from error
 
@@ -282,6 +296,121 @@ class SSHSlurmClient:
             except Exception as exc:
                 _rethrow_transport_error(exc)
                 raise
+        finally:
+            client.close()
+
+    def _write_environment_file(self, remote_path: str, contents: bytes) -> None:
+        path = _remote_path_under(self.settings.hpc_remote_root, remote_path)
+        parent = str(PurePosixPath(path).parent)
+        self.ensure_directory(parent)
+        client = self._connect()
+        created = False
+        try:
+            sftp = client.open_sftp()
+            try:
+                assert_no_symlink_components(sftp, self.settings.hpc_remote_root, parent)
+                try:
+                    attributes = sftp.lstat(path)
+                except FileNotFoundError:
+                    attributes = None
+                if attributes is not None:
+                    if stat.S_ISLNK(attributes.st_mode or 0) or not stat.S_ISREG(
+                        attributes.st_mode or 0
+                    ):
+                        raise SSHConfigurationError("HPC environment path is not a regular file")
+                    with sftp.open(path, "rb") as existing_file:
+                        existing = existing_file.read(len(contents) + 1)
+                    if existing != contents:
+                        raise SSHConfigurationError(
+                            "a different environment file already exists for this HPC stage"
+                        )
+                    return
+                # Paramiko treats ``x`` as O_EXCL but does not infer the
+                # write flag the way Python's built-in ``open`` does. Using
+                # ``wx`` is required here; ``xb`` creates a read-only handle
+                # and fails with "File not open for writing" on real SFTP.
+                with sftp.open(path, "wx") as environment_file:
+                    created = True
+                    sftp.chmod(path, 0o600)
+                    environment_file.write(contents)
+                    environment_file.flush()
+            except Exception:
+                if created:
+                    try:
+                        sftp.remove(path)
+                    except OSError:
+                        pass
+                raise
+            finally:
+                sftp.close()
+        except Exception as exc:
+            _rethrow_transport_error(exc)
+            raise
+        finally:
+            client.close()
+
+    def remove_environment_file(self, remote_path: str) -> None:
+        path = _remote_path_under(self.settings.hpc_remote_root, remote_path)
+        if not re.fullmatch(
+            r"\.[A-Za-z0-9_-]+\.environment(?:\.[a-f0-9]{32})?\.sh",
+            PurePosixPath(path).name,
+        ):
+            raise SSHConfigurationError("HPC environment cleanup path is invalid")
+        parent = str(PurePosixPath(path).parent)
+        client = self._connect()
+        try:
+            sftp = client.open_sftp()
+            try:
+                assert_no_symlink_components(sftp, self.settings.hpc_remote_root, parent)
+                try:
+                    attributes = sftp.lstat(path)
+                except FileNotFoundError:
+                    return
+                if stat.S_ISLNK(attributes.st_mode or 0) or not stat.S_ISREG(
+                    attributes.st_mode or 0
+                ):
+                    raise SSHConfigurationError("HPC cleanup path is not a regular file")
+                sftp.remove(path)
+            finally:
+                sftp.close()
+        except Exception as exc:
+            _rethrow_transport_error(exc)
+            raise
+        finally:
+            client.close()
+
+    def remove_stage_environment_files(self, remote_directory: str, stage_id: str) -> None:
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", stage_id):
+            raise SSHConfigurationError("HPC stage id is invalid for environment cleanup")
+        directory = _remote_path_under(self.settings.hpc_remote_root, remote_directory)
+        client = self._connect()
+        prefix = f".{stage_id}.environment."
+        try:
+            sftp = client.open_sftp()
+            try:
+                assert_no_symlink_components(sftp, self.settings.hpc_remote_root, directory)
+                for entry in sftp.listdir_attr(directory):
+                    name = entry.filename
+                    if (
+                        not isinstance(name, str)
+                        or not name.startswith(prefix)
+                        or not name.endswith(".sh")
+                    ):
+                        continue
+                    if not re.fullmatch(
+                        rf"\.{re.escape(stage_id)}\.environment\.[a-f0-9]{{32}}\.sh",
+                        name,
+                    ):
+                        continue
+                    path = str(PurePosixPath(directory) / name)
+                    attributes = sftp.lstat(path)
+                    if stat.S_ISREG(attributes.st_mode or 0):
+                        sftp.remove(path)
+            finally:
+                sftp.close()
+        except Exception as exc:
+            _rethrow_transport_error(exc)
+            raise
         finally:
             client.close()
 
@@ -555,20 +684,34 @@ class SSHSlurmClient:
         result = parse_prefetch_result(output, request)
         return result if result.status == "success" else None
 
-    def _prepare_with_receipt(self, request: PrefetchRequest) -> str:
+    def _prepare_with_receipt(
+        self,
+        request: PrefetchRequest,
+        environment_file: str | None = None,
+    ) -> str:
         receipt = _remote_path_under(self.settings.hpc_remote_root, request.receipt_path or "")
         temporary = _remote_path_under(
             self.settings.hpc_remote_root,
             f"{receipt}.tmp-{uuid4().hex}",
         )
-        command = render_prefetch_command(self.settings.hpc_pipeline_prefetch_command, request)
+        command = render_prefetch_command(
+            self.settings.hpc_pipeline_prefetch_command,
+            request,
+            environment_file=environment_file,
+        )
+        environment_trap = (
+            f"environment_file={shlex.quote(environment_file)}; "
+            "trap 'rm -f -- \"$environment_file\"' EXIT; "
+            if environment_file is not None
+            else ""
+        )
         script = "\n".join(
             [
                 "set -eu",
                 f"temporary={shlex.quote(temporary)}",
                 f"receipt={shlex.quote(receipt)}",
                 "trap 'rm -f -- \"$temporary\"' EXIT",
-                f"output=$({command})",
+                f"output=$({environment_trap}{command})",
                 "umask 077",
                 'printf "%s\\n" "$output" > "$temporary"',
                 'mv -f -- "$temporary" "$receipt"',
@@ -580,15 +723,72 @@ class SSHSlurmClient:
     def prepare_external(self, request: PrefetchRequest) -> PrefetchResult:
         """Run the explicitly configured, selective pipeline prefetch alias."""
 
-        if request.receipt_path:
-            existing = self._read_prefetch_receipt(request.receipt_path, request)
+        receipt_path = (
+            _remote_path_under(self.settings.hpc_remote_root, request.receipt_path)
+            if request.receipt_path
+            else None
+        )
+        if receipt_path:
+            existing = self._read_prefetch_receipt(receipt_path, request)
             if existing is not None:
                 return existing
-            output = self._prepare_with_receipt(request)
-        else:
-            output = self._command(
-                render_prefetch_command(self.settings.hpc_pipeline_prefetch_command, request)
+        _, external_environment = split_job_environment(request.environment)
+        environment_file = None
+        if external_environment:
+            environment_file = _remote_path_under(
+                self.settings.hpc_remote_root,
+                prefetch_environment_path(request),
             )
+        command = render_prefetch_command(
+            self.settings.hpc_pipeline_prefetch_command,
+            request,
+            environment_file=environment_file,
+        )
+        if external_environment:
+            self._write_environment_file(
+                environment_file,
+                render_environment_script(external_environment),
+            )
+        total_environment_bytes = sum(
+            len(value.encode("utf-8")) for value in request.environment.values()
+        )
+        logger.info(
+            "HPC prefetch accession=%s environment_bytes=%d environment_fields=%s "
+            "command_bytes=%d externalized_fields=%s",
+            request.accession,
+            total_environment_bytes,
+            ",".join(
+                f"{key}:{len(value.encode('utf-8'))}"
+                for key, value in sorted(request.environment.items())
+            ),
+            len(command.encode("utf-8")),
+            ",".join(sorted(external_environment)),
+        )
+        try:
+            if receipt_path:
+                output = self._prepare_with_receipt(request, environment_file)
+            else:
+                trap = (
+                    f"environment_file={shlex.quote(environment_file)}; "
+                    "trap 'rm -f -- \"$environment_file\"' EXIT; "
+                    if environment_file
+                    else ""
+                )
+                output = self._command(f"{trap}{command}")
+        except (HPCSubmissionAmbiguousError, HPCTransportError) as exc:
+            logger.warning(
+                "HPC prefetch response is ambiguous accession=%s environment_bytes=%d "
+                "command_bytes=%d error_type=%s",
+                request.accession,
+                total_environment_bytes,
+                len(command.encode("utf-8")),
+                type(exc).__name__,
+            )
+            raise
+        except Exception:
+            if environment_file is not None:
+                self.remove_environment_file(environment_file)
+            raise
         return parse_prefetch_result(output, request)
 
     def submit(self, request: JobRequest) -> JobHandle:
@@ -602,11 +802,49 @@ class SSHSlurmClient:
         for key in request.environment:
             if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
                 raise ValueError("job environment contains an invalid variable name")
-        command = " ".join(shlex.quote(part) for part in request.command)
-        exports = " ".join(
-            f"export {key}={shlex.quote(value)};" for key, value in request.environment.items()
+        receipt_path = (
+            _remote_path_under(self.settings.hpc_remote_root, request.submission_receipt_path)
+            if request.submission_receipt_path
+            else None
         )
-        script = f"cd -- {shlex.quote(workdir)} && {exports} exec {command}"
+        if receipt_path:
+            existing_job_id = self._read_submission_receipt(receipt_path)
+            if existing_job_id is not None:
+                return JobHandle(job_id=existing_job_id, state=JobState.QUEUED)
+
+        inline_environment, external_environment = split_job_environment(request.environment)
+        inline_exports = [
+            f"export {key}={shlex.quote(value)};" for key, value in inline_environment.items()
+        ]
+        command = " ".join(shlex.quote(part) for part in request.command)
+        environment_file: str | None = None
+        if external_environment:
+            environment_file = _remote_path_under(
+                self.settings.hpc_remote_root,
+                job_environment_path(
+                    workdir,
+                    receipt_path,
+                    request.stage_id,
+                ),
+            )
+            self._write_environment_file(
+                environment_file,
+                render_environment_script(external_environment),
+            )
+            script = "\n".join(
+                [
+                    "set -u",
+                    f"environment_file={shlex.quote(environment_file)}",
+                    "trap 'rm -f -- \"$environment_file\"' EXIT",
+                    f"cd -- {shlex.quote(workdir)} || exit",
+                    *inline_exports,
+                    '. "$environment_file" || exit',
+                    command,
+                ]
+            )
+        else:
+            exports = " ".join(inline_exports)
+            script = f"cd -- {shlex.quote(workdir)} && {exports} exec {command}"
         args = ["sbatch", "--parsable"]
         if self.settings.hpc_slurm_account:
             args.append(f"--account={self.settings.hpc_slurm_account}")
@@ -631,18 +869,65 @@ class SSHSlurmClient:
             stderr_path = _remote_path_under(self.settings.hpc_remote_root, request.stderr_path)
             args.append(f"--error={stderr_path}")
         args.extend(["--wrap", script])
-        receipt_path = None
-        if request.submission_receipt_path:
-            receipt_path = _remote_path_under(
-                self.settings.hpc_remote_root,
-                request.submission_receipt_path,
+        total_environment_bytes = sum(
+            len(value.encode("utf-8")) for value in request.environment.values()
+        )
+        field_sizes = ",".join(
+            f"{key}:{len(value.encode('utf-8'))}"
+            for key, value in sorted(request.environment.items())
+        )
+        logger.info(
+            "HPC submit stage=%s job_name=%s environment_bytes=%d environment_fields=%s "
+            "wrap_bytes=%d externalized_fields=%s",
+            request.stage_id,
+            request.job_name or "unknown",
+            total_environment_bytes,
+            field_sizes,
+            len(script.encode("utf-8")),
+            ",".join(sorted(external_environment)),
+        )
+        try:
+            output = (
+                self._submit_with_receipt(args, receipt_path)
+                if receipt_path
+                else self._command(shlex.join(args))
             )
-            existing_job_id = self._read_submission_receipt(receipt_path)
-            if existing_job_id is not None:
-                return JobHandle(job_id=existing_job_id, state=JobState.QUEUED)
-            output = self._submit_with_receipt(args, receipt_path)
-        else:
-            output = self._command(shlex.join(args))
+        except (HPCSubmissionAmbiguousError, HPCTransportError) as exc:
+            logger.warning(
+                "HPC submit response is ambiguous stage=%s job_name=%s "
+                "environment_bytes=%d wrap_bytes=%d error_type=%s",
+                request.stage_id,
+                request.job_name or "unknown",
+                total_environment_bytes,
+                len(script.encode("utf-8")),
+                type(exc).__name__,
+            )
+            raise
+        except RuntimeError as exc:
+            if "argument list too long" in str(exc).lower():
+                logger.error(
+                    "HPC submit hit E2BIG stage=%s job_name=%s "
+                    "environment_bytes=%d wrap_bytes=%d error_type=%s",
+                    request.stage_id,
+                    request.job_name or "unknown",
+                    total_environment_bytes,
+                    len(script.encode("utf-8")),
+                    type(exc).__name__,
+                )
+                if environment_file is not None:
+                    self.remove_environment_file(environment_file)
+                raise HPCRequestTooLargeError(
+                    "Slurm submission exceeded the OS argument limit "
+                    f"(stage={request.stage_id}, wrap_bytes={len(script.encode('utf-8'))}, "
+                    f"environment_bytes={total_environment_bytes})"
+                ) from exc
+            if environment_file is not None:
+                self.remove_environment_file(environment_file)
+            raise
+        except Exception:
+            if environment_file is not None:
+                self.remove_environment_file(environment_file)
+            raise
         job_id = output.splitlines()[0].split(";", 1)[0].strip() if output else ""
         self._validate_job_id(job_id)
         return JobHandle(job_id=job_id, state=JobState.QUEUED)

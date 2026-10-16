@@ -55,3 +55,13 @@ export function runPhase(run) {
   }
   return { label: STATUS_TEXT[run?.status] ?? run?.status ?? 'Estado desconocido', detail: '', tone: 'waiting' };
 }
+
+export function formatWaitTime(milliseconds) {
+  const seconds = Number.isFinite(milliseconds)
+    ? Math.max(0, Math.floor(milliseconds / 1000))
+    : 0;
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  return `${Math.floor(minutes / 60)}h`;
+}

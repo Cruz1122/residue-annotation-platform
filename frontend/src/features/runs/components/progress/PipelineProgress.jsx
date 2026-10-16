@@ -1,13 +1,20 @@
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import LucideIcon from '@shared/components/icons/LucideIcon.jsx';
 import { ApiError, cancelRun, getActiveRun, getRun, subscribeRunEvents } from '@shared/api/client';
-import { presentRunStages, progressSummary } from '@features/runs/stage-visibility.js';
-import { runPhase } from '@features/runs/run-phase.js';
+import { presentRunStages } from '@features/runs/stage-visibility.js';
+import { formatWaitTime, runPhase } from '@features/runs/run-phase.js';
+import {
+  buildEdges, PIPELINE_NODE, stageLayout, stagesForPipelineLayout,
+} from '@features/runs/pipeline-layout.js';
 import '@features/runs/styles/progress.css';
 
 const STATUS_ICON = {
+  pending: 'circle-dot',
+  ready: 'circle-dot',
+  queued: 'circle-dot',
   running: 'rotate-cw',
   failed: 'circle-x',
+  blocked: 'circle-dot',
   skipped: 'circle-dot',
   cancelled: 'circle-slash',
   success: 'circle-check',
@@ -26,6 +33,7 @@ const STATUS_TEXT = {
   cancelled: 'Cancelado',
   cancel_requested: 'Cancelación solicitada',
   disabled: 'Desactivado',
+  blocked: 'Bloqueado',
 };
 
 const OMISSION_REASON_TEXT = {
@@ -36,7 +44,6 @@ const OMISSION_REASON_TEXT = {
 };
 
 const RUN_TERMINAL = new Set(['success', 'failed', 'cancelled']);
-const HALF_NODE_WIDTH = 124;
 
 function formatElapsed(milliseconds) {
   const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000));
@@ -50,76 +57,16 @@ function formatElapsed(milliseconds) {
 function displayStatus(status) {
   if (status === 'success' || status === 'reused') return 'ok';
   if (status === 'ready' || status === 'queued') return 'queued';
+  if (status === 'cancel_requested') return 'cancelled';
   return status;
 }
 
-function stageLayout(stages) {
-  const byId = new Map(stages.map((stage) => [stage.id, stage]));
-  const levelCache = new Map();
-  const levelOf = (stageId, stack = new Set()) => {
-    if (levelCache.has(stageId)) return levelCache.get(stageId);
-    if (stack.has(stageId)) return 0;
-    const stage = byId.get(stageId);
-    if (!stage || !stage.dependencies.length) {
-      levelCache.set(stageId, 0);
-      return 0;
-    }
-    const nextStack = new Set(stack).add(stageId);
-    const level = Math.max(...stage.dependencies.map((dependency) => levelOf(dependency, nextStack))) + 1;
-    levelCache.set(stageId, level);
-    return level;
-  };
-
-  const grouped = new Map();
-  stages.forEach((stage) => {
-    const level = levelOf(stage.id);
-    const group = grouped.get(level) ?? [];
-    group.push(stage);
-    grouped.set(level, group);
-  });
-
-  const positions = new Map();
-  let maxRows = 1;
-  for (const [level, group] of grouped) {
-    maxRows = Math.max(maxRows, group.length);
-    group.forEach((stage, index) => {
-      positions.set(stage.id, { x: 150 + level * 350, y: 110 + index * 170 });
-    });
-  }
-  const maxLevel = Math.max(0, ...grouped.keys());
-  return {
-    positions,
-    width: Math.max(900, 350 * (maxLevel + 1) + 220),
-    height: Math.max(360, 170 * maxRows + 120),
-  };
+function edgeStatus(stage) {
+  return stage.preflight_status === 'blocked' ? 'blocked' : displayStatus(stage.status);
 }
 
-function buildEdges(stages, positions) {
-  const outgoing = new Map();
-  const incoming = new Map();
-  stages.forEach((stage) => {
-    incoming.set(stage.id, [...stage.dependencies]);
-    stage.dependencies.forEach((dependency) => {
-      outgoing.set(dependency, [...(outgoing.get(dependency) ?? []), stage.id]);
-    });
-  });
-  const offset = (index, count, spread) => count <= 1 ? 0 : ((index / (count - 1)) - 0.5) * 2 * spread;
-  return stages.flatMap((stage) => stage.dependencies.map((dependency) => {
-    const source = positions.get(dependency);
-    const target = positions.get(stage.id);
-    if (!source || !target) return null;
-    const fromList = outgoing.get(dependency) ?? [stage.id];
-    const toList = incoming.get(stage.id) ?? [dependency];
-    const x1 = source.x + HALF_NODE_WIDTH;
-    const x2 = target.x - HALF_NODE_WIDTH;
-    const y1 = source.y + offset(fromList.indexOf(stage.id), fromList.length, 34);
-    const y2 = target.y + offset(toList.indexOf(dependency), toList.length, 22);
-    const gap = Math.max(52, x2 - x1);
-    const d = Math.abs(y2 - y1) < 4
-      ? `M ${x1} ${y1} L ${x2} ${y2}`
-      : `M ${x1} ${y1} C ${x1 + Math.max(34, gap * .42)} ${y1}, ${x2 - Math.max(34, gap * .42)} ${y2}, ${x2} ${y2}`;
-    return { from: dependency, to: stage.id, d };
-  }).filter(Boolean));
+function stageVisualStatus(stage) {
+  return stage.preflight_status === 'blocked' ? 'blocked' : displayStatus(stage.status);
 }
 
 function StageRuntime({ stage, now }) {
@@ -166,6 +113,7 @@ function rememberRun(runId) {
 export default function PipelineProgress({ proteinId }) {
   const viewportRef = useRef(null);
   const panRef = useRef(null);
+  const userZoomedRef = useRef(false);
   const [run, setRun] = useState(null);
   const [state, setState] = useState('loading');
   const [error, setError] = useState('');
@@ -215,6 +163,9 @@ export default function PipelineProgress({ proteinId }) {
       try {
         const value = await getRun(id);
         if (!active) return;
+        if (!value || typeof value !== 'object') {
+          throw new Error('La API devolvió una corrida vacía.');
+        }
         setRun(value);
         setState('ready');
         setError('');
@@ -271,18 +222,43 @@ export default function PipelineProgress({ proteinId }) {
       return run.stages;
     }
   }, [run]);
-  const layout = useMemo(() => stageLayout(stages), [stages]);
-  const edges = useMemo(() => buildEdges(stages, layout.positions), [stages, layout]);
-  const summary = progressSummary(stages);
+  const usesAf3 = stages.some((stage) => (
+    stage.id === 'structure_modeling' && !['skipped', 'disabled'].includes(stage.status)
+  ));
+  const graphStages = useMemo(() => stagesForPipelineLayout(stages, usesAf3), [stages, usesAf3]);
+  const layout = useMemo(() => stageLayout(graphStages, usesAf3), [graphStages, usesAf3]);
+  const edges = useMemo(() => buildEdges(graphStages, layout.positions), [graphStages, layout]);
   const phase = runPhase(run);
+  const terminal = !run || RUN_TERMINAL.has(run.status);
+  const waitingForCompute = Boolean(run)
+    && !terminal
+    && run.status !== 'running'
+    && !run.stages?.some((stage) => stage.status === 'running');
+  const priorityHigh = run?.priority === 'high';
+
+  useEffect(() => {
+    if (state !== 'ready' || waitingForCompute) return undefined;
+    const viewport = viewportRef.current;
+    if (!viewport) return undefined;
+    const resizeObserver = new ResizeObserver(() => {
+      if (userZoomedRef.current) return;
+      const width = viewport.clientWidth;
+      const responsiveZoom = width >= 1600 ? 1 : width >= 1024 ? .85 : width >= 720 ? .75 : .65;
+      setZoom(responsiveZoom);
+    });
+    resizeObserver.observe(viewport);
+    return () => resizeObserver.disconnect();
+  }, [state, waitingForCompute]);
 
   const setZoomAround = (nextZoom, clientPoint = null) => {
     const viewport = viewportRef.current;
     const clamped = Math.min(1.75, Math.max(.5, nextZoom));
     if (!viewport || clamped === zoom) {
+      userZoomedRef.current = true;
       setZoom(clamped);
       return;
     }
+    userZoomedRef.current = true;
     const rect = viewport.getBoundingClientRect();
     const clientX = clientPoint?.clientX ?? rect.left + viewport.clientWidth / 2;
     const clientY = clientPoint?.clientY ?? rect.top + viewport.clientHeight / 2;
@@ -318,10 +294,9 @@ export default function PipelineProgress({ proteinId }) {
       <header class="progress-head">
         <div>
           <h1>Progreso</h1>
-          <span class="run-id">Run {run.id}</span>
+          {run.configuration?.scientific_accession && <span class="run-id">{run.configuration.scientific_accession}</span>}
         </div>
         <div class="progress-actions">
-          <div class="progress-counter"><strong>{summary.completed} de {summary.enabled}</strong> activos · {summary.percentage}% · {STATUS_TEXT[run.status] ?? run.status}</div>
           {!['success', 'failed', 'cancelled'].includes(run.status) && <button class="cancel-run" type="button" onClick={cancel} disabled={cancelling}>{cancelling ? 'Cancelando…' : 'Cancelar'}</button>}
           <div class="progress-zoom" aria-label="Zoom del mapa">
             <button type="button" onClick={() => setZoomAround(zoom - .1)} aria-label="Alejar">−</button>
@@ -330,12 +305,22 @@ export default function PipelineProgress({ proteinId }) {
           </div>
         </div>
       </header>
-      <div class={`progress-phase progress-phase-${phase.tone}`} role={phase.tone === 'failed' ? 'alert' : 'status'} aria-live="polite">
-        <strong>{phase.label}</strong>{phase.detail && <span>{phase.detail}</span>}
-      </div>
+      {!waitingForCompute && (
+        <div class={`progress-phase progress-phase-${phase.tone}`} role={phase.tone === 'failed' ? 'alert' : 'status'} aria-live="polite">
+          <strong>{phase.label}</strong>{phase.detail && <span>{phase.detail}</span>}
+        </div>
+      )}
       {run.stages?.some((stage) => stage.error_code === 'stage_execution_unavailable') && <p class="progress-waiting">Esta corrida no se envió al clúster. El worker local no abre la VPN ni lanza Slurm: el túnel lo gestiona el host y el envío exige el perfil SSH.</p>}
       {error && <p class="progress-inline-error" role="alert">{error}</p>}
-      <div ref={viewportRef} class="pipeline-scroll" onWheel={(event) => {
+      {waitingForCompute ? (
+        <div class="run-wait-overlay" role="status" aria-live="polite">
+          <div class="run-wait-content">
+            <span class="run-wait-icon"><LucideIcon name="clock" /></span>
+            <strong>Hemos recibido tu proteína, su procesamiento está en espera</strong>
+            <small>Tiempo en espera: {formatWaitTime(now - new Date(run.created_at ?? now).getTime())}{priorityHigh ? ' · Prioridad alta' : ''}</small>
+          </div>
+        </div>
+      ) : <div ref={viewportRef} class="pipeline-scroll" onWheel={(event) => {
         if (!(event.ctrlKey || event.metaKey || event.altKey)) return;
         event.preventDefault();
         setZoomAround(zoom * (event.deltaY < 0 ? 1.12 : .88), { clientX: event.clientX, clientY: event.clientY });
@@ -356,27 +341,37 @@ export default function PipelineProgress({ proteinId }) {
         <div class="pipeline-scaled" style={{ width: `${layout.width * zoom}px`, height: `${layout.height * zoom}px` }}>
           <div class="pipeline-map" style={{ width: `${layout.width}px`, height: `${layout.height}px`, transform: `scale(${zoom})` }}>
             <svg class="pipeline-edges" viewBox={`0 0 ${layout.width} ${layout.height}`} aria-hidden="true">
-              <defs><marker id="pipeline-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" /></marker></defs>
-              {edges.map((edge) => <path key={`${edge.from}-${edge.to}`} class={`pipeline-edge edge-${displayStatus(stages.find((stage) => stage.id === edge.to)?.status ?? 'pending')}`} d={edge.d} marker-end="url(#pipeline-arrow)" />)}
+              <defs>
+                {['pending', 'queued', 'running', 'ok', 'failed', 'blocked', 'skipped', 'cancelled', 'disabled'].map((status) => (
+                  <marker key={status} id={`pipeline-arrow-${status}`} class={`pipeline-arrow edge-${status}`} viewBox="0 0 10 10" refX="8.6" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+                    <path d="M 1 1 L 9 5 L 1 9 Z" />
+                  </marker>
+                ))}
+              </defs>
+              {edges.map((edge) => {
+                const target = stages.find((stage) => stage.id === edge.to);
+                const status = target ? edgeStatus(target) : 'pending';
+                return <path key={`${edge.from}-${edge.to}`} class={`pipeline-edge edge-${status}`} d={edge.d} marker-end={`url(#pipeline-arrow-${status})`} />;
+              })}
             </svg>
-            {stages.map((stage) => {
+            {graphStages.map((stage) => {
               const position = layout.positions.get(stage.id);
-              const visualStatus = displayStatus(stage.status);
+              const visualStatus = stageVisualStatus(stage);
               return (
-                <a key={stage.id} class={`pipeline-node status-${visualStatus}`} style={{ left: `${position.x}px`, top: `${position.y}px` }} href={`/proteins/${encodeURIComponent(proteinId)}/info/?run=${encodeURIComponent(run.id)}#stage-${stage.id}`} aria-label={`${stage.title}: ${STATUS_TEXT[stage.status] ?? stage.status}`}>
+                <a key={stage.id} class={`pipeline-node status-${visualStatus}`} style={{ left: `${position.x - PIPELINE_NODE.width / 2}px`, top: `${position.y - PIPELINE_NODE.height / 2}px` }} href={`/proteins/${encodeURIComponent(proteinId)}/info/?run=${encodeURIComponent(run.id)}#stage-${stage.id}`} aria-label={`${stage.title}: ${STATUS_TEXT[visualStatus] ?? STATUS_TEXT[stage.status] ?? stage.status}`}>
                   <div class="stage-kind"><LucideIcon name="workflow" /></div>
                   <div class="stage-content">
                     <div class="stage-title-row"><strong>{stage.title}</strong></div>
                     <div class="stage-time">{stage.legacy_id} · {stage.dependencies.length ? `${stage.dependencies.length} dependencia${stage.dependencies.length === 1 ? '' : 's'}` : 'Sin dependencias'}</div>
                     <div class="stage-runtime">{stage.status !== 'disabled' && <LucideIcon name="clock" />}<StageRuntime stage={stage} now={now} /></div>
                   </div>
-                  <span class={`stage-status stage-status-${visualStatus}`} title={STATUS_TEXT[stage.status] ?? stage.status} aria-hidden="true">{STATUS_ICON[stage.status] && <LucideIcon name={STATUS_ICON[stage.status]} />}</span>
+                  <span class={`stage-status stage-status-${visualStatus}`} title={STATUS_TEXT[visualStatus] ?? STATUS_TEXT[stage.status] ?? stage.status} aria-hidden="true">{STATUS_ICON[visualStatus] && <LucideIcon name={STATUS_ICON[visualStatus]} />}</span>
                 </a>
               );
             })}
           </div>
         </div>
-      </div>
+      </div>}
     </section>
   );
 }

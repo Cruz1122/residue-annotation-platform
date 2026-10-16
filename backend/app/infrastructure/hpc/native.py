@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import logging
 import os
 import re
 import shlex
@@ -14,6 +15,7 @@ from app.core.config import Settings
 from app.infrastructure.hpc.archive import ArchiveError, BoundedTarWriter
 from app.infrastructure.hpc.base import (
     HPCConfigurationError,
+    HPCRequestTooLargeError,
     HPCSubmissionAmbiguousError,
     HPCTransportError,
     JobHandle,
@@ -22,9 +24,15 @@ from app.infrastructure.hpc.base import (
     JobStatus,
     PrefetchRequest,
     PrefetchResult,
+    job_environment_path,
     parse_prefetch_result,
+    prefetch_environment_path,
+    render_environment_script,
     render_prefetch_command,
+    split_job_environment,
 )
+
+logger = logging.getLogger(__name__)
 
 _TRANSIENT_FILESYSTEM_ERRNOS = frozenset(
     {
@@ -209,6 +217,89 @@ class NativeSlurmClient:
         except Exception as exc:
             _rethrow_native_transport_error(exc)
             raise
+
+    def _write_environment_file(self, remote_path: str, contents: bytes) -> None:
+        """Create a private environment file below the approved HPC root."""
+
+        self.ensure_directory(str(PurePosixPath(remote_path).parent))
+        try:
+            existing = self.read_bytes(remote_path, len(contents) + 1)
+        except FileNotFoundError:
+            existing = None
+        if existing is not None:
+            if existing != contents:
+                raise HPCConfigurationError(
+                    "a different environment file already exists for this HPC stage"
+                )
+            return
+        root = self._root_path()
+        target = self._confined_path(remote_path)
+        parent_fd = _open_confined_path(root, target.parent, directory=True)
+        descriptor: int | None = None
+        completed = False
+        try:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            descriptor = os.open(target.name, flags, 0o600, dir_fd=parent_fd)
+            with os.fdopen(descriptor, "wb") as stream:
+                descriptor = None
+                stream.write(contents)
+                stream.flush()
+                os.fsync(stream.fileno())
+            completed = True
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+            if not completed:
+                try:
+                    os.unlink(target.name, dir_fd=parent_fd)
+                except FileNotFoundError:
+                    pass
+            os.close(parent_fd)
+
+    def _remove_environment_file(self, remote_path: str) -> None:
+        root = self._root_path()
+        target = self._confined_path(remote_path)
+        parent_fd = _open_confined_path(root, target.parent, directory=True)
+        try:
+            try:
+                os.unlink(target.name, dir_fd=parent_fd)
+            except FileNotFoundError:
+                pass
+        finally:
+            os.close(parent_fd)
+
+    def remove_environment_file(self, remote_path: str) -> None:
+        if not re.fullmatch(
+            r"\.[A-Za-z0-9_-]+\.environment(?:\.[a-f0-9]{32})?\.sh",
+            PurePosixPath(remote_path).name,
+        ):
+            raise HPCConfigurationError("HPC environment cleanup path is invalid")
+        self._remove_environment_file(remote_path)
+
+    def remove_stage_environment_files(self, remote_directory: str, stage_id: str) -> None:
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", stage_id):
+            raise HPCConfigurationError("HPC stage id is invalid for environment cleanup")
+        root = self._root_path()
+        directory = self._confined_path(remote_directory)
+        directory_fd = _open_confined_path(root, directory, directory=True)
+        prefix = f".{stage_id}.environment."
+        try:
+            with os.scandir(directory_fd) as entries:
+                for entry in entries:
+                    if not entry.name.startswith(prefix) or not entry.name.endswith(".sh"):
+                        continue
+                    if not re.fullmatch(
+                        rf"\.{re.escape(stage_id)}\.environment\.[a-f0-9]{{32}}\.sh",
+                        entry.name,
+                    ):
+                        continue
+                    attributes = entry.stat(follow_symlinks=False)
+                    if stat.S_ISREG(attributes.st_mode):
+                        os.unlink(entry.name, dir_fd=directory_fd)
+        finally:
+            os.close(directory_fd)
 
     def read_bytes(self, remote_path: str, max_bytes: int) -> bytes:
         if max_bytes < 1:
@@ -464,17 +555,31 @@ class NativeSlurmClient:
         result = parse_prefetch_result(output, request)
         return result if result.status == "success" else None
 
-    def _prepare_with_receipt(self, request: PrefetchRequest) -> str:
+    def _prepare_with_receipt(
+        self,
+        request: PrefetchRequest,
+        environment_file: str | None = None,
+    ) -> str:
         receipt = self._confined_path(request.receipt_path or "")
         temporary = self._confined_path(f"{request.receipt_path}.tmp-{uuid4().hex}")
-        command = render_prefetch_command(self.settings.hpc_pipeline_prefetch_command, request)
+        command = render_prefetch_command(
+            self.settings.hpc_pipeline_prefetch_command,
+            request,
+            environment_file=environment_file,
+        )
+        environment_trap = (
+            f"environment_file={shlex.quote(environment_file)}; "
+            "trap 'rm -f -- \"$environment_file\"' EXIT; "
+            if environment_file is not None
+            else ""
+        )
         script = "\n".join(
             [
                 "set -eu",
                 f"temporary={shlex.quote(str(temporary))}",
                 f"receipt={shlex.quote(str(receipt))}",
                 "trap 'rm -f -- \"$temporary\"' EXIT",
-                f"output=$({command})",
+                f"output=$({environment_trap}{command})",
                 "umask 077",
                 'printf "%s\\n" "$output" > "$temporary"',
                 'mv -f -- "$temporary" "$receipt"',
@@ -486,15 +591,69 @@ class NativeSlurmClient:
     def prepare_external(self, request: PrefetchRequest) -> PrefetchResult:
         """Run the explicitly configured, selective pipeline prefetch alias."""
 
-        if request.receipt_path:
-            existing = self._read_prefetch_receipt(request.receipt_path, request)
+        receipt_path = (
+            str(self._confined_path(request.receipt_path)) if request.receipt_path else None
+        )
+        if receipt_path:
+            existing = self._read_prefetch_receipt(receipt_path, request)
             if existing is not None:
                 return existing
-            output = self._prepare_with_receipt(request)
-        else:
-            output = self._run_shell(
-                render_prefetch_command(self.settings.hpc_pipeline_prefetch_command, request)
+        _, external_environment = split_job_environment(request.environment)
+        environment_file = None
+        if external_environment:
+            environment_file = self._confined_path(prefetch_environment_path(request))
+        total_environment_bytes = sum(
+            len(value.encode("utf-8")) for value in request.environment.values()
+        )
+        command = render_prefetch_command(
+            self.settings.hpc_pipeline_prefetch_command,
+            request,
+            environment_file=str(environment_file) if environment_file else None,
+        )
+        if external_environment:
+            self._write_environment_file(
+                str(environment_file),
+                render_environment_script(external_environment),
             )
+        logger.info(
+            "HPC prefetch environment_bytes=%d environment_fields=%s command_bytes=%d "
+            "externalized_fields=%s",
+            total_environment_bytes,
+            ",".join(
+                f"{key}:{len(value.encode('utf-8'))}"
+                for key, value in sorted(request.environment.items())
+            ),
+            len(command.encode("utf-8")),
+            ",".join(sorted(external_environment)),
+        )
+        try:
+            if receipt_path:
+                output = self._prepare_with_receipt(
+                    request,
+                    str(environment_file) if environment_file else None,
+                )
+            else:
+                trap = (
+                    f"environment_file={shlex.quote(str(environment_file))}; "
+                    "trap 'rm -f -- \"$environment_file\"' EXIT; "
+                    if environment_file
+                    else ""
+                )
+                output = self._run_shell(f"{trap}{command}")
+        except (HPCSubmissionAmbiguousError, HPCTransportError) as exc:
+            logger.warning(
+                "HPC prefetch response is ambiguous accession=%s environment_bytes=%d "
+                "command_bytes=%d error_type=%s",
+                request.accession,
+                total_environment_bytes,
+                len(command.encode("utf-8")),
+                type(exc).__name__,
+            )
+            raise
+        except Exception:
+            if environment_file is not None:
+                self.remove_environment_file(str(environment_file))
+            raise
         return parse_prefetch_result(output, request)
 
     def submit(self, request: JobRequest) -> JobHandle:
@@ -514,11 +673,46 @@ class NativeSlurmClient:
         stderr_path = (
             self._confined_path(request.stderr_path) if request.stderr_path is not None else None
         )
-        exports = " ".join(
-            f"export {key}={shlex.quote(value)};" for key, value in request.environment.items()
+        receipt_path = (
+            str(self._confined_path(request.submission_receipt_path))
+            if request.submission_receipt_path
+            else None
         )
+        if receipt_path:
+            existing_job_id = self._read_submission_receipt(receipt_path)
+            if existing_job_id is not None:
+                return JobHandle(job_id=existing_job_id, state=JobState.QUEUED)
+        inline_environment, external_environment = split_job_environment(request.environment)
+        inline_exports = [
+            f"export {key}={shlex.quote(value)};" for key, value in inline_environment.items()
+        ]
         command = shlex.join(request.command)
-        script = f"{exports} exec {command}" if exports else f"exec {command}"
+        environment_file: str | None = None
+        if external_environment:
+            environment_file = job_environment_path(
+                str(workdir),
+                str(receipt_path) if receipt_path else None,
+                request.stage_id,
+            )
+            self._write_environment_file(
+                environment_file,
+                render_environment_script(external_environment),
+            )
+            environment_file = str(self._confined_path(environment_file))
+            script = "\n".join(
+                [
+                    "set -u",
+                    f"environment_file={shlex.quote(environment_file)}",
+                    "trap 'rm -f -- \"$environment_file\"' EXIT",
+                    f"cd -- {shlex.quote(str(workdir))} || exit",
+                    *inline_exports,
+                    '. "$environment_file" || exit',
+                    command,
+                ]
+            )
+        else:
+            exports = " ".join(inline_exports)
+            script = f"{exports} exec {command}" if exports else f"exec {command}"
         args = ["sbatch", "--parsable"]
         if self.settings.hpc_slurm_account:
             args.append(f"--account={self.settings.hpc_slurm_account}")
@@ -549,15 +743,66 @@ class NativeSlurmClient:
         if stderr_path is not None:
             args.append(f"--error={stderr_path}")
         args.extend(["--wrap", script])
-        receipt_path = None
-        if request.submission_receipt_path:
-            receipt_path = str(self._confined_path(request.submission_receipt_path))
-            existing_job_id = self._read_submission_receipt(receipt_path)
-            if existing_job_id is not None:
-                return JobHandle(job_id=existing_job_id, state=JobState.QUEUED)
-            output = self._submit_with_receipt(args, receipt_path)
-        else:
-            output = self._run(args)
+        total_environment_bytes = sum(
+            len(value.encode("utf-8")) for value in request.environment.values()
+        )
+        field_sizes = ",".join(
+            f"{key}:{len(value.encode('utf-8'))}"
+            for key, value in sorted(request.environment.items())
+        )
+        logger.info(
+            "HPC submit stage=%s job_name=%s environment_bytes=%d environment_fields=%s "
+            "wrap_bytes=%d externalized_fields=%s",
+            request.stage_id,
+            request.job_name or "unknown",
+            total_environment_bytes,
+            field_sizes,
+            len(script.encode("utf-8")),
+            ",".join(sorted(external_environment)),
+        )
+        try:
+            output = (
+                self._submit_with_receipt(args, receipt_path) if receipt_path else self._run(args)
+            )
+        except (HPCSubmissionAmbiguousError, HPCTransportError) as exc:
+            # A lost reply may follow an accepted submission; the job still
+            # needs this file when Slurm eventually starts it.
+            logger.warning(
+                "HPC submit response is ambiguous stage=%s job_name=%s "
+                "environment_bytes=%d wrap_bytes=%d error_type=%s",
+                request.stage_id,
+                request.job_name or "unknown",
+                total_environment_bytes,
+                len(script.encode("utf-8")),
+                type(exc).__name__,
+            )
+            raise
+        except OSError as exc:
+            if exc.errno == errno.E2BIG:
+                logger.error(
+                    "HPC submit hit E2BIG stage=%s job_name=%s "
+                    "environment_bytes=%d wrap_bytes=%d error_type=%s errno=%s",
+                    request.stage_id,
+                    request.job_name or "unknown",
+                    total_environment_bytes,
+                    len(script.encode("utf-8")),
+                    type(exc).__name__,
+                    exc.errno,
+                )
+                if environment_file is not None:
+                    self.remove_environment_file(environment_file)
+                raise HPCRequestTooLargeError(
+                    "Slurm submission exceeded the OS argument limit "
+                    f"(stage={request.stage_id}, wrap_bytes={len(script.encode('utf-8'))}, "
+                    f"environment_bytes={total_environment_bytes})"
+                ) from exc
+            if environment_file is not None:
+                self.remove_environment_file(environment_file)
+            raise
+        except Exception:
+            if environment_file is not None:
+                self.remove_environment_file(environment_file)
+            raise
         job_id = output.splitlines()[0].split(";", 1)[0].strip() if output else ""
         self._validate_job_id(job_id)
         return JobHandle(job_id=job_id, state=JobState.QUEUED)

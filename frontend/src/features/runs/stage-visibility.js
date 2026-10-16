@@ -17,8 +17,21 @@ export function validateDisabledStages(stages, disabledIds = new Set()) {
 }
 
 export function presentRunStages(stages) {
-  validateDisabledStages(stages);
-  return stages.map((stage) => ({ ...stage }));
+  const stageIds = new Set(stages.map((stage) => stage.id));
+  const rootId = stageIds.has('protein_identity') ? 'protein_identity' : null;
+  const presented = stages.map((stage) => ({
+    ...stage,
+    // A stage can be omitted by the selected run configuration while its
+    // registry descendants remain visible. Keep those edges attached to the
+    // pipeline entry point instead of dropping the edge or collapsing levels.
+    dependencies: stage.id === 'structure_modeling' && stage.status === 'skipped' && rootId
+      ? [rootId]
+      : [...new Set((stage.dependencies ?? []).map((dependency) => (
+        stageIds.has(dependency) ? dependency : rootId
+      )).filter(Boolean))],
+  }));
+  validateDisabledStages(presented);
+  return presented;
 }
 
 export function progressSummary(stages) {

@@ -1,4 +1,5 @@
 import LucideIcon from '@shared/components/icons/LucideIcon.jsx';
+import EmptyState from '@shared/components/feedback/EmptyState.jsx';
 import '@features/proteins/styles/library.css';
 
 const STATUS_TEXT = {
@@ -48,7 +49,15 @@ export default function RunHistory({ runs, proteins, state }) {
       </header>
       {state === 'loading' && <div class="library-empty">Cargando historial autorizado…</div>}
       {state === 'error' && <div class="library-empty" role="alert">No se pudo cargar el historial.</div>}
-      {state === 'ready' && runs.length === 0 && <div class="library-empty">Todavía no tienes corridas registradas.</div>}
+      {state === 'ready' && runs.length === 0 && (
+        <EmptyState
+          className="empty-state-compact"
+          icon="workflow"
+          label="Historial vacío"
+          title="Todavía no tienes corridas registradas."
+          copy="Cuando inicies un análisis, sus ejecuciones aparecerán aquí."
+        />
+      )}
       {state === 'ready' && runs.length > 0 && (
         <div class="run-history-list">
           {runs.map((run) => {

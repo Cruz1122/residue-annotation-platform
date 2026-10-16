@@ -1,5 +1,7 @@
 import errno
+import hashlib
 import io
+import json
 import stat
 import subprocess
 import tarfile
@@ -11,12 +13,14 @@ from app.core.config import Settings
 from app.infrastructure.hpc.archive import ArchiveError, BoundedTarWriter
 from app.infrastructure.hpc.base import (
     HPCConfigurationError,
+    HPCRequestTooLargeError,
     HPCSubmissionAmbiguousError,
     HPCTransportError,
     JobRequest,
     JobState,
     PrefetchRequest,
     parse_prefetch_result,
+    prefetch_environment_path,
     render_prefetch_command,
 )
 from app.infrastructure.hpc.native import NativeSlurmClient
@@ -25,6 +29,7 @@ from paramiko.ssh_exception import (
     AuthenticationException,
     BadHostKeyException,
     NoValidConnectionsError,
+    SSHException,
 )
 
 
@@ -76,6 +81,347 @@ def test_native_slurm_submit_propagates_resources_environment_and_paths(tmp_path
     assert args[-2] == "--wrap"
     assert "export PYTHONUNBUFFERED=1;" in args[-1]
     assert "exec python main.py --stage protein_identity" in args[-1]
+
+
+def test_native_submit_externalizes_large_environment_and_logs_sizes_without_values(
+    tmp_path, monkeypatch, caplog
+):
+    caplog.set_level("INFO")
+    root = tmp_path / "hpc-root"
+    job_directory = root / ".platform_jobs" / "run-1"
+    job_directory.mkdir(parents=True)
+    client = NativeSlurmClient(_settings(root))
+    captured: list[list[str]] = []
+    monkeypatch.setattr(
+        client,
+        "_submit_with_receipt",
+        lambda args, receipt_path: captured.append(args) or "12345;cluster",
+    )
+    monkeypatch.setattr(client, "_read_submission_receipt", lambda receipt_path: None)
+
+    residues = [
+        {
+            "canonical_position": index,
+            "chain": "A",
+            "residue_number": index,
+            "insertion_code": "",
+            "aa": "A",
+        }
+        for index in range(1, 861)
+    ]
+    mapping = {
+        "method": "canonical_sequence_alignment",
+        "canonical_length": 860,
+        "structure_length": 860,
+        "mapped_residue_count": 860,
+        "canonical_to_structure": residues,
+    }
+    configuration = json.dumps({"structure_mapping": mapping}, separators=(",", ":"))
+    structure_mapping = json.dumps(mapping, separators=(",", ":"))
+    environment = {
+        "PIPELINE_CONFIGURATION_JSON": configuration,
+        "PIPELINE_STRUCTURE_MAPPING_JSON": structure_mapping,
+    }
+    receipt = job_directory / "protein_identity.submitted"
+
+    client.submit(
+        JobRequest(
+            stage_id="protein_identity",
+            command=("/bin/sh", "-c", 'printf "%s" "$PIPELINE_CONFIGURATION_JSON"'),
+            working_directory=str(root),
+            environment=environment,
+            submission_receipt_path=str(receipt),
+        )
+    )
+
+    args = captured[0]
+    wrap = args[args.index("--wrap") + 1]
+    assert len(wrap.encode("utf-8")) < 16 * 1024
+    assert configuration not in "\0".join(args)
+    assert structure_mapping not in "\0".join(args)
+    assert '"canonical_to_structure"' not in wrap
+    assert "environment_bytes=" in caplog.text
+    assert "PIPELINE_CONFIGURATION_JSON:" in caplog.text
+    assert configuration not in caplog.text
+    assert structure_mapping not in caplog.text
+
+    environment_files = list(job_directory.glob(".protein_identity.environment.*.sh"))
+    assert len(environment_files) == 1
+    environment_path = environment_files[0]
+    assert stat.S_IMODE(environment_path.stat().st_mode) == 0o600
+    completed = subprocess.run(
+        ["/bin/sh", "-c", wrap],
+        check=True,
+        capture_output=True,
+        text=True,
+        cwd=root,
+    )
+    assert completed.stdout == configuration
+    assert not environment_path.exists()
+
+
+def test_native_large_environment_submissions_use_isolated_files(tmp_path, monkeypatch):
+    root = tmp_path / "hpc-root"
+    job_directory = root / ".platform_jobs" / "run-1"
+    job_directory.mkdir(parents=True)
+    client = NativeSlurmClient(_settings(root))
+    captured: list[list[str]] = []
+    handles = iter(("12345;cluster", "12346;cluster"))
+    monkeypatch.setattr(client, "_read_submission_receipt", lambda receipt_path: None)
+    monkeypatch.setattr(
+        client,
+        "_submit_with_receipt",
+        lambda args, receipt_path: captured.append(args) or next(handles),
+    )
+
+    payloads = ("FIRST-" + "A" * 5_000, "SECOND-" + "B" * 5_000)
+    for payload in payloads:
+        client.submit(
+            JobRequest(
+                stage_id="protein_identity",
+                command=("/bin/sh", "-c", 'printf "%s" "$PIPELINE_CONFIGURATION_JSON"'),
+                working_directory=str(root),
+                environment={"PIPELINE_CONFIGURATION_JSON": payload},
+                submission_receipt_path=str(job_directory / "protein_identity.submitted"),
+            )
+        )
+
+    wraps = [args[args.index("--wrap") + 1] for args in captured]
+    environment_files = list(job_directory.glob(".protein_identity.environment.*.sh"))
+    assert len(environment_files) == 2
+    assert environment_files[0] != environment_files[1]
+    first = subprocess.run(
+        ["/bin/sh", "-c", wraps[0]], check=True, capture_output=True, text=True, cwd=root
+    )
+    assert first.stdout == payloads[0]
+    assert len(list(job_directory.glob(".protein_identity.environment.*.sh"))) == 1
+    second = subprocess.run(
+        ["/bin/sh", "-c", wraps[1]], check=True, capture_output=True, text=True, cwd=root
+    )
+    assert second.stdout == payloads[1]
+    assert not list(job_directory.glob(".protein_identity.environment.*.sh"))
+
+
+def test_ssh_submit_externalizes_large_environment_and_logs_sizes(tmp_path, monkeypatch, caplog):
+    caplog.set_level("INFO")
+    password_path = tmp_path / "password"
+    password_path.write_text("secret\n", encoding="utf-8")
+    password_path.chmod(0o600)
+    client = SSHSlurmClient(
+        Settings(
+            app_env="test",
+            database_url="sqlite://",
+            hpc_ssh_host="mn5.example",
+            hpc_ssh_username="runner",
+            hpc_ssh_password_file=password_path,
+            hpc_remote_root="/gpfs/project/root",
+        )
+    )
+    remote_command: list[str] = []
+    remote_files: dict[str, bytes] = {}
+    monkeypatch.setattr(client, "_read_submission_receipt", lambda _path: None)
+    monkeypatch.setattr(
+        client,
+        "_write_environment_file",
+        lambda path, contents: remote_files.__setitem__(path, contents),
+    )
+    monkeypatch.setattr(
+        client,
+        "_command",
+        lambda command: remote_command.append(command) or "12345;cluster",
+    )
+
+    payload = "SENTINEL-PRIVATE-MAPPING-" + "A" * 80_000
+    handle = client.submit(
+        JobRequest(
+            stage_id="protein_identity",
+            command=("python", "main.py"),
+            working_directory="/gpfs/project/root",
+            environment={"PIPELINE_CONFIGURATION_JSON": payload},
+            submission_receipt_path=(
+                "/gpfs/project/root/.platform_jobs/run-1/protein_identity.submitted"
+            ),
+        )
+    )
+
+    assert handle.job_id == "12345"
+    assert payload not in remote_command[0]
+    assert payload not in caplog.text
+    assert f"environment_bytes={len(payload.encode())}" in caplog.text
+    assert len(remote_files) == 1
+    assert payload.encode() in next(iter(remote_files.values()))
+
+
+def test_ssh_environment_file_uses_exclusive_write_mode(tmp_path, monkeypatch):
+    """Paramiko needs ``wx``; ``xb`` creates a non-writable SFTP handle."""
+
+    password_path = tmp_path / "password"
+    password_path.write_text("secret\n", encoding="utf-8")
+    password_path.chmod(0o600)
+    root = "/gpfs/project/root"
+    environment_path = f"{root}/.protein_identity.environment.{'a' * 32}.sh"
+    client = SSHSlurmClient(
+        Settings(
+            app_env="test",
+            database_url="sqlite://",
+            hpc_ssh_host="mn5.example",
+            hpc_ssh_username="runner",
+            hpc_ssh_password_file=password_path,
+            hpc_remote_root=root,
+        )
+    )
+
+    class WritableRemoteFile:
+        def __init__(self, files: dict[str, bytes], path: str):
+            self.files = files
+            self.path = path
+            self.buffer = io.BytesIO()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            self.files[self.path] = self.buffer.getvalue()
+
+        def write(self, contents: bytes) -> int:
+            return self.buffer.write(contents)
+
+        def flush(self) -> None:
+            return None
+
+    class WritableSFTP:
+        def __init__(self):
+            self.files: dict[str, bytes] = {}
+            self.modes: list[str] = []
+
+        def lstat(self, path: str):
+            if path == root:
+                return SimpleNamespace(st_mode=stat.S_IFDIR | 0o700)
+            if path in self.files:
+                return SimpleNamespace(st_mode=stat.S_IFREG | 0o600)
+            raise FileNotFoundError(path)
+
+        def open(self, path: str, mode: str):
+            self.modes.append(mode)
+            if mode != "wx":
+                raise AssertionError(f"unexpected SFTP mode: {mode}")
+            return WritableRemoteFile(self.files, path)
+
+        def chmod(self, _path: str, _mode: int) -> None:
+            return None
+
+        def remove(self, path: str) -> None:
+            self.files.pop(path, None)
+
+        def close(self) -> None:
+            return None
+
+    class WritableSSH:
+        def __init__(self, sftp: WritableSFTP):
+            self.sftp = sftp
+
+        def open_sftp(self):
+            return self.sftp
+
+        def close(self) -> None:
+            return None
+
+    sftp = WritableSFTP()
+    monkeypatch.setattr(client, "ensure_directory", lambda _path: None)
+    monkeypatch.setattr(client, "_connect", lambda: WritableSSH(sftp))
+
+    contents = b"export PIPELINE_CONFIGURATION_JSON='payload';\n"
+    client._write_environment_file(environment_path, contents)
+
+    assert sftp.modes == ["wx"]
+    assert sftp.files[environment_path] == contents
+
+
+def test_native_e2big_is_logged_without_environment_values_and_cleans_file(tmp_path, caplog):
+    caplog.set_level("INFO")
+    root = tmp_path / "hpc-root"
+    root.mkdir()
+    client = NativeSlurmClient(_settings(root))
+    client._run = lambda args: (_ for _ in ()).throw(OSError(errno.E2BIG, "Argument list too long"))
+    payload = "PRIVATE-ENVIRONMENT-" + "C" * 6_000
+
+    with pytest.raises(HPCRequestTooLargeError, match="OS argument limit"):
+        client.submit(
+            JobRequest(
+                stage_id="protein_identity",
+                command=("python", "main.py"),
+                working_directory=str(root),
+                environment={"PIPELINE_CONFIGURATION_JSON": payload},
+            )
+        )
+
+    assert "E2BIG" in caplog.text
+    assert f"environment_bytes={len(payload.encode())}" in caplog.text
+    assert payload not in caplog.text
+    assert not list(root.glob(".*.environment.*.sh"))
+
+
+def test_native_prefetch_externalizes_large_environment_and_cleans_file(tmp_path):
+    root = tmp_path / "hpc-root"
+    root.mkdir()
+    payload = "SENTINEL-PREFETCH-MAPPING-" + "B" * 80_000
+    payload_sha256 = hashlib.sha256(payload.encode()).hexdigest()
+    command = (
+        "python -c 'import os,json,hashlib; "
+        'assert hashlib.sha256(os.environ["PIPELINE_CONFIGURATION_JSON"].encode()).hexdigest() '
+        f'== "{payload_sha256}"; '
+        'print(json.dumps({"status":"success",'
+        '"requirements":["external_cache"]}))\' '
+        "{accession} {requirements}"
+    )
+    settings = _settings(root).model_copy(update={"hpc_pipeline_prefetch_command": command})
+    client = NativeSlurmClient(settings)
+    request = PrefetchRequest(
+        accession="P00001",
+        requirements=("external_cache",),
+        working_directory=str(root),
+        environment={"PIPELINE_CONFIGURATION_JSON": payload},
+    )
+
+    result = client.prepare_external(request)
+
+    assert result.status == "success"
+    assert result.requirements == ("external_cache",)
+    assert not list(root.glob(".*.environment.*.sh"))
+
+
+def test_native_prefetch_validation_failure_does_not_leave_environment_file(tmp_path):
+    root = tmp_path / "hpc-root"
+    root.mkdir()
+    client = NativeSlurmClient(
+        _settings(root).model_copy(update={"hpc_pipeline_prefetch_command": None})
+    )
+    request = PrefetchRequest(
+        accession="P00001",
+        requirements=("external_cache",),
+        working_directory=str(root),
+        environment={"PIPELINE_CONFIGURATION_JSON": "X" * 80_000},
+    )
+
+    with pytest.raises(HPCConfigurationError, match="not configured"):
+        client.prepare_external(request)
+
+    assert not list(root.glob(".*.environment.*.sh"))
+
+
+def test_prefetch_environment_path_is_stable_for_same_payload_and_changes_with_payload():
+    common = {
+        "accession": "P00001",
+        "requirements": ("external_cache",),
+        "working_directory": "/gpfs/project/root",
+        "receipt_path": "/gpfs/project/root/.platform_jobs/run-1/stage.prefetch.key.result",
+    }
+    first = PrefetchRequest(**common, environment={"PIPELINE_CONFIGURATION_JSON": "first"})
+    same = PrefetchRequest(**common, environment={"PIPELINE_CONFIGURATION_JSON": "first"})
+    changed = PrefetchRequest(**common, environment={"PIPELINE_CONFIGURATION_JSON": "changed"})
+
+    assert prefetch_environment_path(first) == prefetch_environment_path(same)
+    assert prefetch_environment_path(first) != prefetch_environment_path(changed)
 
 
 def test_native_slurm_submission_receipt_recovers_without_resubmit(tmp_path, monkeypatch):
@@ -427,6 +773,34 @@ def test_ssh_command_connection_loss_is_reported_as_transport_unavailable(tmp_pa
         client._command("squeue --jobs 12345")
 
 
+def test_ssh_missing_session_is_reported_as_transport_unavailable(tmp_path):
+    password_path = tmp_path / "password"
+    password_path.write_text("secret\n", encoding="utf-8")
+    password_path.chmod(0o600)
+    client = SSHSlurmClient(
+        Settings(
+            app_env="test",
+            database_url="sqlite://",
+            hpc_ssh_host="mn5.example",
+            hpc_ssh_username="runner",
+            hpc_ssh_password_file=password_path,
+            hpc_remote_root="/gpfs/project/root",
+        )
+    )
+
+    class BrokenSSH:
+        def exec_command(self, _command: str, timeout: float):
+            raise SSHException("No existing session")
+
+        def close(self) -> None:
+            return None
+
+    client._connect = lambda: BrokenSSH()
+
+    with pytest.raises(HPCTransportError, match="transport is unavailable"):
+        client._command("squeue --jobs 12345")
+
+
 def test_ssh_no_valid_connections_is_reported_as_transport_unavailable(tmp_path, monkeypatch):
     password_path = tmp_path / "password"
     password_path.write_text("secret\n", encoding="utf-8")
@@ -444,6 +818,9 @@ def test_ssh_no_valid_connections_is_reported_as_transport_unavailable(tmp_path,
 
     class BrokenConnectSSH:
         def load_system_host_keys(self) -> None:
+            return None
+
+        def load_host_keys(self, _filename: str) -> None:
             return None
 
         def set_missing_host_key_policy(self, _policy) -> None:

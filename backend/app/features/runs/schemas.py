@@ -144,6 +144,7 @@ class RunRead(BaseModel):
     protein_id: str
     status: str
     requested_variants: list[dict[str, object]]
+    remote_job_id: str | None = None
     error_code: str | None = None
     error_message: str | None = None
     configuration: RunConfigurationRead | None = None

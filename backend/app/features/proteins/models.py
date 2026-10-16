@@ -1,7 +1,16 @@
 from datetime import datetime
 from uuid import uuid4
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import (
+    DateTime,
+    ForeignKey,
+    Integer,
+    PrimaryKeyConstraint,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.db import Base
@@ -28,6 +37,23 @@ class Protein(Base):
     identifiers: Mapped[list["ProteinIdentifier"]] = relationship(
         back_populates="protein", cascade="all, delete-orphan"
     )
+    project_access: Mapped[list["ProteinProjectAccess"]] = relationship(
+        back_populates="protein", cascade="all, delete-orphan"
+    )
+
+
+class ProteinProjectAccess(Base):
+    """Projects that have registered and may use a shared Protein identity."""
+
+    __tablename__ = "protein_project_access"
+    __table_args__ = (
+        PrimaryKeyConstraint("protein_id", "project_id", name="pk_protein_project_access"),
+    )
+
+    protein_id: Mapped[str] = mapped_column(ForeignKey("proteins.id", ondelete="CASCADE"))
+    project_id: Mapped[str] = mapped_column(String(128), index=True)
+
+    protein: Mapped[Protein] = relationship(back_populates="project_access")
 
 
 class ProteinIdentifier(Base):

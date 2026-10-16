@@ -4,10 +4,12 @@ import csv
 import hashlib
 import io
 import json
+import logging
 import os
 import re
 import shlex
 from collections.abc import Iterable, Iterator
+from datetime import timedelta
 from pathlib import Path, PurePosixPath
 from typing import Any, TextIO
 from uuid import uuid4
@@ -34,10 +36,11 @@ from app.features.runs.manifest import (
 )
 from app.features.runs.models import Artifact, Run, RunStage, StageResult
 from app.features.runs.service import mark_run_running, now_utc, transition_stage
-from app.features.runs.state import RunStageStatus
+from app.features.runs.state import RunStageStatus, RunStatus
 from app.features.stages.registry import STAGE_BY_ID
 from app.infrastructure.hpc.base import (
     HPCConfigurationError,
+    HPCSubmissionAmbiguousError,
     HPCTransportError,
     JobRequest,
     JobState,
@@ -59,6 +62,7 @@ class RemoteStageExecutionError(RuntimeError):
 
 
 _DEFERRED_ARTIFACT_CLEANUP_KEY = "remote_executor.deferred_artifact_cleanup"
+logger = logging.getLogger(__name__)
 
 
 def _is_stage_result_cache_conflict(error: IntegrityError) -> bool:
@@ -115,6 +119,351 @@ class SSHStageExecutor:
 
     def _submission_receipt_path(self, run_id: str, stage_id: str) -> str:
         return self._remote_child(self._job_directory(run_id), f"{stage_id}.submitted")
+
+    def _run_marker_path(self, run_id: str) -> str:
+        return self._remote_child(self._job_directory(run_id), "run.result")
+
+    def _run_submission_receipt_path(self, run_id: str) -> str:
+        return self._remote_child(self._job_directory(run_id), "run.submitted")
+
+    def _cleanup_stage_environment(self, stage: RunStage) -> None:
+        try:
+            self.client.remove_stage_environment_files(
+                self._job_directory(stage.run_id),
+                stage.stage_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Could not clean HPC environment file stage=%s error_type=%s",
+                stage.stage_id,
+                type(exc).__name__,
+            )
+
+    def _cleanup_run_environment(self, run: Run) -> None:
+        try:
+            self.client.remove_stage_environment_files(
+                self._job_directory(run.id),
+                f"run-{run.id}",
+            )
+        except Exception as exc:
+            logger.warning(
+                "Could not clean HPC environment file run=%s error_type=%s",
+                run.id,
+                type(exc).__name__,
+            )
+
+    def _run_script(
+        self,
+        run: Run,
+        selected_stage_ids: Iterable[str],
+        accession: str,
+        marker_path: str,
+    ) -> str:
+        """Build the one-allocation wrapper around MN5's orchestration CLI."""
+
+        stage_ids = tuple(selected_stage_ids)
+        if not stage_ids:
+            raise RemoteStageExecutionError("remote run has no selected stages")
+        python = shlex.quote(self.settings.hpc_pipeline_python)
+        main = shlex.quote(self.settings.hpc_pipeline_main)
+        requested_protein = shlex.quote(remote_pipeline_input_namespace(run.id))
+        quoted_accession = shlex.quote(accession)
+        quoted_stages = shlex.quote(",".join(stage_ids))
+        marker = shlex.quote(marker_path)
+        return "\n".join(
+            [
+                "set -u",
+                f"cd -- {shlex.quote(self.root)}",
+                (
+                    f"{python} {main} {requested_protein} --accession {quoted_accession} "
+                    f"--stages {quoted_stages} --max-parallel "
+                    f"{self.settings.hpc_pipeline_max_parallel} --cpu-budget "
+                    f"{self.settings.hpc_pipeline_cpu_budget} --gpu-devices "
+                    '"${CUDA_VISIBLE_DEVICES:-}" --fail-fast'
+                ),
+                "pipeline_status=$?",
+                "result_run=",
+                "for log in runs/*/logs/pipeline.log; do",
+                '  [ -f "$log" ] || continue',
+                '  if grep -Fq "SLURM_JOB_ID | ${SLURM_JOB_ID}" "$log"; then',
+                '    result_run="${log%/logs/pipeline.log}"',
+                "  fi",
+                "done",
+                f'if [ -n "$result_run" ]; then printf \'%s\\n\' "$result_run" > {marker}; fi',
+                'exit "$pipeline_status"',
+            ]
+        )
+
+    def _selected_run_stages(self, run: Run) -> list[RunStage]:
+        selected = set(run.configuration.selected_stage_ids if run.configuration else ())
+        return [
+            stage
+            for stage in run.stages
+            if stage.stage_id in selected
+            and stage.status
+            not in {
+                RunStageStatus.SUCCESS,
+                RunStageStatus.REUSED,
+                RunStageStatus.SKIPPED,
+                RunStageStatus.CANCELLED,
+            }
+        ]
+
+    def _persist_shared_job(
+        self,
+        session: Session,
+        run: Run,
+        job_id: str,
+        state: JobState,
+    ) -> None:
+        selected_stages = self._selected_run_stages(run)
+        if not selected_stages:
+            raise RemoteStageExecutionError("remote run has no active selected stages")
+        run.remote_job_id = job_id
+        deadline = now_utc() + timedelta(seconds=self.settings.run_worker_lease_seconds)
+        for stage in selected_stages:
+            stage.slurm_job_id = job_id
+            stage.lease_expires_at = deadline
+            if stage.status == RunStageStatus.PENDING:
+                transition_stage(session, stage, RunStageStatus.READY)
+            if stage.status == RunStageStatus.READY:
+                transition_stage(session, stage, RunStageStatus.QUEUED)
+        if state == JobState.RUNNING:
+            for stage in selected_stages:
+                if stage.status == RunStageStatus.QUEUED:
+                    transition_stage(session, stage, RunStageStatus.RUNNING)
+            mark_run_running(session, selected_stages[0])
+        session.commit()
+        logger.info(
+            "HPC run submitted run_id=%s job_id=%s selected_stages=%s cpu=%s gpu=%s",
+            run.id,
+            job_id,
+            ",".join(stage.stage_id for stage in selected_stages),
+            self.settings.hpc_pipeline_cpu_budget,
+            self.settings.hpc_pipeline_gpu_budget,
+        )
+
+    def submit_run(self, session: Session, run: Run) -> None:
+        """Submit one Slurm allocation that invokes MN5 ``main.py`` once."""
+
+        if run.remote_job_id:
+            return
+        selected_stages = self._selected_run_stages(run)
+        if not selected_stages:
+            raise RemoteStageExecutionError("remote run has no active selected stages")
+        if self.settings.hpc_input_transfer_enabled and not any(
+            upload.input_type == "fasta" and upload.transfer_status == "uploaded"
+            for upload in run.uploads
+        ):
+            raise RemoteStageExecutionError(
+                "remote execution requires an attached FASTA input for the confirmed sequence"
+            )
+        accession = self._accession(run)
+        job_directory = self._job_directory(run.id)
+        self.client.ensure_directory(job_directory)
+        marker_path = self._run_marker_path(run.id)
+        submission_receipt_path = self._run_submission_receipt_path(run.id)
+        input_environment = self._pipeline_input_environment(run, accession)
+        input_environment["PIPELINE_RUN_ID"] = run.id
+        if run.configuration is not None:
+            input_environment["PIPELINE_STRUCTURE_SOURCE"] = run.configuration.structure_source
+            input_environment["PIPELINE_VARIANTS_JSON"] = json.dumps(
+                run.configuration.normalized_variants or [],
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        selected_definitions = [STAGE_BY_ID[stage.stage_id] for stage in selected_stages]
+        memory_values = [definition.memory_gb for definition in selected_definitions]
+        request = JobRequest(
+            stage_id=f"run-{run.id}",
+            command=(
+                "bash",
+                "-lc",
+                self._run_script(
+                    run,
+                    (stage.stage_id for stage in selected_stages),
+                    accession,
+                    marker_path,
+                ),
+            ),
+            working_directory=self.root,
+            environment={"PYTHONUNBUFFERED": "1", **input_environment},
+            cpu=self.settings.hpc_pipeline_cpu_budget,
+            gpu=self.settings.hpc_pipeline_gpu_budget,
+            network=any(definition.network for definition in selected_definitions),
+            memory_gb=max((value for value in memory_values if value is not None), default=None),
+            time_limit=self.settings.hpc_slurm_time,
+            job_name=f"rap-run-{run.id[:8]}",
+            stdout_path=self._remote_child(job_directory, "run.out"),
+            stderr_path=self._remote_child(job_directory, "run.err"),
+            submission_receipt_path=submission_receipt_path,
+        )
+        try:
+            handle = self.client.submit(request)
+        except HPCSubmissionAmbiguousError as exc:
+            self._persist_shared_job(session, run, exc.job_id, JobState.QUEUED)
+            raise
+        self._persist_shared_job(session, run, handle.job_id, handle.state)
+
+    def _run_result_directory(self, run: Run) -> str:
+        try:
+            marker_value = self.client.read_text(self._run_marker_path(run.id), 4_096).strip()
+            marker_candidate = PurePosixPath(marker_value)
+            if marker_candidate.is_absolute():
+                return _remote_path_under(self.root, str(marker_candidate))
+            return self._remote_child(self.root, *marker_candidate.parts)
+        except HPCTransportError:
+            raise
+        except HPCConfigurationError:
+            raise
+        except (OSError, UnicodeError, RuntimeError, SSHConfigurationError) as exc:
+            raise RemoteStageExecutionError(
+                "remote pipeline did not publish a run result directory"
+            ) from exc
+
+    def _run_failure_message(self, run: Run, status_message: str | None) -> str:
+        try:
+            remote_error = self.client.read_text(
+                self._remote_child(self._job_directory(run.id), "run.err"),
+                8_000,
+            ).strip()
+        except Exception:
+            remote_error = ""
+        return sanitize_error_message(
+            remote_error or status_message or "remote Slurm run failed",
+            roots=(self.root,),
+        )
+
+    def _mark_run_failed(self, session: Session, run: Run, message: str) -> None:
+        for stage in self._selected_run_stages(run):
+            if stage.status in {RunStageStatus.QUEUED, RunStageStatus.RUNNING}:
+                try:
+                    transition_stage(session, stage, RunStageStatus.FAILED)
+                except ValueError:
+                    continue
+                stage.error_code = "remote_job_failed"
+                stage.error_message = message
+        run.status = RunStatus.FAILED
+        run.error_code = "remote_job_failed"
+        run.error_message = message
+        session.commit()
+
+    def poll_run(self, session: Session, run: Run) -> bool:
+        if not run.remote_job_id:
+            raise RemoteStageExecutionError("remote run has no Slurm job id")
+        try:
+            status = self.client.status(run.remote_job_id)
+        except HPCTransportError:
+            return True
+        except (
+            AuthenticationException,
+            BadHostKeyException,
+            HPCConfigurationError,
+        ) as exc:
+            self._mark_run_failed(session, run, self._run_failure_message(run, str(exc)))
+            return True
+
+        logger.info(
+            "HPC run poll run_id=%s job_id=%s state=%s message=%s",
+            run.id,
+            run.remote_job_id,
+            status.state,
+            sanitize_error_message(status.message or "", roots=(self.root,)),
+        )
+        active_stages = self._selected_run_stages(run)
+        if status.state == JobState.QUEUED or status.state == JobState.UNKNOWN:
+            return True
+        if status.state == JobState.RUNNING:
+            for stage in active_stages:
+                if stage.status == RunStageStatus.QUEUED:
+                    transition_stage(session, stage, RunStageStatus.RUNNING)
+            if active_stages:
+                mark_run_running(session, active_stages[0])
+            session.commit()
+            return True
+        if status.state == JobState.CANCELLED:
+            for stage in active_stages:
+                try:
+                    transition_stage(session, stage, RunStageStatus.CANCELLED)
+                except ValueError:
+                    continue
+            session.commit()
+            self._cleanup_run_environment(run)
+            return True
+        if status.state == JobState.FAILED:
+            self._mark_run_failed(session, run, self._run_failure_message(run, status.message))
+            self._cleanup_run_environment(run)
+            return True
+        if status.state != JobState.SUCCESS:
+            return True
+
+        try:
+            run_dir = self._run_result_directory(run)
+            for stage in sorted(active_stages, key=lambda item: item.created_at):
+                result_id, reused = self._ingest_result(
+                    session,
+                    stage,
+                    run_dir=run_dir,
+                    allow_remote_cache_plan=True,
+                )
+                persisted = session.scalar(select(RunStage.status).where(RunStage.id == stage.id))
+                if persisted not in {RunStageStatus.QUEUED, RunStageStatus.RUNNING}:
+                    continue
+                if persisted == RunStageStatus.QUEUED:
+                    transition_stage(session, stage, RunStageStatus.RUNNING)
+                    mark_run_running(session, stage)
+                transition_stage(
+                    session,
+                    stage,
+                    RunStageStatus.REUSED if reused else RunStageStatus.SUCCESS,
+                )
+                stage.stage_result_id = result_id
+                if reused:
+                    stage.reuse_reason = {
+                        "source_stage_result_id": result_id,
+                        "cache_key": stage.cache_key,
+                        "factors": stage.cache_factors or {},
+                        "authorization": "owner_or_project_scope",
+                        "artifact_integrity": "verified_size_and_sha256",
+                    }
+                self._commit_and_cleanup(session)
+        except HPCTransportError:
+            return True
+        except Exception as exc:
+            refreshed = session.get(Run, run.id)
+            if refreshed is not None:
+                self._mark_run_failed(
+                    session,
+                    refreshed,
+                    sanitize_error_message(str(exc), roots=(self.root,)),
+                )
+            self._cleanup_run_environment(run)
+            return True
+        self._cleanup_run_environment(run)
+        return True
+
+    def cancel_run(self, session: Session, run: Run) -> None:
+        if not run.remote_job_id:
+            return
+        try:
+            self.client.cancel(run.remote_job_id)
+        except HPCTransportError:
+            return
+        except Exception as exc:
+            logger.warning(
+                "Could not cancel shared HPC run run_id=%s error_type=%s",
+                run.id,
+                type(exc).__name__,
+            )
+            return
+        for stage in self._selected_run_stages(run):
+            try:
+                transition_stage(session, stage, RunStageStatus.CANCELLED)
+            except ValueError:
+                continue
+        session.commit()
+        self._cleanup_run_environment(run)
 
     def _script(self, run: Run, stage: RunStage, accession: str, marker_path: str) -> str:
         python = shlex.quote(self.settings.hpc_pipeline_python)
@@ -440,17 +789,20 @@ class SSHStageExecutor:
                 failed = session.get(RunStage, stage.id)
                 if failed is not None:
                     self._mark_non_retryable_hpc_error(session, failed, exc, operation="result")
+                self._cleanup_stage_environment(stage)
                 return True
             except Exception as exc:
                 failed = session.get(RunStage, stage.id)
                 if failed is not None:
                     self._mark_failed(session, failed, "remote_result_invalid", str(exc))
+                self._cleanup_stage_environment(stage)
                 return True
             persisted = session.scalar(select(RunStage.status).where(RunStage.id == stage.id))
             if persisted not in {RunStageStatus.QUEUED, RunStageStatus.RUNNING}:
                 # A concurrent cancel won: keep the verified result as a cache
                 # entry and leave the terminal stage untouched.
                 self._commit_and_cleanup(session)
+                self._cleanup_stage_environment(stage)
                 return True
             if persisted == RunStageStatus.QUEUED:
                 transition_stage(session, stage, RunStageStatus.RUNNING)
@@ -470,6 +822,7 @@ class SSHStageExecutor:
                     "artifact_integrity": "verified_size_and_sha256",
                 }
             self._commit_and_cleanup(session)
+            self._cleanup_stage_environment(stage)
             return True
         if status.state == JobState.CANCELLED:
             persisted = session.scalar(select(RunStage.status).where(RunStage.id == stage.id))
@@ -480,10 +833,12 @@ class SSHStageExecutor:
                     session.rollback()
                     return True
             session.commit()
+            self._cleanup_stage_environment(stage)
             return True
 
         message = self._failure_message(stage, status.message)
         self._mark_failed(session, stage, "remote_job_failed", message)
+        self._cleanup_stage_environment(stage)
         return True
 
     def cancel_stage(self, session: Session, stage: RunStage) -> None:
@@ -496,6 +851,8 @@ class SSHStageExecutor:
             self.client.cancel(stage.slurm_job_id)
         except Exception:
             return
+        if persisted == RunStageStatus.QUEUED:
+            self._cleanup_stage_environment(stage)
         try:
             transition_stage(session, stage, RunStageStatus.CANCELLED)
         except ValueError:
@@ -610,8 +967,8 @@ class SSHStageExecutor:
         cache_key: str,
     ) -> None:
         """Remove cache rows whose artifacts are gone so a fresh publish can
-        reuse the same (protein, stage, cache_key) without violating the unique
-        constraint.
+        republish the same (protein, stage, cache_key, project) without
+        violating the project-scoped unique constraint.
 
         Files are deliberately deleted only after the replacement transaction
         commits. Deleting them before ``flush`` would leave a rolled-back
@@ -665,23 +1022,31 @@ class SSHStageExecutor:
             return False
         return size == artifact.size and digest == artifact.sha256
 
-    def _ingest_result(self, session: Session, stage: RunStage) -> tuple[str, bool]:
-        marker_path = self._marker_path(stage.run_id, stage.stage_id)
-        try:
-            marker_value = self.client.read_text(marker_path, 4_096).strip()
-            marker_candidate = PurePosixPath(marker_value)
-            if marker_candidate.is_absolute():
-                run_dir = _remote_path_under(self.root, str(marker_candidate))
-            else:
-                run_dir = self._remote_child(self.root, *marker_candidate.parts)
-        except HPCTransportError:
-            raise
-        except HPCConfigurationError:
-            raise
-        except (OSError, UnicodeError, RuntimeError, SSHConfigurationError) as exc:
-            raise RemoteStageExecutionError(
-                "remote pipeline did not publish a result directory"
-            ) from exc
+    def _ingest_result(
+        self,
+        session: Session,
+        stage: RunStage,
+        *,
+        run_dir: str | None = None,
+        allow_remote_cache_plan: bool = False,
+    ) -> tuple[str, bool]:
+        if run_dir is None:
+            marker_path = self._marker_path(stage.run_id, stage.stage_id)
+            try:
+                marker_value = self.client.read_text(marker_path, 4_096).strip()
+                marker_candidate = PurePosixPath(marker_value)
+                if marker_candidate.is_absolute():
+                    run_dir = _remote_path_under(self.root, str(marker_candidate))
+                else:
+                    run_dir = self._remote_child(self.root, *marker_candidate.parts)
+            except HPCTransportError:
+                raise
+            except HPCConfigurationError:
+                raise
+            except (OSError, UnicodeError, RuntimeError, SSHConfigurationError) as exc:
+                raise RemoteStageExecutionError(
+                    "remote pipeline did not publish a result directory"
+                ) from exc
         result_dir = self._result_directory(run_dir, stage.stage_id)
         self._require_done_marker(result_dir)
         manifest_path = self._remote_child(result_dir, "result_manifest.json")
@@ -708,7 +1073,10 @@ class SSHStageExecutor:
             raise RemoteStageExecutionError(str(exc)) from exc
 
         store = ArtifactStore(self.settings)
-        local_cache_key, local_cache_factors = _validated_local_cache_plan(stage)
+        local_cache_key: str | None = None
+        local_cache_factors: dict[str, object] | None = None
+        if not allow_remote_cache_plan:
+            local_cache_key, local_cache_factors = _validated_local_cache_plan(stage)
         remote_cache_key = str(manifest["cache_key"])
         manifest_artifact_names = {str(name) for name in manifest["artifacts"]}
         expected_artifact_names = {
@@ -771,6 +1139,38 @@ class SSHStageExecutor:
                 raise RemoteStageExecutionError("remote provenance is unreadable") from exc
             if not isinstance(provenance, dict):
                 raise RemoteStageExecutionError("remote provenance must be an object")
+            if allow_remote_cache_plan and not stage.cache_key:
+                operational = _remote_operational_block(provenance)
+                payload = operational.get("cache_payload")
+                binding = provenance.get("platform_binding")
+                if isinstance(binding, dict):
+                    binding_key = binding.get("cache_key")
+                    binding_factors = binding.get("cache_factors")
+                    if isinstance(binding_key, str) and isinstance(binding_factors, dict):
+                        stage.cache_key = binding_key
+                        stage.cache_factors = binding_factors
+                elif isinstance(payload, dict):
+                    dependency_keys = payload.get("dependency_cache_keys", {})
+                    if not isinstance(dependency_keys, dict) or any(
+                        not isinstance(key, str) or not isinstance(value, str)
+                        for key, value in dependency_keys.items()
+                    ):
+                        raise RemoteStageExecutionError(
+                            "remote provenance dependency identities are invalid"
+                        )
+                    try:
+                        local_cache_key, local_cache_factors = planned_stage_cache_identity(
+                            stage,
+                            stage.run.configuration,
+                            dependency_keys,
+                        )
+                    except (KeyError, TypeError, ValueError, AssertionError) as exc:
+                        raise RemoteStageExecutionError(
+                            "remote result cache plan cannot be calculated locally"
+                        ) from exc
+                    stage.cache_key = local_cache_key
+                    stage.cache_factors = local_cache_factors
+            local_cache_key, local_cache_factors = _validated_local_cache_plan(stage)
             if isinstance(provenance.get("platform_binding"), dict):
                 remote_binding = _validate_remote_provenance_binding(
                     stage,

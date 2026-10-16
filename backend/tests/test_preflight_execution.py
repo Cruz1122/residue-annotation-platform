@@ -19,6 +19,7 @@ from app.features.runs.worker_service import (
 )
 from app.infrastructure.hpc.base import (
     HPCConfigurationError,
+    HPCRequestTooLargeError,
     HPCSubmissionAmbiguousError,
     HPCTransportError,
     PrefetchResult,
@@ -375,6 +376,15 @@ class SubmitTransportRecoveryExecutor:
         session.commit()
 
 
+class SubmitRequestTooLargeExecutor:
+    def __init__(self, _settings: Settings):
+        self.submit_calls = 0
+
+    def submit_stage(self, _session, _stage):
+        self.submit_calls += 1
+        raise HPCRequestTooLargeError("Slurm submission exceeded the OS argument limit")
+
+
 def test_submit_transport_failure_keeps_stage_retryable(
     client,
     session,
@@ -414,6 +424,38 @@ def test_submit_transport_failure_keeps_stage_retryable(
     assert recovered.status == RunStageStatus.QUEUED
     assert recovered.slurm_job_id == "job-recovered"
     assert executor.submit_calls == 2
+
+
+def test_e2big_submission_failure_is_terminal_and_not_retried(
+    client,
+    session,
+    tmp_path: Path,
+    monkeypatch,
+):
+    settings = _remote_settings(tmp_path)
+    run_id = _remote_run(client, settings)
+    _publish_identity_root(session, run_id)
+    _isolate_stage(session, run_id, "sequence_frustration")
+    executor = SubmitRequestTooLargeExecutor(settings)
+    monkeypatch.setattr("app.features.runs.worker_service.get_settings", lambda: settings)
+    monkeypatch.setattr(
+        "app.features.runs.remote_executor.SSHStageExecutor",
+        lambda _settings: executor,
+    )
+
+    assert process_one(session) is True
+    session.expire_all()
+    failed = session.scalar(
+        select(RunStage)
+        .where(RunStage.run_id == run_id)
+        .where(RunStage.stage_id == "sequence_frustration")
+    )
+    assert failed is not None
+    assert failed.status == RunStageStatus.FAILED
+    assert failed.error_code == "hpc_request_too_large"
+    assert "OS argument limit" in failed.error_message
+    assert process_one(session) is False
+    assert executor.submit_calls == 1
 
 
 class AmbiguousSubmitExecutor:

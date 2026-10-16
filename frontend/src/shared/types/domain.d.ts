@@ -139,7 +139,9 @@ export interface Run {
   id: string;
   protein_id: string;
   status: 'pending' | 'running' | 'success' | 'failed' | 'cancel_requested' | 'cancelled';
+  priority?: string | null;
   requested_variants: VariantRequest[];
+  remote_job_id: string | null;
   error_code: string | null;
   error_message: string | null;
   configuration: RunConfiguration | null;

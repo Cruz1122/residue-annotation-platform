@@ -185,6 +185,7 @@ export function safeInternalPath(value: string | null | undefined, fallback = '/
   try {
     const parsed = new URL(value, 'http://local.invalid');
     if (parsed.origin !== 'http://local.invalid') return fallback;
+    if (parsed.pathname === '/') return fallback;
     return `${parsed.pathname}${parsed.search}${parsed.hash}`;
   } catch {
     return fallback;

@@ -16,35 +16,6 @@
   text-align: center;
 }
 .onboarding-title.is-variants { font-size: clamp(38px, 4.6vw, 62px); }
-.onboarding-subtitle {
-  margin: 0;
-  max-width: 62ch;
-  color: var(--muted);
-  font-size: clamp(12px, 1vw, 15px);
-  line-height: 1.55;
-  text-align: center;
-}
-.configuration-summary {
-  width: min(760px, 100%);
-  margin: 8px auto 0;
-  padding: 18px 20px;
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px;
-  border: 1px solid var(--line);
-  background: rgba(255, 255, 255, .82);
-  text-align: left;
-}
-.configuration-summary div { display: grid; gap: 4px; min-width: 0; }
-.configuration-summary span { color: var(--muted); font-size: 11px; }
-.configuration-summary strong { font-size: 13px; line-height: 1.3; }
-.configuration-summary p {
-  grid-column: 1 / -1;
-  margin: 4px 0 0;
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1.45;
-}
 .auth-button.onboarding-action { width: min(360px, 100%); min-height: 52px; margin-top: 24px; font-size: 12px; }
 .auth-page.onboarding-page .auth-button.onboarding-action:disabled {
   opacity: 1;
@@ -84,7 +55,6 @@
 /* Texto: el desvanecido sigue la silueta de cada carácter, no su caja. */
 .onboarding-title,
 .onboarding-title.structure-choice__title,
-.onboarding-subtitle,
 .upload-label,
 .variant-compose-arrow {
   text-shadow:
@@ -324,8 +294,6 @@
 @media (max-width: 640px) {
   .upload-options { grid-template-columns: 1fr; width: min(360px, 100%); }
   .upload-card { aspect-ratio: 1.75 / 1; }
-  .configuration-summary { grid-template-columns: 1fr; }
-  .configuration-summary p { grid-column: auto; }
   .variant-sequence { max-height: 46vh; padding: 10px; }
   .variant-seq-row { grid-template-columns: 30px max-content 30px; gap: 7px; }
   .variant-residue-button { width: 30px; height: 30px; flex-basis: 30px; }

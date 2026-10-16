@@ -11,6 +11,14 @@
   text-align: center;
 }
 .empty-state-icon { width: 56px; height: 56px; color: var(--muted); }
+.empty-state-label {
+  margin: 0 0 -10px;
+  color: var(--green-dark);
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
 .empty-state-title {
   margin: 0;
   max-width: 44ch;
@@ -33,3 +41,8 @@
   justify-content: center;
   gap: 10px;
 }
+.empty-state-compact {
+  min-height: 0;
+  padding: 28px 20px;
+}
+.empty-state-compact .empty-state-icon { width: 40px; height: 40px; }

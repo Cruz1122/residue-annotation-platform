@@ -17,7 +17,7 @@ from app.core.config import Settings, get_settings
 from app.core.security import sanitize_error_message
 from app.features.auth.service import record_audit
 from app.features.proteins.models import Protein
-from app.features.proteins.service import normalize_sequence
+from app.features.proteins.service import normalize_sequence, protein_accessible_to
 from app.features.runs.configuration import (
     ConfigurationValidationError,
     empty_structure_mapping,
@@ -330,6 +330,7 @@ def serialize_run(run: Run) -> RunRead:
         protein_id=run.protein_id,
         status=run.status,
         requested_variants=run.requested_variants or [],
+        remote_job_id=run.remote_job_id,
         error_code=run_error_code,
         error_message=run_error_message,
         configuration=configuration,
@@ -488,7 +489,7 @@ def create_run(
     protein = session.scalar(select(Protein).where(Protein.id == payload.protein_id))
     if protein is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Protein not found")
-    if not principal.can_access(protein.owner_id, protein.project_id):
+    if not protein_accessible_to(session, principal, protein):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Protein access denied")
     for variant in payload.variants:
         if variant.aa_position > protein.length:
@@ -908,7 +909,13 @@ def request_cancel(
             RunStageStatus.QUEUED,
         }:
             transition_stage(session, stage, RunStageStatus.CANCELLED)
-    if not any(stage.status == RunStageStatus.RUNNING for stage in stages):
+    # A shared run-level job can still be queued when the API cancellation
+    # arrives: all stage rows may already be terminalized locally, but Slurm
+    # still needs an explicit cancel request from the worker. Keep the run in
+    # CANCEL_REQUESTED until that reconciliation happens.
+    if not run.remote_job_id and not any(
+        stage.status == RunStageStatus.RUNNING for stage in stages
+    ):
         run.status = RunStatus.CANCELLED
         run.finished_at = now_utc()
         slot = session.scalar(select(ActiveRunSlot).where(ActiveRunSlot.run_id == run.id))
