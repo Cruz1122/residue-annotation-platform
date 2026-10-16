@@ -1,0 +1,7 @@
+---
+import AppLayout from '../../../layouts/AppLayout.astro';
+import ProteinViewer from '@features/annotations/components/viewer/ProteinViewer.jsx';
+---
+<AppLayout title="Regiones funcionales · Residue Annotation" active="functional" proteinId={Astro.params.id}>
+  <ProteinViewer client:only="preact" proteinId={Astro.params.id} analysis="functional" />
+</AppLayout>

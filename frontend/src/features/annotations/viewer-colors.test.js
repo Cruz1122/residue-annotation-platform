@@ -2,12 +2,18 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   assignCanonicalPositions,
+  annotationForResidue,
   canonicalChain,
   colorForValues,
   colorOnScale,
+  fixedDomainForMode,
+  mergeAnnotationRows,
+  measurementForMode,
   normalizeValue,
+  publishedModeValue,
   relativeDomain,
   residueDisplayColor,
+  topologyClass,
   VISUALIZATION_MODES,
   viewerModeAvailability,
 } from './viewer-presentation.js';
@@ -22,24 +28,50 @@ test('NA is not a number and is not treated as zero', () => {
 test('continuous color uses the visual midpoint, not a neighbor blend', () => {
   const colors = VISUALIZATION_MODES.frustration.colors;
   assert.equal(colorOnScale(0, colors), colors[0]);
-  assert.equal(colorOnScale(0.5, colors), colors[1]);
-  assert.equal(colorOnScale(1, colors), colors[2]);
+  assert.equal(colorOnScale(0.5, colors), colors[Math.floor(colors.length / 2)]);
+  assert.equal(colorOnScale(1, colors), colors.at(-1));
   assert.equal(colorOnScale(null, colors), null);
 });
 
-test('rate4site keeps the more negative end on the low color', () => {
-  const domain = { min: -2, max: 2 };
-  const low = colorForValues('conservation', { rate4site_score: -2 }, domain);
-  const high = colorForValues('conservation', { rate4site_score: 2 }, domain);
+test('ConSurf uses its native fixed 1-to-9 scale', () => {
+  const domain = fixedDomainForMode('conservation');
+  const low = colorForValues('conservation', { consurf_grade: 1 }, domain);
+  const high = colorForValues('conservation', { consurf_grade: 9 }, domain);
   assert.equal(low, VISUALIZATION_MODES.conservation.colors[0]);
-  assert.equal(high, VISUALIZATION_MODES.conservation.colors[2]);
-  assert.equal(colorForValues('conservation', { rate4site_score: 'NA' }, domain), null);
+  assert.equal(high, VISUALIZATION_MODES.conservation.colors.at(-1));
+  assert.equal(colorForValues('conservation', { consurf_grade: 'NA' }, domain), null);
+});
+
+test('fixed numeric domains do not depend on the values in the current run', () => {
+  assert.deepEqual(fixedDomainForMode('frustration'), { min: -2, max: 2, source: 'frustratometer_reference', relative: false });
+  assert.deepEqual(fixedDomainForMode('contacts'), { min: 0, max: 50, source: 'absolute_contact_count_reference', relative: false });
+  assert.deepEqual(fixedDomainForMode('ddg'), { min: -5, max: 5, source: 'fixed_native_unit_reference', relative: false });
+  assert.equal(colorForValues('contacts', { structural_contacts_n_contacts: 2 }, fixedDomainForMode('contacts')), colorForValues('contacts', { structural_contacts_n_contacts: 2 }, fixedDomainForMode('contacts')));
+  assert.notEqual(colorForValues('contacts', { structural_contacts_n_contacts: 2 }, fixedDomainForMode('contacts')), VISUALIZATION_MODES.contacts.colors.at(-1));
 });
 
 test('regime stays categorical', () => {
   assert.equal(colorForValues('regime', { structural_regime: 'membrane' }, null), '#269b65');
   assert.equal(colorForValues('regime', { structural_regime: 'NA' }, null), null);
   assert.equal(residueDisplayColor('regime', {}, null, null), '#b8bec5');
+});
+
+test('categorical modes expose published values to the shared viewer shell', () => {
+  assert.deepEqual(publishedModeValue('topology', { tmbed_topology: 'signal_peptide' }), {
+    field: 'tmbed_topology',
+    value: 'signal_peptide',
+  });
+  assert.deepEqual(publishedModeValue('functional', { functional_feature_class: 'curated_region' }), {
+    field: 'functional_feature_class',
+    value: 'curated_region',
+  });
+  assert.equal(publishedModeValue('topology', { tmbed_topology: 'NA' }), null);
+});
+
+test('functional colors come from published UniProt feature classes', () => {
+  assert.equal(colorForValues('functional', { functional_feature_class: 'highlighted_segment' }, null), '#ee805b');
+  assert.equal(colorForValues('functional', { functional_feature_class: 'functional_interest|curated_region' }, null), '#27a8b5');
+  assert.equal(colorForValues('functional', { variant_in_statin_ldlc_region: false }, null), '#c3c7cb');
 });
 
 test('relative domain ignores missing values', () => {
@@ -51,20 +83,79 @@ test('relative domain ignores missing values', () => {
   assert.deepEqual(domain, { min: 2, max: 8, relative: true });
 });
 
+test('frustration uses the first published numeric source without relabeling it', () => {
+  assert.deepEqual(measurementForMode('frustration', {
+    frustratometer_mean: 'NA',
+    structural_frustration_fi_singleresidue: '-1.956',
+    frustraiseq_index: 0.04,
+  }), { field: 'structural_frustration_fi_singleresidue', value: -1.956 });
+  assert.deepEqual(measurementForMode('frustration', {
+    frustratometer_mean: 'NA',
+    structural_frustration_fi_singleresidue: 'NA',
+    frustraiseq_index: 0.04,
+  }), { field: 'frustraiseq_index', value: 0.04 });
+  assert.equal(relativeDomain('frustration', [
+    { values: { frustratometer_mean: 'NA', structural_frustration_fi_singleresidue: -2 } },
+    { values: { frustratometer_mean: 'NA', structural_frustration_fi_singleresidue: 1 } },
+  ]).min, -2);
+});
+
+test('ddg uses a continuous numeric scale and keeps unevaluated residues missing', () => {
+  const rows = [
+    { values: { ddg_value: -0.4 } },
+    { values: { ddg_value: 1.84 } },
+    { values: { ddg_variant_evaluated: false } },
+  ];
+  const domain = relativeDomain('ddg', rows);
+  assert.deepEqual(domain, { min: -0.4, max: 1.84, relative: true });
+  assert.equal(colorForValues('ddg', { ddg_value: -0.4 }, domain), VISUALIZATION_MODES.ddg.colors[0]);
+  assert.equal(colorForValues('ddg', { ddg_value: 1.84 }, domain), VISUALIZATION_MODES.ddg.colors.at(-1));
+  assert.equal(colorForValues('ddg', { ddg_variant_evaluated: false }, domain), null);
+  assert.equal(viewerModeAvailability([
+    { aa_position: 4, values: { ddg_value: 'not-a-number' } },
+  ], { structureAvailable: true, mappingValid: true }).ddg, false);
+});
+
 test('viewer modes stay pending until structure mapping and published fields exist', () => {
   const rows = [{ aa_position: 1, aa_ref: 'A', values: { structural_regime: 'membrane' } }];
   assert.deepEqual(viewerModeAvailability(rows, { structureAvailable: true, mappingValid: false }), {
+    topology: false,
     regime: false,
     frustration: false,
     contacts: false,
     conservation: false,
+    functional: false,
+    ddg: false,
   });
   assert.deepEqual(viewerModeAvailability(rows, { structureAvailable: true, mappingValid: true }), {
+    topology: false,
     regime: true,
     frustration: false,
     contacts: false,
     conservation: false,
+    functional: false,
+    ddg: false,
   });
+});
+
+test('topology maps native TMbed labels into the four display classes', () => {
+  assert.equal(topologyClass('inside'), 'aqueous');
+  assert.equal(topologyClass('outside'), 'aqueous');
+  assert.equal(topologyClass('tm_alpha'), 'transmembrane');
+  assert.equal(topologyClass('tm_beta'), 'transmembrane');
+  assert.equal(topologyClass('signal_peptide'), 'signal_peptide');
+  assert.equal(topologyClass('NA'), 'unknown');
+});
+
+test('annotation rows from several stages are merged without dropping provenance', () => {
+  const merged = mergeAnnotationRows([
+    { stage_id: 'uniprot_features', aa_position: 4, aa_ref: 'E', values: { uniprot_domain: 'Domain A' }, units: {}, qc_status: 'verified' },
+    { stage_id: 'evolutionary_conservation', aa_position: 4, aa_ref: 'E', values: { rate4site_score: -1.2 }, units: { rate4site_score: 'score' }, qc_status: 'verified' },
+  ]).get(4);
+  assert.deepEqual(merged.values, { uniprot_domain: 'Domain A', rate4site_score: -1.2 });
+  assert.deepEqual(merged.units, { rate4site_score: 'score' });
+  assert.deepEqual(merged.stages, ['uniprot_features', 'evolutionary_conservation']);
+  assert.equal(merged.qcByStage.evolutionary_conservation, 'verified');
 });
 
 test('canonical position follows sequence identity, not PDB numbering', () => {
@@ -102,6 +193,15 @@ test('canonical position stays absent when the backend did not publish a mapping
   ], 'MA');
   assert.deepEqual(unmapped[0].residues.map((residue) => residue.aaPosition), [null, null]);
   assert.deepEqual(canonicalChain('MA')[0].residues.map((residue) => residue.aaPosition), [null, null]);
+  assert.deepEqual(canonicalChain('MA')[0].residues.map((residue) => residue.canonicalPosition), [1, 2]);
+});
+
+test('canonical sequence fallback can resolve annotations without claiming a structure mapping', () => {
+  const residue = canonicalChain('MA')[0].residues[1];
+  const row = { aa_position: 2, aa_ref: 'A', values: { rate4site_score: -1.1 } };
+  const byPosition = new Map([[2, row]]);
+  assert.equal(residue.aaPosition, null);
+  assert.equal(annotationForResidue(residue, byPosition), row);
 });
 
 test('canonical position follows the persisted backend mapping when structure coverage has gaps', () => {

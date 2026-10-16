@@ -4,6 +4,7 @@ import { withViewTransition } from '@shared/lib/transition.js';
 import { StatusNotice } from '@features/auth/components/AuthFrame';
 import { ApiError, createProtein, createRun, uploadInput } from '@shared/api/client';
 import { readAuthSession } from '@shared/auth/session';
+import { userErrorMessage } from '@shared/lib/error-presentation';
 import '@features/runs/styles/onboarding.css';
 
 const VALID_AA = new Set('ACDEFGHIKLMNPQRSTVWY'.split(''));
@@ -525,9 +526,10 @@ export default function OnboardingFlow() {
         return;
       }
       setBlockedRun(null);
-      setError(requestError instanceof ApiError
-        ? requestError.message
-        : 'No se pudo crear la proteína y su corrida. Revisa la conexión e inténtalo de nuevo.');
+      setError(userErrorMessage(
+        requestError,
+        'No se pudo crear la proteína y su corrida. Revisa la conexión e inténtalo de nuevo.',
+      ));
     }
   };
 

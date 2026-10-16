@@ -1,0 +1,7 @@
+---
+import AppLayout from '../../../layouts/AppLayout.astro';
+import ProteinViewer from '@features/annotations/components/viewer/ProteinViewer.jsx';
+---
+<AppLayout title="Contactos estructurales · Residue Annotation" active="contacts" proteinId={Astro.params.id}>
+  <ProteinViewer client:only="preact" proteinId={Astro.params.id} analysis="contacts" />
+</AppLayout>

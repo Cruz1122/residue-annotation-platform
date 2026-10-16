@@ -2,6 +2,7 @@ import { useEffect, useState } from 'preact/hooks';
 import { ApiError, getCurrentUser } from '@shared/api/client';
 import { readAuthSession, safeInternalPath } from '@shared/auth/session';
 import LucideIcon from '@shared/components/icons/LucideIcon.jsx';
+import { userErrorMessage } from '@shared/lib/error-presentation';
 import './auth-gate.css';
 
 type GateState = 'checking' | 'ready' | 'error';
@@ -38,9 +39,7 @@ export default function AuthGate() {
           loginRedirect();
           return;
         }
-        setMessage(error instanceof ApiError
-          ? error.message
-          : 'No se pudo validar tu sesión.');
+        setMessage(userErrorMessage(error, 'No se pudo validar tu sesión.'));
         setState('error');
       });
     return () => { active = false; };

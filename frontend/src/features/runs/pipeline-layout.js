@@ -62,6 +62,76 @@ export function stageLayout(stages, usesAf3 = true) {
   return { positions, width: world.width, height: world.height };
 }
 
+/**
+ * Lay out only the stages visible for the current run in dependency columns.
+ * The persisted registry remains the source of truth; this presentation
+ * layout deliberately avoids the large hand-authored canvas used by the
+ * legacy all-stages view.
+ */
+export function compactStageLayout(stages) {
+  const byId = new Map(stages.map((stage) => [stage.id, stage]));
+  const order = new Map(stages.map((stage, index) => [stage.id, index]));
+  const depth = new Map();
+
+  const resolveDepth = (stageId, visiting = new Set()) => {
+    if (depth.has(stageId)) return depth.get(stageId);
+    if (visiting.has(stageId)) return 0;
+    const stage = byId.get(stageId);
+    if (!stage) return 0;
+    const nextVisiting = new Set(visiting).add(stageId);
+    const value = (stage.dependencies ?? [])
+      .filter((dependency) => byId.has(dependency))
+      .reduce((maximum, dependency) => Math.max(maximum, resolveDepth(dependency, nextVisiting) + 1), 0);
+    depth.set(stageId, value);
+    return value;
+  };
+
+  stages.forEach((stage) => resolveDepth(stage.id));
+  const columns = new Map();
+  for (const stage of stages) {
+    const column = depth.get(stage.id) ?? 0;
+    columns.set(column, [...(columns.get(column) ?? []), stage]);
+  }
+
+  const rowById = new Map();
+  const orderedColumns = [...columns.keys()].sort((left, right) => left - right);
+  let maxRows = 1;
+  for (const column of orderedColumns) {
+    const stagesInColumn = columns.get(column) ?? [];
+    stagesInColumn.sort((left, right) => {
+      const leftParents = (left.dependencies ?? []).filter((dependency) => rowById.has(dependency));
+      const rightParents = (right.dependencies ?? []).filter((dependency) => rowById.has(dependency));
+      const leftCenter = leftParents.length
+        ? leftParents.reduce((sum, dependency) => sum + rowById.get(dependency), 0) / leftParents.length
+        : Number.POSITIVE_INFINITY;
+      const rightCenter = rightParents.length
+        ? rightParents.reduce((sum, dependency) => sum + rowById.get(dependency), 0) / rightParents.length
+        : Number.POSITIVE_INFINITY;
+      return leftCenter - rightCenter || order.get(left.id) - order.get(right.id);
+    });
+    stagesInColumn.forEach((stage, row) => rowById.set(stage.id, row));
+    maxRows = Math.max(maxRows, stagesInColumn.length);
+  }
+
+  const marginX = 56;
+  const marginY = 44;
+  const columnGap = 72;
+  const rowGap = 28;
+  const maxColumn = orderedColumns.at(-1) ?? 0;
+  const width = Math.max(760, marginX * 2 + PIPELINE_NODE.width * (maxColumn + 1) + columnGap * maxColumn);
+  const height = Math.max(420, marginY * 2 + PIPELINE_NODE.height * maxRows + rowGap * (maxRows - 1));
+  const positions = new Map();
+  for (const stage of stages) {
+    const column = depth.get(stage.id) ?? 0;
+    const row = rowById.get(stage.id) ?? 0;
+    positions.set(stage.id, {
+      x: marginX + PIPELINE_NODE.width / 2 + column * (PIPELINE_NODE.width + columnGap),
+      y: marginY + PIPELINE_NODE.height / 2 + row * (PIPELINE_NODE.height + rowGap),
+    });
+  }
+  return { positions, width, height };
+}
+
 export function stagesForPipelineLayout(stages, usesAf3) {
   if (usesAf3) return stages;
   const identity = stages.find((stage) => stage.id === 'protein_identity');

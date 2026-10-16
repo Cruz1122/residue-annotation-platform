@@ -9,7 +9,7 @@
   "scripts": {
     "dev": "astro dev",
     "check": "astro check",
-    "test": "node --experimental-strip-types --test src/features/annotations/viewer-colors.test.js src/features/runs/stage-visibility.test.js src/features/runs/pipeline-layout.test.js src/shared/auth/session.test.js",
+    "test": "node --experimental-strip-types --test src/features/annotations/viewer-colors.test.js src/features/annotations/analysis-artifacts.test.js src/features/runs/stage-visibility.test.js src/features/runs/pipeline-layout.test.js src/shared/auth/session.test.js src/shared/lib/error-presentation.test.js",
     "build": "astro build",
     "preview": "astro preview"
   },

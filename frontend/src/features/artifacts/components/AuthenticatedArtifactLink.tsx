@@ -1,22 +1,25 @@
 import { useState } from 'preact/hooks';
-import { ApiError, getArtifactBlob } from '@shared/api/client';
-import LucideIcon from '@shared/components/icons/LucideIcon.jsx';
+import { getArtifactBlob } from '@shared/api/client';
+import { userErrorMessage } from '@shared/lib/error-presentation';
 import './artifact-download.css';
 
 interface AuthenticatedArtifactLinkProps {
   id: string;
   filename?: string;
+  label?: string;
   mediaType?: string;
 }
 
 export default function AuthenticatedArtifactLink({
   id,
   filename,
+  label,
   mediaType,
 }: AuthenticatedArtifactLinkProps) {
   const [state, setState] = useState<'idle' | 'loading' | 'error'>('idle');
   const [error, setError] = useState('');
   const artifactName = filename ?? id;
+  const displayName = label ?? artifactName;
 
   const download = async () => {
     setState('loading');
@@ -30,7 +33,7 @@ export default function AuthenticatedArtifactLink({
       window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
       setState('idle');
     } catch (requestError) {
-      setError(requestError instanceof ApiError ? requestError.message : 'No se pudo descargar el artefacto.');
+      setError(userErrorMessage(requestError, 'No se pudo descargar el artefacto.'));
       setState('error');
     }
   };
@@ -42,12 +45,11 @@ export default function AuthenticatedArtifactLink({
         type="button"
         onClick={download}
         disabled={state === 'loading'}
-        title={`Descargar ${artifactName}`}
+        title={`Descargar ${displayName}`}
       >
-        <LucideIcon name="file-text" />
-        <span class="artifact-download-name">{state === 'loading' ? 'Descargando…' : artifactName}</span>
+        <span class="artifact-download-name">{state === 'loading' ? 'Descargando…' : displayName}</span>
         {mediaType && <span class="artifact-download-type">{mediaType}</span>}
-        <LucideIcon name="download" />
+        <span class="artifact-download-action">Descargar</span>
       </button>
       {state === 'error' && <small role="alert">{error}</small>}
     </span>

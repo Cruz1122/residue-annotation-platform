@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
-  buildEdges, PIPELINE_NODE, PIPELINE_WORLD, PIPELINE_WORLD_NO_AF3, stageLayout, stagesForPipelineLayout,
+  buildEdges, compactStageLayout, PIPELINE_NODE, PIPELINE_WORLD, PIPELINE_WORLD_NO_AF3, stageLayout, stagesForPipelineLayout,
 } from './pipeline-layout.js';
 
 const stages = [
@@ -105,4 +105,29 @@ test('draws every backend dependency between card boundaries with ordered siblin
   assert.ok(edges.every((edge) => edge.d.startsWith('M ') && !edge.d.includes('NaN')));
   assert.ok(edges.some((edge) => edge.from === 'structure_modeling' && edge.to === 'conformational_ensemble'));
   assert.ok(edges.some((edge) => edge.from === 'protein_identity' && edge.to === 'variant_ddg'));
+});
+
+test('compact layout keeps the visible run graph acyclic, ordered, and non-overlapping', () => {
+  const visible = stages.filter((stage) => [
+    'protein_identity',
+    'uniprot_features',
+    'sequence_frustration',
+    'evolutionary_conservation',
+    'functional_region_evidence',
+    'membrane_topology',
+  ].includes(stage.id));
+  const layout = compactStageLayout(visible);
+  const edges = buildEdges(visible, layout.positions);
+
+  assert.ok(layout.width < PIPELINE_WORLD.width);
+  assert.ok(layout.height < PIPELINE_WORLD.height);
+  assert.ok(edges.every((edge) => layout.positions.get(edge.from).x < layout.positions.get(edge.to).x));
+  for (let index = 0; index < visible.length; index += 1) {
+    for (const other of visible.slice(index + 1)) {
+      const left = layout.positions.get(visible[index].id);
+      const right = layout.positions.get(other.id);
+      assert.ok(Math.abs(left.x - right.x) >= PIPELINE_NODE.width || Math.abs(left.y - right.y) >= PIPELINE_NODE.height);
+    }
+  }
+  assert.ok(edges.every((edge) => edge.d.startsWith('M ') && !edge.d.includes('NaN')));
 });

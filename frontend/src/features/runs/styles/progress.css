@@ -98,6 +98,7 @@
 .pipeline-scroll::-webkit-scrollbar-track { background: transparent; }
 .pipeline-scroll::-webkit-scrollbar-thumb { background: rgba(17,19,24,.17); border-radius: 999px; }
 .pipeline-scaled { position: relative; min-width: 1px; min-height: 1px; }
+.pipeline-scaled { margin-inline: auto; }
 .pipeline-map {
   position: absolute;
   left: 0; top: 0;
@@ -121,18 +122,14 @@
   vector-effect: non-scaling-stroke;
   transition: stroke 220ms ease, opacity 220ms ease;
 }
-.pipeline-edge.edge-running { stroke: #202124; stroke-dasharray: 7 6; animation: edge-flow 1s linear infinite; }
+.pipeline-edge.edge-running { stroke: #202124; stroke-dasharray: 7 6; }
 .pipeline-edge.edge-queued { stroke: rgba(17,19,24,.45); }
 .pipeline-edge.edge-ok { stroke: var(--green); }
 .pipeline-edge.edge-failed { stroke: #d34a4a; }
 .pipeline-edge.edge-blocked { stroke: #c48642; stroke-dasharray: 4 5; }
 .pipeline-edge.edge-skipped, .pipeline-edge.edge-cancelled { stroke: #8c939a; stroke-dasharray: 5 5; }
 .pipeline-edge.edge-disabled { stroke: #cdd1d4; opacity: .35; }
-@keyframes edge-flow { to { stroke-dashoffset: -26; } }
-@media (prefers-reduced-motion: reduce) {
-  .pipeline-edge { animation: none !important; }
-  .stage-status-running .lucide-icon { animation: none !important; }
-}
+.pipeline-edge { animation: none !important; }
 .pipeline-node {
   position: absolute;
   width: 248px;
@@ -182,7 +179,7 @@
   pointer-events: none;
 }
 .stage-status .icon-slot { width: 16px; height: 16px; }
-.stage-status-running .lucide-icon { animation: spin 1s linear infinite; }
+.stage-status-running .lucide-icon { animation: none; }
 .stage-status-queued { color: #555b63; }
 .stage-status-ok { color: #328c57; }
 .stage-status-failed { color: #c51f2e; }

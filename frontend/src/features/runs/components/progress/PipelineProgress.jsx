@@ -3,8 +3,9 @@ import LucideIcon from '@shared/components/icons/LucideIcon.jsx';
 import { ApiError, cancelRun, getActiveRun, getRun, subscribeRunEvents } from '@shared/api/client';
 import { presentRunStages } from '@features/runs/stage-visibility.js';
 import { formatWaitTime, runPhase } from '@features/runs/run-phase.js';
+import { runFailureMessage, userErrorMessage } from '@shared/lib/error-presentation';
 import {
-  buildEdges, PIPELINE_NODE, stageLayout, stagesForPipelineLayout,
+  buildEdges, compactStageLayout, PIPELINE_NODE, stagesForPipelineLayout,
 } from '@features/runs/pipeline-layout.js';
 import '@features/runs/styles/progress.css';
 
@@ -12,7 +13,7 @@ const STATUS_ICON = {
   pending: 'circle-dot',
   ready: 'circle-dot',
   queued: 'circle-dot',
-  running: 'rotate-cw',
+  running: 'circle-dot',
   failed: 'circle-x',
   blocked: 'circle-dot',
   skipped: 'circle-dot',
@@ -37,10 +38,10 @@ const STATUS_TEXT = {
 };
 
 const OMISSION_REASON_TEXT = {
-  provided_pdb_selected: 'se usó el PDB proporcionado',
-  variants_not_provided: 'no se confirmaron variantes válidas',
-  technical_prerequisite_not_provided: 'falta un prerrequisito técnico',
-  dependency_not_applicable: 'una dependencia no aplica',
+  provided_pdb_selected: 'PDB proporcionado',
+  variants_not_provided: 'Sin variantes confirmadas',
+  technical_prerequisite_not_provided: 'Prerrequisito técnico faltante',
+  dependency_not_applicable: 'Dependencia no aplicable',
 };
 
 const RUN_TERMINAL = new Set(['success', 'failed', 'cancelled']);
@@ -71,9 +72,9 @@ function stageVisualStatus(stage) {
 
 function StageRuntime({ stage, now }) {
   if (stage.status === 'disabled') return <span>Desactivado</span>;
-  if (stage.error_message) return <span class="stage-runtime-error">{STATUS_TEXT[stage.status] ?? stage.status} · {stage.error_message}</span>;
+  if (stage.error_message) return <span class="stage-runtime-error">{STATUS_TEXT[stage.status] ?? stage.status} · {runFailureMessage(stage.error_code, stage.error_message)}</span>;
   if (stage.preflight_status === 'blocked') {
-    return <span>Preparación pendiente · {stage.preflight_error_message ?? 'prerrequisito no disponible'}</span>;
+    return <span>Preparación pendiente · {stage.preflight_error_message ? runFailureMessage(stage.preflight_error_code, stage.preflight_error_message) : 'prerrequisito no disponible'}</span>;
   }
   if (stage.preflight_status === 'running') return <span>Comprobando prerrequisitos…</span>;
   if (stage.status === 'skipped' && stage.omission_reason) {
@@ -110,6 +111,24 @@ function rememberRun(runId) {
   }
 }
 
+const STAGE_ANALYSIS_ROUTES = {
+  membrane_topology: 'topology',
+  evolutionary_conservation: 'conservation',
+  functional_region_evidence: 'functional-regions',
+  uniprot_features: 'functional-regions',
+  variant_ddg: 'variant-ddg',
+  structural_contacts: 'contacts',
+  structural_frustration: 'frustration',
+  sequence_frustration: 'frustration',
+  ensemble_frustration: 'frustration',
+};
+
+function stageHref(proteinId, runId, stageId) {
+  const route = STAGE_ANALYSIS_ROUTES[stageId];
+  const path = route ? `/${route}/` : '/info/';
+  return `/proteins/${encodeURIComponent(proteinId)}${path}?run=${encodeURIComponent(runId)}`;
+}
+
 export default function PipelineProgress({ proteinId }) {
   const viewportRef = useRef(null);
   const panRef = useRef(null);
@@ -129,9 +148,17 @@ export default function PipelineProgress({ proteinId }) {
     let active = true;
     let timer;
     let streamController;
+    let finished = false;
+    let reconnectAttempts = 0;
+    const maxReconnectAttempts = 3;
 
     const scheduleFallback = (load, delay = 2000) => {
-      if (!active) return;
+      if (!active || finished) return;
+      if (reconnectAttempts >= maxReconnectAttempts) {
+        setError('La actualización automática se detuvo; recarga para consultar el estado actual.');
+        return;
+      }
+      reconnectAttempts += 1;
       if (timer) window.clearTimeout(timer);
       timer = window.setTimeout(load, delay);
     };
@@ -150,7 +177,7 @@ export default function PipelineProgress({ proteinId }) {
           if (!(requestError instanceof ApiError) || requestError.status !== 404) {
             if (!active) return;
             setState('error');
-            setError(requestError instanceof ApiError ? requestError.message : 'No se pudo cargar la corrida activa.');
+            setError(userErrorMessage(requestError, 'No se pudo cargar la corrida activa.'));
             return;
           }
         }
@@ -166,34 +193,46 @@ export default function PipelineProgress({ proteinId }) {
         if (!value || typeof value !== 'object') {
           throw new Error('La API devolvió una corrida vacía.');
         }
+        let latestStatus = value.status;
         setRun(value);
         setState('ready');
         setError('');
-        if (RUN_TERMINAL.has(value.status)) return;
+        if (RUN_TERMINAL.has(value.status)) {
+          finished = true;
+          streamController?.abort();
+          if (timer) window.clearTimeout(timer);
+          return;
+        }
 
         streamController?.abort();
-        streamController = new AbortController();
+        const controller = new AbortController();
+        streamController = controller;
         try {
           await subscribeRunEvents(id, {
-            signal: streamController.signal,
+            signal: controller.signal,
             onSnapshot: (snapshot) => {
               if (!active) return;
+              latestStatus = snapshot.status;
               setRun(snapshot);
               setState('ready');
               setError('');
-              if (RUN_TERMINAL.has(snapshot.status)) streamController?.abort();
+              if (RUN_TERMINAL.has(snapshot.status)) {
+                finished = true;
+                controller.abort();
+                if (timer) window.clearTimeout(timer);
+              }
             },
           });
-          if (active) scheduleFallback(load);
+          if (active && !finished && !RUN_TERMINAL.has(latestStatus)) scheduleFallback(load);
         } catch (streamError) {
-          if (!active || streamController?.signal.aborted) return;
+          if (!active || controller.signal.aborted || finished) return;
           // Keep the existing polling path when SSE is unavailable or drops.
           scheduleFallback(load);
         }
       } catch (requestError) {
         if (!active) return;
         setState('error');
-        setError(requestError instanceof ApiError ? requestError.message : 'No se pudo cargar la corrida.');
+        setError(userErrorMessage(requestError, 'No se pudo cargar la corrida.'));
         scheduleFallback(load, 4000);
       }
     };
@@ -204,12 +243,16 @@ export default function PipelineProgress({ proteinId }) {
       streamController?.abort();
       if (timer) window.clearTimeout(timer);
     };
-  }, [runId]);
+  }, [proteinId, runId]);
 
   useEffect(() => {
+    if (!run || RUN_TERMINAL.has(run.status)) {
+      setNow(Date.now());
+      return undefined;
+    }
     const clock = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(clock);
-  }, []);
+  }, [run]);
 
   const stages = useMemo(() => {
     if (!run?.stages?.length) return [];
@@ -225,8 +268,14 @@ export default function PipelineProgress({ proteinId }) {
   const usesAf3 = stages.some((stage) => (
     stage.id === 'structure_modeling' && !['skipped', 'disabled'].includes(stage.status)
   ));
-  const graphStages = useMemo(() => stagesForPipelineLayout(stages, usesAf3), [stages, usesAf3]);
-  const layout = useMemo(() => stageLayout(graphStages, usesAf3), [graphStages, usesAf3]);
+  const graphStages = useMemo(() => {
+    const selectedIds = new Set(run?.configuration?.selected_stage_ids ?? []);
+    const visibleStages = selectedIds.size
+      ? stages.filter((stage) => selectedIds.has(stage.id) || stage.id === 'protein_identity')
+      : stages.filter((stage) => stage.status !== 'disabled');
+    return stagesForPipelineLayout(visibleStages, usesAf3);
+  }, [run, stages, usesAf3]);
+  const layout = useMemo(() => compactStageLayout(graphStages), [graphStages]);
   const edges = useMemo(() => buildEdges(graphStages, layout.positions), [graphStages, layout]);
   const phase = runPhase(run);
   const terminal = !run || RUN_TERMINAL.has(run.status);
@@ -235,6 +284,8 @@ export default function PipelineProgress({ proteinId }) {
     && run.status !== 'running'
     && !run.stages?.some((stage) => stage.status === 'running');
   const priorityHigh = run?.priority === 'high';
+  const omittedStageCount = run?.configuration?.omitted_stages?.length
+    ?? stages.filter((stage) => ['skipped', 'disabled'].includes(stage.status)).length;
 
   useEffect(() => {
     if (state !== 'ready' || waitingForCompute) return undefined;
@@ -277,7 +328,7 @@ export default function PipelineProgress({ proteinId }) {
     try {
       setRun(await cancelRun(runId));
     } catch (requestError) {
-      setError(requestError instanceof ApiError ? requestError.message : 'No se pudo cancelar la corrida.');
+      setError(userErrorMessage(requestError, 'No se pudo cancelar la corrida.'));
     } finally {
       setCancelling(false);
     }
@@ -294,7 +345,7 @@ export default function PipelineProgress({ proteinId }) {
       <header class="progress-head">
         <div>
           <h1>Progreso</h1>
-          {run.configuration?.scientific_accession && <span class="run-id">{run.configuration.scientific_accession}</span>}
+          <span class="run-id">{run.configuration?.scientific_accession ?? 'Sin acceso científico'} · {graphStages.length} etapas · {omittedStageCount} omitidas</span>
         </div>
         <div class="progress-actions">
           {!['success', 'failed', 'cancelled'].includes(run.status) && <button class="cancel-run" type="button" onClick={cancel} disabled={cancelling}>{cancelling ? 'Cancelando…' : 'Cancelar'}</button>}
@@ -316,8 +367,8 @@ export default function PipelineProgress({ proteinId }) {
         <div class="run-wait-overlay" role="status" aria-live="polite">
           <div class="run-wait-content">
             <span class="run-wait-icon"><LucideIcon name="clock" /></span>
-            <strong>Hemos recibido tu proteína, su procesamiento está en espera</strong>
-            <small>Tiempo en espera: {formatWaitTime(now - new Date(run.created_at ?? now).getTime())}{priorityHigh ? ' · Prioridad alta' : ''}</small>
+            <strong>Esperando ejecución del pipeline</strong>
+            <small>Sin stages activos · {formatWaitTime(now - new Date(run.created_at ?? now).getTime())}{priorityHigh ? ' · prioridad alta' : ''}</small>
           </div>
         </div>
       ) : <div ref={viewportRef} class="pipeline-scroll" onWheel={(event) => {
@@ -358,7 +409,7 @@ export default function PipelineProgress({ proteinId }) {
               const position = layout.positions.get(stage.id);
               const visualStatus = stageVisualStatus(stage);
               return (
-                <a key={stage.id} class={`pipeline-node status-${visualStatus}`} style={{ left: `${position.x - PIPELINE_NODE.width / 2}px`, top: `${position.y - PIPELINE_NODE.height / 2}px` }} href={`/proteins/${encodeURIComponent(proteinId)}/info/?run=${encodeURIComponent(run.id)}#stage-${stage.id}`} aria-label={`${stage.title}: ${STATUS_TEXT[visualStatus] ?? STATUS_TEXT[stage.status] ?? stage.status}`}>
+                <a key={stage.id} class={`pipeline-node status-${visualStatus}`} style={{ left: `${position.x - PIPELINE_NODE.width / 2}px`, top: `${position.y - PIPELINE_NODE.height / 2}px` }} href={stageHref(proteinId, run.id, stage.id)} aria-label={`${stage.title}: ${STATUS_TEXT[visualStatus] ?? STATUS_TEXT[stage.status] ?? stage.status}`}>
                   <div class="stage-kind"><LucideIcon name="workflow" /></div>
                   <div class="stage-content">
                     <div class="stage-title-row"><strong>{stage.title}</strong></div>

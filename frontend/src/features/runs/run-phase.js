@@ -18,40 +18,40 @@ export function runPhase(run) {
   const preflightRunning = stages.some((stage) => stage.preflight_status === 'running');
   const submitting = stages.some((stage) => stage.status === 'queued' && !stage.slurm_job_id);
   if (run?.status === 'failed' || (run?.error_message && run?.status !== 'pending')) {
-    return { label: 'El análisis falló', detail: run.error_message ?? 'Consulta el stage que reportó el error.', tone: 'failed' };
+    return { label: 'Corrida fallida', detail: run.error_message ?? 'Existe un error publicado en la corrida.', tone: 'failed' };
   }
   if (run?.status === 'cancel_requested') {
-    return { label: 'Cancelando el análisis', detail: 'El worker está cerrando los stages activos.', tone: 'waiting' };
+    return { label: 'Cancelación en curso', detail: 'El worker está cerrando los stages activos.', tone: 'waiting' };
   }
   if (run?.status === 'cancelled') {
-    return { label: 'El análisis fue cancelado', detail: 'La configuración y los resultados publicados siguen disponibles.', tone: 'waiting' };
+    return { label: 'Corrida cancelada', detail: 'La configuración y los resultados publicados siguen disponibles.', tone: 'waiting' };
   }
   if (run?.status === 'success') {
-    return { label: 'El análisis terminó', detail: 'Los resultados disponibles se muestran abajo.', tone: 'success' };
+    return { label: 'Corrida completada', detail: 'Los resultados publicados están disponibles.', tone: 'success' };
   }
   if (run?.status === 'running' || stages.some((stage) => stage.status === 'running')) {
-    return { label: 'Tu análisis está en ejecución', detail: 'El worker observó ejecución real del pipeline.', tone: 'running' };
+    return { label: 'Corrida en ejecución', detail: 'Hay stages activos en el pipeline.', tone: 'running' };
   }
   if (preflightRunning) {
-    return { label: 'Validando tu proteína', detail: 'Se están comprobando la secuencia, la estructura y los prerrequisitos del análisis.', tone: 'waiting' };
+    return { label: 'Validación de prerrequisitos', detail: 'Se comprueban secuencia, estructura y configuración.', tone: 'waiting' };
   }
   if (submitting) {
-    return { label: 'Enviando el análisis', detail: 'El worker reservó el stage y está confirmando el envío al ejecutor.', tone: 'waiting' };
+    return { label: 'Envío al ejecutor', detail: 'El worker está confirmando la ejecución del stage.', tone: 'waiting' };
   }
   if (stages.some((stage) => stage.status === 'queued')) {
-    return { label: 'Esperando recursos de cómputo', detail: 'El job fue enviado y todavía espera que Slurm lo ejecute.', tone: 'waiting' };
+    return { label: 'Esperando recursos de cómputo', detail: 'El job está en cola de Slurm.', tone: 'waiting' };
   }
   if (preparationStatus === 'blocked') {
     return { label: 'Preparación pendiente', detail: run.preparation?.error_message ?? 'Falta un prerrequisito operativo.', tone: 'failed' };
   }
   if (preparationStatus === 'failed') {
-    return { label: 'No se pudo preparar el análisis', detail: run.preparation?.error_message ?? 'La validación previa falló.', tone: 'failed' };
+    return { label: 'Preparación fallida', detail: run.preparation?.error_message ?? 'La validación previa falló.', tone: 'failed' };
   }
   if (preparationStatus === 'running') {
-    return { label: 'Preparando los datos científicos', detail: 'Se están validando los prerrequisitos antes del envío.', tone: 'waiting' };
+    return { label: 'Preparando datos científicos', detail: 'Se validan los prerrequisitos antes del envío.', tone: 'waiting' };
   }
   if (run?.status === 'pending') {
-    return { label: 'Preparando el análisis', detail: 'La corrida está confirmada y espera al worker.', tone: 'waiting' };
+    return { label: 'Corrida pendiente', detail: 'La configuración está confirmada y espera al worker.', tone: 'waiting' };
   }
   return { label: STATUS_TEXT[run?.status] ?? run?.status ?? 'Estado desconocido', detail: '', tone: 'waiting' };
 }

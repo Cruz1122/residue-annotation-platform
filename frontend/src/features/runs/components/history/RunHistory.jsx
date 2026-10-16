@@ -1,5 +1,6 @@
 import LucideIcon from '@shared/components/icons/LucideIcon.jsx';
 import EmptyState from '@shared/components/feedback/EmptyState.jsx';
+import { runFailureMessage } from '@shared/lib/error-presentation';
 import '@features/proteins/styles/library.css';
 
 const STATUS_TEXT = {
@@ -84,12 +85,12 @@ export default function RunHistory({ runs, proteins, state }) {
                     <span><LucideIcon name="triangle-alert" />{counts.failed} fallidos</span>
                     {configuration && <span><LucideIcon name="dna" />{configuration.normalized_variants?.length ?? 0} variantes · {configuration.structure_source}</span>}
                   </div>
-                  {run.error_message && <p class="run-history-error" role="alert">{run.error_code}: {run.error_message}</p>}
+                  {run.error_message && <p class="run-history-error" role="alert">{runFailureMessage(run.error_code, run.error_message)}</p>}
                 </div>
                 <nav class="run-history-actions" aria-label={`Abrir la corrida ${run.id}`}>
                   <a href={`/proteins/${encodeURIComponent(run.protein_id)}/progress/?run=${encodeURIComponent(run.id)}`}>Progreso</a>
                   <a href={`/proteins/${encodeURIComponent(run.protein_id)}/info/?run=${encodeURIComponent(run.id)}`}>Información</a>
-                  <a href={`/proteins/${encodeURIComponent(run.protein_id)}/viewer/?run=${encodeURIComponent(run.id)}`}>Visor</a>
+                  <a href={`/proteins/${encodeURIComponent(run.protein_id)}/topology/?run=${encodeURIComponent(run.id)}`}>Explorar resultados</a>
                 </nav>
               </article>
             );

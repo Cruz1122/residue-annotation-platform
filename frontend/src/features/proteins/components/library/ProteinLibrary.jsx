@@ -2,7 +2,8 @@ import { useEffect, useMemo, useState } from 'preact/hooks';
 import LucideIcon from '@shared/components/icons/LucideIcon.jsx';
 import EmptyState from '@shared/components/feedback/EmptyState.jsx';
 import RunHistory from '@features/runs/components/history/RunHistory.jsx';
-import { ApiError, listProteins, listRuns } from '@shared/api/client';
+import { listProteins, listRuns } from '@shared/api/client';
+import { userErrorMessage } from '@shared/lib/error-presentation';
 import '@features/proteins/styles/library.css';
 
 function proteinLabel(protein) {
@@ -66,7 +67,7 @@ export default function ProteinLibrary() {
       .catch((requestError) => {
         if (!active) return;
         setState('error');
-        setError(requestError instanceof ApiError ? requestError.message : 'No se pudo cargar el catálogo.');
+        setError(userErrorMessage(requestError, 'No se pudo cargar el catálogo.'));
       });
     return () => { active = false; };
   }, []);

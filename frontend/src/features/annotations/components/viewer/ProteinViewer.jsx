@@ -1,10 +1,14 @@
 import { memo } from 'preact/compat';
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import LucideIcon from '@shared/components/icons/LucideIcon.jsx';
-import { ApiError, getAnnotations, getArtifactObjectUrl, getProtein, getRun, getUploadObjectUrl, subscribeRunEvents } from '@shared/api/client';
+import AuthenticatedArtifactLink from '@features/artifacts/components/AuthenticatedArtifactLink.tsx';
+import { getAnnotations, getArtifactBlob, getArtifactObjectUrl, getProtein, getRun, getUploadObjectUrl, subscribeRunEvents } from '@shared/api/client';
+import { userErrorMessage } from '@shared/lib/error-presentation';
+import { firstDetailValue, loadAnalysisArtifactDetails, presentationRowsFromArtifacts, recordsForPosition, summarizeArtifactRecord } from '@features/annotations/analysis-artifacts.js';
 import {
   AA_NAMES,
-  ANNOTATION_GROUPS,
+  ANALYSIS_VIEWS,
+  booleanClass,
   MISSING_COLOR,
   MODE_INFO,
   MODE_SCALE_COPY,
@@ -13,15 +17,18 @@ import {
   assignCanonicalPositions,
   canonicalChain,
   colorForValues,
-  finiteAnnotationValue,
+  fixedDomainForMode,
   formatScaleNumber,
   hexToColorInt,
+  mergeAnnotationRows,
+  measurementForMode,
   normalizeValue,
   oneLetter,
+  publishedModeValue,
   readableValue,
-  relativeDomain,
   residueDisplayColor,
   residueKey,
+  topologyClass,
   viewerModeAvailability,
 } from '@features/annotations/viewer-presentation.js';
 import 'molstar/build/viewer/molstar.css';
@@ -57,16 +64,18 @@ function isStructure(name, mediaType) {
 }
 
 function structureSource(run) {
-  for (const stage of run?.stages ?? []) {
-    for (const artifact of stage.artifacts ?? []) {
-      if (!isStructure(artifact.artifact_type, artifact.media_type)) continue;
-      return {
-        id: artifact.id,
-        label: artifact.artifact_type,
-        format: structureFormat(artifact.artifact_type, artifact.media_type),
-        loadUrl: () => getArtifactObjectUrl(artifact.id),
-      };
-    }
+  const artifacts = (run?.stages ?? []).flatMap((stage) => stage.artifacts ?? []);
+  const preferredTypes = ['selected_reference_pdb', 'model_cif'];
+  const artifact = preferredTypes
+    .map((type) => artifacts.find((item) => item.artifact_type === type))
+    .find(Boolean) ?? artifacts.find((item) => isStructure(item.artifact_type, item.media_type));
+  if (artifact) {
+    return {
+      id: artifact.id,
+      label: artifact.artifact_type,
+      format: structureFormat(artifact.artifact_type, artifact.media_type),
+      loadUrl: () => getArtifactObjectUrl(artifact.id),
+    };
   }
   const upload = (run?.uploads ?? []).find((item) => item.input_type === 'structure');
   if (!upload) return null;
@@ -157,11 +166,15 @@ function ContinuousLegend({ mode, domain, value, residueSelected }) {
   const spec = VISUALIZATION_MODES[mode];
   const copy = MODE_SCALE_COPY[mode];
   const t = domain ? normalizeValue(value, domain.min, domain.max) : null;
-  const background = `linear-gradient(90deg, ${spec.colors[0]} 0%, ${spec.colors[1]} 50%, ${spec.colors[2]} 100%)`;
+  const stops = spec.colors.map((color, index) => `${color} ${(index / (spec.colors.length - 1)) * 100}%`).join(', ');
+  const background = `linear-gradient(90deg, ${stops})`;
   const midpoint = domain ? (domain.min + domain.max) / 2 : null;
   return (
     <div class="continuous-legend" aria-label={`${copy.magnitude}. ${copy.note}`}>
-      <p class="continuous-legend__note">{copy.magnitude}. {copy.note}</p>
+      <p class="continuous-legend__note">
+        <strong>{copy.magnitude}</strong>
+        <span> · {copy.note}</span>
+      </p>
       <div class={`continuous-legend__track ${domain ? '' : 'is-empty'}`} style={domain ? { background } : undefined}>
         {t !== null && (
           <span
@@ -173,9 +186,9 @@ function ContinuousLegend({ mode, domain, value, residueSelected }) {
       </div>
       {domain && (
         <div class="continuous-legend__labels">
-          <span>{formatScaleNumber(domain.min)} · {copy.low}</span>
+          <span>{formatScaleNumber(domain.min)}</span>
           <span title="Punto medio visual">{formatScaleNumber(midpoint)}</span>
-          <span>{formatScaleNumber(domain.max)} · {copy.high}</span>
+          <span>{formatScaleNumber(domain.max)}</span>
         </div>
       )}
       {(!domain || (residueSelected && t === null)) && <span class="continuous-legend__missing">Sin dato</span>}
@@ -183,7 +196,7 @@ function ContinuousLegend({ mode, domain, value, residueSelected }) {
   );
 }
 
-const ResidueButton = memo(function ResidueButton({ residue, index, inRange, active, color }) {
+const ResidueButton = memo(function ResidueButton({ residue, index, inRange, active, color, onActivate }) {
   return (
     <button
       data-sequence-index={index}
@@ -191,6 +204,10 @@ const ResidueButton = memo(function ResidueButton({ residue, index, inRange, act
       style={`--mode-color:${color}`}
       type="button"
       title={`${residue.compId} ${residue.authSeqId}`}
+      aria-pressed={inRange}
+      onClick={(event) => {
+        if (event.detail === 0) onActivate(index);
+      }}
     >
       <span class="viewer-residue-pos">{index % 10 === 0 ? residue.authSeqId : ''}</span>
       <span>{residue.one}</span>
@@ -198,7 +215,234 @@ const ResidueButton = memo(function ResidueButton({ residue, index, inRange, act
   );
 });
 
-export default function ProteinViewer({ proteinId }) {
+const STAGE_STATUS = {
+  pending: 'Pendiente',
+  ready: 'Preparada',
+  queued: 'En cola',
+  running: 'En ejecución',
+  success: 'Completada',
+  reused: 'Reutilizada',
+  failed: 'Fallida',
+  skipped: 'Omitida',
+  cancelled: 'Cancelada',
+  disabled: 'Deshabilitada',
+};
+
+function displayField(annotation, key) {
+  return readableValue(key, publishedField(annotation, key));
+}
+
+const ARTIFACT_LABELS = {
+  frustration_per_residue: 'Índice de frustración por residuo',
+  frustraiseq_per_residue: 'Índice FrustraSeq por residuo',
+  frustratometer_per_residue: 'Frustración estructural por residuo',
+  frustratometer_conformers: 'Distribución entre conformeros',
+  tmbed_per_residue: 'Clasificación topológica por residuo',
+  tm_segments: 'Segmentos transmembrana',
+  span_metadata: 'Metadatos de topología',
+  evolution_per_residue: 'Conservación por residuo',
+  ldlc_statin_evidence: 'Evidencia de región LDL-C / estatinas',
+  functional_features_long: 'Regiones y sitios UniProt',
+  summary: 'Resumen científico',
+  variant_annotations: 'Resultados de variantes',
+  provenance: 'Procedencia del resultado',
+  rosetta_metadata: 'Metadatos de la predicción',
+  contact_residue_summary: 'Resumen de contactos por residuo',
+  contacts_long: 'Contactos estructurales',
+  metadata: 'Metadatos del análisis',
+};
+
+function artifactLabel(type) {
+  const value = String(type ?? '').trim();
+  return ARTIFACT_LABELS[value] ?? value.replace(/[_-]+/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function displayDetail(record, keys, unitKeys = [], fallbackUnit = null) {
+  const valueKey = keys.find((key) => firstDetailValue(record, [key]) !== null) ?? keys[0];
+  const value = firstDetailValue(record, [valueKey]);
+  if (value === null) return 'Sin dato';
+  const unit = firstDetailValue(record, unitKeys) ?? fallbackUnit;
+  const displayValue = readableValue(valueKey, value);
+  return unit === null ? displayValue : `${displayValue} ${unit}`;
+}
+
+function EvidenceRow({ label, value, tone = '' }) {
+  return (
+    <div class="analysis-evidence-row">
+      <dt>{label}</dt>
+      <dd class={tone ? `tone-${tone}` : ''}>{value ?? 'Sin dato'}</dd>
+    </div>
+  );
+}
+
+function EvidenceSection({ title, meta, description, open = false, children }) {
+  return (
+    <details class="analysis-section" open={open}>
+      <summary>
+        <span>{title}</span>
+        {meta && <b>{meta}</b>}
+      </summary>
+      <div class="analysis-section-body">
+        {description && <p>{description}</p>}
+        {children}
+      </div>
+    </details>
+  );
+}
+
+function BioEmuMock({ stage }) {
+  return (
+    <EvidenceSection title="Ensamble BioEmu" meta="200 conformeros" description="Integración pendiente; el conjunto se mantiene reservado para una iteración posterior.">
+      <div class="bioemu-mock" aria-label="Maqueta del explorador BioEmu">
+        <div><span>Conformero 1</span><span>200</span></div>
+        <input type="range" min="1" max="200" value="1" disabled aria-label="Selector de conformero no disponible" />
+        <small>{stage ? `Etapa: ${STAGE_STATUS[stage.status] ?? stage.status}` : 'Etapa no incluida en la corrida'}</small>
+      </div>
+    </EvidenceSection>
+  );
+}
+
+function AnalysisDetails({ analysis, annotation, residue, run, view, artifactDetails }) {
+  const canonicalPosition = residue?.aaPosition ?? residue?.canonicalPosition ?? null;
+  const requestedVariant = (run?.requested_variants ?? []).find((variant) => variant.aa_position === canonicalPosition);
+  const relatedStages = (run?.stages ?? []).filter((stage) => view.stageIds.includes(stage.id));
+  const artifacts = relatedStages.flatMap((stage) => stage.artifacts ?? []);
+  const topologyDetail = recordsForPosition(artifactDetails, 'tmbed_per_residue', canonicalPosition)[0];
+  const frustrationDetail = recordsForPosition(artifactDetails, 'frustratometer_per_residue', canonicalPosition)[0];
+  const frustrationMeasurement = measurementForMode('frustration', annotation?.values);
+  const frustrationSource = frustrationMeasurement?.field === 'frustratometer_mean'
+    ? 'Ensemble'
+    : frustrationMeasurement?.field === 'structural_frustration_fi_singleresidue'
+      ? 'Frustración estructural'
+      : frustrationMeasurement?.field === 'frustraiseq_index'
+        ? 'Frustración por secuencia'
+        : 'Sin dato';
+  const conservationDetail = recordsForPosition(artifactDetails, 'evolution_per_residue', canonicalPosition)[0];
+  const functionalDetail = recordsForPosition(artifactDetails, 'ldlc_statin_evidence', canonicalPosition)[0];
+  const functionalFeatures = recordsForPosition(artifactDetails, 'functional_features_long', canonicalPosition);
+  const functionalFeatureTypes = [...new Set(functionalFeatures.map((record) => String(record?.feature_type ?? '').trim()).filter(Boolean))];
+  const functionalFeatureNames = [...new Set(functionalFeatures.map((record) => String(record?.feature_name ?? '').trim()).filter(Boolean))];
+  const functionalSummary = artifactDetails?.summary?.[0];
+  const ddgDetail = recordsForPosition(artifactDetails, 'variant_annotations', canonicalPosition)[0];
+  const displayedVariant = requestedVariant ?? (ddgDetail?.aa_position && (ddgDetail?.aa_ref || ddgDetail?.aa_alt || ddgDetail?.variant_id)
+    ? {
+      aa_ref: ddgDetail.aa_ref ?? String(ddgDetail.variant_id ?? '').match(/^([A-Z])\d+/i)?.[1] ?? '?',
+      aa_position: ddgDetail.aa_position,
+      aa_alt: ddgDetail.aa_alt ?? String(ddgDetail.variant_id ?? '').match(/\d+([A-Z])$/i)?.[1] ?? '?',
+    }
+    : null);
+  const contactDetails = recordsForPosition(artifactDetails, 'contacts_long', canonicalPosition);
+  const contactPartners = [...new Set(contactDetails.map((record) => firstDetailValue(record, ['partner_id', 'partner_residue', 'partner_aa_position', 'partner_position'])).filter((value) => value !== null))];
+  const functionalFeatureClasses = String(annotation?.values?.functional_feature_class ?? '').split('|');
+  const functionalFeatureTone = ['highlighted_segment', 'functional_interest', 'curated_region', 'annotation']
+    .find((candidate) => functionalFeatureClasses.includes(candidate)) ?? '';
+
+  return (
+    <>
+      {residue ? (
+        <>
+          <div class="viewer-residue-title">
+            <div><strong>{residue.one}</strong><span>{residue.compId} · {AA_NAMES[residue.compId] ?? 'Residuo'}</span></div>
+            <b>{canonicalPosition ?? `${residue.authSeqId}${residue.insCode || ''}`}</b>
+          </div>
+          <div class="analysis-context">
+            <span>Contexto funcional</span>
+            <EvidenceRow label="Dominio UniProt" value={displayField(annotation, 'uniprot_domain')} />
+          </div>
+        </>
+      ) : (
+        <div class="analysis-select-prompt"><strong>Selecciona un residuo</strong><span>Haz clic en la secuencia o en el modelo 3D para ver la evidencia publicada.</span></div>
+      )}
+
+      {residue && analysis === 'topology' && (
+        <EvidenceSection title="Clasificación topológica" meta={displayField(annotation, 'tmbed_topology')} open>
+          <dl>
+            <EvidenceRow label="TMbed" value={displayField(annotation, 'tmbed_topology')} tone={topologyClass(annotation?.values?.tmbed_topology)} />
+            <EvidenceRow label="Topología UniProt" value={displayField(annotation, 'uniprot_topology')} />
+            <EvidenceRow label="Régimen estructural" value={displayField(annotation, 'structural_regime')} />
+            <EvidenceRow label="Acuerdo topológico" value={displayField(annotation, 'topology_agreement')} />
+            {topologyDetail && <EvidenceRow label="Detalle publicado" value={displayDetail(topologyDetail, ['topology', 'tmbed_topology', 'prediction'])} />}
+          </dl>
+        </EvidenceSection>
+      )}
+
+      {residue && analysis === 'frustration' && (
+        <EvidenceSection title="Frustración del residuo" meta={frustrationMeasurement ? displayField(annotation, frustrationMeasurement.field) : 'Sin dato'} open>
+          <dl>
+            <EvidenceRow label="Fuente visualizada" value={frustrationSource} tone={frustrationMeasurement ? 'source' : ''} />
+            <EvidenceRow label="Índice numérico" value={frustrationMeasurement ? displayField(annotation, frustrationMeasurement.field) : 'Sin dato'} />
+            <EvidenceRow label="Media del ensemble" value={displayField(annotation, 'frustratometer_mean')} />
+            <EvidenceRow label="Índice estructural" value={displayField(annotation, 'structural_frustration_fi_singleresidue')} />
+            <EvidenceRow label="Índice por secuencia" value={displayField(annotation, 'frustraiseq_index')} />
+            <EvidenceRow label="Estructura secundaria" value={displayField(annotation, 'secondary_structure')} />
+            <EvidenceRow label="Enterramiento" value={displayField(annotation, 'buried_status')} />
+            {frustrationDetail && <EvidenceRow label="Dispersión entre conformeros" value={displayDetail(frustrationDetail, ['frustratometer_sd', 'standard_deviation', 'sd'], ['unit', 'units'])} />}
+          </dl>
+        </EvidenceSection>
+      )}
+
+      {residue && analysis === 'conservation' && (
+        <EvidenceSection title="Conservación del residuo" meta={displayField(annotation, 'consurf_grade')} open>
+          <dl>
+            <EvidenceRow label="Rate4Site" value={displayField(annotation, 'rate4site_score')} />
+            <EvidenceRow label="ConSurf" value={displayField(annotation, 'consurf_grade')} />
+            {conservationDetail && <EvidenceRow label="Motivo de ausencia" value={displayDetail(conservationDetail, ['na_reason'])} />}
+          </dl>
+        </EvidenceSection>
+      )}
+
+      {residue && analysis === 'functional' && (
+        <EvidenceSection title="Evidencia funcional" meta={displayField(annotation, 'variant_in_statin_ldlc_region')} open>
+          <dl>
+            <EvidenceRow label="Región LDL-C / estatinas" value={displayField(annotation, 'variant_in_statin_ldlc_region')} tone={booleanClass(annotation?.values?.variant_in_statin_ldlc_region)} />
+            <EvidenceRow label="Mapeo canónico" value={displayField(annotation, 'uniprot_mapping_status')} />
+            {functionalDetail && <EvidenceRow label="Evidencia del recurso" value={displayDetail(functionalDetail, ['evidence', 'source', 'region_name', 'label'])} />}
+            {functionalFeatureTypes.length > 0 && <EvidenceRow label="Tipos UniProt" value={functionalFeatureTypes.slice(0, 5).join(' · ')} tone={functionalFeatureTone} />}
+            {functionalFeatureNames.length > 0 && <EvidenceRow label="Regiones / sitios" value={functionalFeatureNames.slice(0, 3).join(' · ')} tone={functionalFeatureTone} />}
+            {functionalSummary && <EvidenceRow label="Resumen de la etapa" value={summarizeArtifactRecord(functionalSummary)} />}
+          </dl>
+        </EvidenceSection>
+      )}
+
+      {residue && analysis === 'ddg' && (
+        <EvidenceSection title="Variante evaluada" meta={displayedVariant ? `${displayedVariant.aa_ref}${displayedVariant.aa_position}${displayedVariant.aa_alt}` : 'Sin variante'} open>
+          <dl>
+            <EvidenceRow label="Evaluación publicada" value={displayField(annotation, 'ddg_variant_evaluated')} tone={booleanClass(annotation?.values?.ddg_variant_evaluated)} />
+            <EvidenceRow label="Sustitución evaluada" value={displayedVariant ? `${displayedVariant.aa_ref} → ${displayedVariant.aa_alt}` : 'Sin dato'} />
+            {ddgDetail && <EvidenceRow label="ΔΔG" value={displayField(annotation, 'ddg_value')} />}
+            {ddgDetail && <EvidenceRow label="Desviación entre réplicas" value={displayDetail(ddgDetail, ['ddg_sd'], ['ddg_unit', 'unit'], annotation?.units?.ddg_value)} />}
+            {ddgDetail && <EvidenceRow label="Réplicas" value={displayDetail(ddgDetail, ['ddg_n_replicates', 'n_replicates'])} />}
+          </dl>
+        </EvidenceSection>
+      )}
+
+      {residue && analysis === 'contacts' && (
+        <EvidenceSection title="Contactos del residuo" meta={displayField(annotation, 'structural_contacts_n_contacts')} open>
+          <dl>
+            <EvidenceRow label="Número de contactos" value={displayField(annotation, 'structural_contacts_n_contacts')} />
+            <EvidenceRow label="Residuos asociados" value={displayField(annotation, 'structural_contacts_n_partner_residues')} />
+            <EvidenceRow label="Tipos de contacto" value={displayField(annotation, 'structural_contacts_contact_types')} />
+            {contactPartners.length > 0 && <EvidenceRow label="Socios registrados" value={`${contactPartners.slice(0, 8).join(', ')}${contactPartners.length > 8 ? ` y ${contactPartners.length - 8} más` : ''}`} />}
+          </dl>
+        </EvidenceSection>
+      )}
+
+      {analysis === 'frustration' && <BioEmuMock stage={(run?.stages ?? []).find((stage) => stage.id === 'conformational_ensemble')} />}
+
+      <EvidenceSection title="Archivos publicados" meta={`${artifacts.length} archivo${artifacts.length === 1 ? '' : 's'}`}>
+        <div class="analysis-artifacts">
+          {artifacts.length ? artifacts.map((artifact) => (
+            <AuthenticatedArtifactLink key={artifact.id} id={artifact.id} filename={artifact.artifact_type} label={artifactLabel(artifact.artifact_type)} mediaType={artifact.media_type} />
+          )) : <span class="analysis-no-data">No hay artefactos publicados.</span>}
+        </div>
+      </EvidenceSection>
+    </>
+  );
+}
+
+export default function ProteinViewer({ proteinId, analysis = 'topology' }) {
+  const analysisView = ANALYSIS_VIEWS[analysis] ?? ANALYSIS_VIEWS.topology;
+  const mode = analysisView.mode;
   const hostRef = useRef(null);
   const viewerRef = useRef(null);
   const structureLibRef = useRef(null);
@@ -216,6 +460,8 @@ export default function ProteinViewer({ proteinId }) {
   const molstarFrameRef = useRef(null);
   const molstarFocusFrameRef = useRef(null);
   const [protein, setProtein] = useState(null);
+  const [run, setRun] = useState(null);
+  const [artifactDetails, setArtifactDetails] = useState({});
   const [annotations, setAnnotations] = useState([]);
   const [chains, setChains] = useState([]);
   const [chainId, setChainId] = useState('');
@@ -226,13 +472,14 @@ export default function ProteinViewer({ proteinId }) {
   const [structureParsed, setStructureParsed] = useState(false);
   const [error, setError] = useState('');
   const [wipe, setWipe] = useState('covering');
-  const [mode, setMode] = useState('regime');
   const [selection, setSelection] = useState(EMPTY_SELECTION);
+  const [annotationsOpen, setAnnotationsOpen] = useState(true);
   const runId = typeof window === 'undefined' ? '' : new URLSearchParams(window.location.search).get('run') ?? '';
   const [structureRequest, setStructureRequest] = useState(null);
   const structureSourceRef = useRef(null);
   const structureMappingRef = useRef({});
   const structureChainRef = useRef('');
+  const artifactSignature = (run?.stages ?? []).flatMap((stage) => stage.artifacts ?? []).map((artifact) => artifact.id).sort().join(':');
 
   useEffect(() => {
     chainsRef.current = chains;
@@ -255,10 +502,14 @@ export default function ProteinViewer({ proteinId }) {
     let timer;
     let streamController;
     let latestRun = null;
+    let finished = false;
+    let reconnectAttempts = 0;
+    const maxReconnectAttempts = 3;
 
     const applyRun = (runData) => {
       if (!active) return;
       latestRun = runData;
+      setRun(runData);
       const configuration = runData?.configuration;
       structureMappingRef.current = configuration?.structure_mapping ?? {};
       structureChainRef.current = configuration?.structure_chain ?? '';
@@ -273,12 +524,17 @@ export default function ProteinViewer({ proteinId }) {
         const annotationData = await getAnnotations(runId);
         if (active) setAnnotations(annotationData.rows ?? []);
       } catch (requestError) {
-        if (active) setViewerError(requestError instanceof ApiError ? requestError.message : 'No se pudieron actualizar las anotaciones.');
+        if (active) setViewerError(userErrorMessage(requestError, 'No se pudieron actualizar las anotaciones.'));
       }
     };
 
     const schedulePolling = (delay = 2_000) => {
-      if (!active || !runId) return;
+      if (!active || !runId || finished) return;
+      if (reconnectAttempts >= maxReconnectAttempts) {
+        setViewerError('La actualización automática se detuvo; recarga para consultar el estado actual.');
+        return;
+      }
+      reconnectAttempts += 1;
       if (timer) window.clearTimeout(timer);
       timer = window.setTimeout(async () => {
         try {
@@ -286,31 +542,41 @@ export default function ProteinViewer({ proteinId }) {
           applyRun(runData);
           if (active) setAnnotations(annotationData.rows ?? []);
           if (!['success', 'failed', 'cancelled'].includes(runData.status)) connectStream();
+          else {
+            finished = true;
+            streamController?.abort();
+          }
         } catch (requestError) {
           if (!active) return;
-          setViewerError(requestError instanceof ApiError ? requestError.message : 'No se pudo actualizar el visor.');
+          setViewerError(userErrorMessage(requestError, 'No se pudo actualizar el visor.'));
           schedulePolling(4_000);
         }
       }, delay);
     };
 
     const connectStream = async () => {
-      if (!active || !runId || ['success', 'failed', 'cancelled'].includes(latestRun?.status)) return;
+      if (!active || !runId || finished || ['success', 'failed', 'cancelled'].includes(latestRun?.status)) return;
       streamController?.abort();
-      streamController = new AbortController();
+      const controller = new AbortController();
+      streamController = controller;
       try {
         await subscribeRunEvents(runId, {
-          signal: streamController.signal,
+          signal: controller.signal,
           onSnapshot: (snapshot) => {
             latestRun = snapshot;
             applyRun(snapshot);
             void refreshAnnotations();
+            if (['success', 'failed', 'cancelled'].includes(snapshot.status)) {
+              finished = true;
+              controller.abort();
+              if (timer) window.clearTimeout(timer);
+            }
           },
         });
-        if (active && !['success', 'failed', 'cancelled'].includes(latestRun?.status)) schedulePolling();
+        if (active && !finished && !['success', 'failed', 'cancelled'].includes(latestRun?.status)) schedulePolling();
       } catch (streamError) {
-        if (active && !streamController.signal.aborted) {
-          setViewerError(streamError instanceof ApiError ? streamError.message : 'La actualización en vivo se desconectó; se reintentará automáticamente.');
+        if (active && !controller.signal.aborted && !finished) {
+          setViewerError(userErrorMessage(streamError, 'La actualización en vivo se desconectó; se reintentará automáticamente.'));
           schedulePolling();
         }
       }
@@ -341,12 +607,13 @@ export default function ProteinViewer({ proteinId }) {
         applyRun(runData);
         setState('ready');
         if (runData && !['success', 'failed', 'cancelled'].includes(runData.status)) void connectStream();
+        else if (runData) finished = true;
       })
       .catch((requestError) => {
         if (!active) return;
         setState('error');
         setViewerState('unavailable');
-        setError(requestError instanceof ApiError ? requestError.message : 'No se pudo cargar la proteína.');
+        setError(userErrorMessage(requestError, 'No se pudo cargar la proteína.'));
       });
     return () => {
       active = false;
@@ -354,6 +621,20 @@ export default function ProteinViewer({ proteinId }) {
       if (timer) window.clearTimeout(timer);
     };
   }, [proteinId, runId]);
+
+  useEffect(() => {
+    let active = true;
+    setArtifactDetails({});
+    if (!run) return () => { active = false; };
+    loadAnalysisArtifactDetails(run, analysis, getArtifactBlob)
+      .then((details) => {
+        if (active) setArtifactDetails(details);
+      })
+      .catch(() => {
+        if (active) setArtifactDetails({});
+      });
+    return () => { active = false; };
+  }, [run?.id, artifactSignature, analysis]);
 
   const activeChain = chains.find((chain) => chain.id === chainId) ?? chains[0] ?? null;
   const residues = activeChain?.residues ?? [];
@@ -366,18 +647,20 @@ export default function ProteinViewer({ proteinId }) {
     );
     return mappedPositions.size >= Math.ceil(protein.sequence.length * 0.8);
   }, [activeChain, protein, structureParsed]);
+  const presentationRows = useMemo(
+    () => [...annotations, ...presentationRowsFromArtifacts(artifactDetails, analysis)],
+    [analysis, annotations, artifactDetails],
+  );
   const annotationByPosition = useMemo(() => {
-    const rows = new Map();
-    for (const row of annotations) rows.set(row.aa_position, row);
-    return rows;
-  }, [annotations]);
-  const domain = useMemo(() => relativeDomain(mode, annotations), [mode, annotations]);
+    return mergeAnnotationRows(presentationRows);
+  }, [presentationRows]);
+  const domain = useMemo(() => fixedDomainForMode(mode), [mode]);
   const modeAvailability = useMemo(
-    () => viewerModeAvailability(annotations, {
+    () => viewerModeAvailability(presentationRows, {
       structureAvailable: Boolean(structureRequest),
       mappingValid,
     }),
-    [annotations, mappingValid, structureRequest],
+    [mappingValid, presentationRows, structureRequest],
   );
   const colors = useMemo(
     () => residues.map((residue) => residueDisplayColor(mode, residue, annotationForResidue(residue, annotationByPosition), domain)),
@@ -385,14 +668,24 @@ export default function ProteinViewer({ proteinId }) {
   );
   const activeResidue = selection.active === null ? null : residues[selection.active] ?? null;
   const activeAnnotation = activeResidue ? annotationForResidue(activeResidue, annotationByPosition) : null;
-  const activeMeasurement = finiteAnnotationValue(activeAnnotation?.values?.[VISUALIZATION_MODES[mode].field]);
-  const regimeMissing = mode === 'regime' && activeResidue && !colorForValues(mode, activeAnnotation?.values, null);
+  const activeMeasurement = measurementForMode(mode, activeAnnotation?.values)?.value ?? null;
+  const fieldAvailable = presentationRows.some((row) => publishedModeValue(mode, row?.values) !== null);
 
   useEffect(() => {
-    if (modeAvailability[mode]) return;
-    const next = Object.keys(MODE_INFO).find((candidate) => modeAvailability[candidate]);
-    if (next) setMode(next);
-  }, [mode, modeAvailability]);
+    const textualFallbackAvailable = !structureParsed && (viewerState === 'unavailable' || viewerState === 'error');
+    if (selection.active !== null || (!mappingValid && !textualFallbackAvailable) || !residues.length) return;
+    const preferredPosition = analysis === 'ddg' ? run?.requested_variants?.[0]?.aa_position : null;
+    let index = preferredPosition == null ? -1 : residues.findIndex((residue) => (residue.aaPosition ?? residue.canonicalPosition) === preferredPosition);
+    if (index < 0) {
+      index = residues.findIndex((residue) => {
+        return publishedModeValue(mode, annotationForResidue(residue, annotationByPosition)?.values) !== null;
+      });
+    }
+    if (index < 0) return;
+    const next = { lo: index, hi: index, active: index };
+    selectionRef.current = next;
+    setSelection(next);
+  }, [analysis, annotationByPosition, mappingValid, mode, residues, run, selection.active, structureParsed, viewerState]);
 
   const applyTheme = async (nextMode) => {
     const viewer = viewerRef.current;
@@ -420,6 +713,14 @@ export default function ProteinViewer({ proteinId }) {
     colorMapRef.current = next;
     applyTheme(mode);
   }, [chains, mode, annotationByPosition, domain]);
+
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => {
+      viewerRef.current?.handleResize?.();
+      viewerRef.current?.plugin?.canvas3d?.requestResize?.();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [annotationsOpen, viewerState]);
 
   useEffect(() => {
     if (!structureRequest || !hostRef.current) return undefined;
@@ -531,8 +832,7 @@ export default function ProteinViewer({ proteinId }) {
       } catch (viewerErrorValue) {
         console.error(viewerErrorValue);
         if (!disposed) {
-          const message = viewerErrorValue instanceof Error ? viewerErrorValue.message : 'No se pudo leer la estructura.';
-          setViewerError(message);
+          setViewerError('No se pudo interpretar la estructura molecular publicada.');
           setStructureParsed(false);
           setViewerState('error');
         }
@@ -734,8 +1034,11 @@ export default function ProteinViewer({ proteinId }) {
     return <section class="viewer-shell viewer-message" role="alert"><h1>No se pudo cargar la proteína</h1><p>{error}</p></section>;
   }
 
+  const categoricalMode = VISUALIZATION_MODES[mode].kind === 'categorical';
+  const selectedCategoryMissing = categoricalMode && activeResidue && !colorForValues(mode, activeAnnotation?.values, null);
+
   return (
-    <section class={`viewer-shell ${activeResidue ? 'has-annotations' : ''}`} aria-label="Visor molecular y secuencia" onContextMenu={(event) => event.preventDefault()}>
+    <section class={`viewer-shell has-annotations analysis-workspace ${annotationsOpen ? 'annotations-expanded' : 'annotations-collapsed'}`} data-analysis={analysis} aria-label={`${analysisView.title}: modelo molecular, secuencia y evidencia`} onContextMenu={(event) => event.preventDefault()}>
       <div ref={hostRef} class="molstar-host" aria-label={structureRequest ? 'Visor molecular Mol*' : 'Sin estructura publicada'} />
       {viewerState === 'unavailable' && wipe === 'gone' && <div class="viewer-boot viewer-empty"><LucideIcon name="box" /><strong>Estructura no disponible</strong><span>La corrida no tiene un PDB o mmCIF subido ni un artefacto publicado.</span></div>}
       {viewerState === 'error' && wipe === 'gone' && <div class="viewer-boot error"><strong>No se pudo cargar la estructura</strong><span>{viewerError || 'Verifica el artefacto y vuelve a intentarlo.'}</span></div>}
@@ -763,59 +1066,46 @@ export default function ProteinViewer({ proteinId }) {
                   inRange={selection.lo !== null && index >= selection.lo && index <= selection.hi}
                   active={selection.active === index}
                   color={colors[index]}
+                  onActivate={selectSingle}
                 />
               ))}
             </div>
           </div>
         </div>
 
-        <div class="viewer-mode-panel" aria-label="Modos de color">
-          <div class="viewer-mode-buttons">
-            {Object.entries(MODE_INFO).map(([key, info]) => (
-              <button key={key} class={`viewer-mode ${mode === key ? 'active' : ''}`} type="button" title={modeAvailability[key] ? info.title : `${info.title} · pendiente de estructura, mapping y resultado publicado`} aria-pressed={mode === key} disabled={!modeAvailability[key]} onClick={() => setMode(key)}>
-                <LucideIcon name={info.icon} />
-              </button>
-            ))}
-          </div>
-          <div class={`viewer-mode-info ${mode === 'regime' ? '' : 'is-continuous'}`}>
-            <span class="viewer-mode-title">{MODE_INFO[mode].title}</span>
-            {!modeAvailability[mode] && <span class="viewer-mode-pending">Pendiente: requiere estructura, mapping validado y el dato publicado.</span>}
-            {mode === 'regime' ? (
-              <span class="viewer-mode-legend">
-                {MODE_INFO.regime.legend.map(([label, color]) => <span key={label} class="viewer-legend-item"><i style={{ background: color }} />{label}</span>)}
-                {regimeMissing && <span class="continuous-legend__missing">Sin dato</span>}
-              </span>
-            ) : (
-              <ContinuousLegend mode={mode} domain={domain} value={activeMeasurement} residueSelected={Boolean(activeResidue)} />
-            )}
-          </div>
-        </div>
       </div>
 
-      {activeResidue && (
-        <aside class="viewer-annotations" aria-label="Anotaciones del residuo">
-          <div class="viewer-annotations-head"><h2>Anotaciones</h2></div>
-          <div class="viewer-annotations-body">
-            <div class="viewer-residue-title">
-              <div><strong>{activeResidue.one}</strong><span>{activeResidue.compId} · {AA_NAMES[activeResidue.compId] ?? 'Residuo'}</span></div>
-              <b>{activeResidue.authSeqId}{activeResidue.insCode || ''}</b>
+      <aside class={`viewer-annotations ${annotationsOpen ? 'is-expanded' : 'is-collapsed'}`} aria-label={`Evidencia de ${analysisView.title}`}>
+        <div class="viewer-annotations-head">
+          <div><span>Análisis</span><h2>{analysisView.title}</h2></div>
+          <button
+            type="button"
+            class="annotations-toggle"
+            aria-expanded={annotationsOpen}
+            aria-controls="viewer-annotations-body"
+            onClick={() => setAnnotationsOpen((open) => !open)}
+          >
+            {annotationsOpen ? 'Ocultar' : 'Mostrar'}
+          </button>
+        </div>
+        <div id="viewer-annotations-body" class="viewer-annotations-body" hidden={!annotationsOpen}>
+          <div class="viewer-mode-panel">
+            <div class={`viewer-mode-info ${categoricalMode ? '' : 'is-continuous'}`}>
+              {!fieldAvailable && <span class="viewer-mode-pending">No hay un valor publicado para esta vista.</span>}
+              {fieldAvailable && !modeAvailability[mode] && <span class="viewer-mode-pending">Hay datos publicados, pero el modelo no tiene un mapeo estructural válido.</span>}
+              {categoricalMode ? (
+                <span class="viewer-mode-legend">
+                  {(MODE_INFO[mode].legend ?? []).map(([label, color]) => <span key={label} class="viewer-legend-item"><i style={{ background: color }} />{label}</span>)}
+                  {selectedCategoryMissing && <span class="continuous-legend__missing">Sin dato</span>}
+                </span>
+              ) : (
+                <ContinuousLegend mode={mode} domain={domain} value={activeMeasurement} residueSelected={Boolean(activeResidue)} />
+              )}
             </div>
-            <dl class="viewer-annotation-list">
-              {ANNOTATION_GROUPS.map(([group, rows]) => (
-                <div key={group}>
-                  <div class="viewer-annotation-group">{group}</div>
-                  {rows.map(([icon, label, key]) => (
-                    <div key={key} class="viewer-annotation-row">
-                      <dt><span><LucideIcon name={icon} />{label}</span></dt>
-                      <dd>{readableValue(key, publishedField(activeAnnotation, key))}</dd>
-                    </div>
-                  ))}
-                </div>
-              ))}
-            </dl>
           </div>
-        </aside>
-      )}
+          <AnalysisDetails analysis={analysis} annotation={activeAnnotation} residue={activeResidue} run={run} view={analysisView} artifactDetails={artifactDetails} />
+        </div>
+      </aside>
 
       {wipe !== 'gone' && (
         <div

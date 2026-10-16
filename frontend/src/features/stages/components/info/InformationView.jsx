@@ -1,131 +1,50 @@
-import { useEffect, useMemo, useState } from 'preact/hooks';
-import LucideIcon from '@shared/components/icons/LucideIcon.jsx';
-import { ApiError, getAnnotations, getArtifactBlob, getRun, subscribeRunEvents } from '@shared/api/client';
-import { presentRunStages } from '@features/runs/stage-visibility.js';
+import { useEffect, useState } from 'preact/hooks';
+import { getRun, subscribeRunEvents } from '@shared/api/client';
+import { runFailureMessage, userErrorMessage } from '@shared/lib/error-presentation';
 import '@features/stages/styles/info.css';
-
-const STATUS_TEXT = {
-  pending: 'Pendiente', ready: 'Listo', queued: 'En cola', running: 'En ejecución',
-  success: 'Completado', reused: 'Resultado reutilizado', failed: 'Falló', skipped: 'No aplica', cancelled: 'Cancelado',
-  cancel_requested: 'Cancelación solicitada',
-  disabled: 'Desactivado',
-};
-
-const EVIDENCE_STATUS_TEXT = {
-  pending: 'Pendiente',
-  partial: 'Parcial',
-  available: 'Disponible',
-  skipped: 'Omitida',
-  failed: 'Fallida',
-  cancelled: 'Cancelada',
-};
 
 const RUN_TERMINAL = new Set(['success', 'failed', 'cancelled']);
 
-const OMISSION_REASON_TEXT = {
-  provided_pdb_selected: 'se usó el PDB proporcionado',
-  variants_not_provided: 'no se confirmaron variantes válidas',
-  technical_prerequisite_not_provided: 'falta un prerrequisito técnico',
-  dependency_not_applicable: 'una dependencia no aplica',
+const STATUS_TEXT = {
+  pending: 'Pendiente',
+  ready: 'Preparada',
+  queued: 'En cola',
+  running: 'En ejecución',
+  success: 'Completada',
+  reused: 'Reutilizada',
+  failed: 'Fallida',
+  skipped: 'Omitida',
+  cancelled: 'Cancelada',
+  cancel_requested: 'Cancelación solicitada',
+  disabled: 'Deshabilitada',
 };
 
-function valueText(value) {
-  if (value === null || value === undefined) return 'NA';
-  if (typeof value === 'object') return JSON.stringify(value);
-  return String(value);
+const STRUCTURE_SOURCE_TEXT = {
+  alphafold3: 'Modelo estructural generado por AlphaFold 3',
+  provided_pdb: 'Estructura PDB proporcionada',
+};
+
+function formatDate(value) {
+  if (!value) return 'Sin fecha';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return 'Sin fecha';
+  return new Intl.DateTimeFormat('es-CO', {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  }).format(date);
 }
 
-function AnnotationRows({ rows }) {
-  if (!rows.length) return <div class="info-empty-note">No hay evidencia publicada para esta etapa.</div>;
-  const sample = rows.slice(0, 8);
-  return (
-    <div>
-      <p class="evidence-count">{rows.length.toLocaleString('es-CO')} fila{rows.length === 1 ? '' : 's'} de anotación</p>
-      <dl class="info-annotation-list">
-        {sample.map((row) => (
-          <div class="info-annotation" key={`${row.stage_result_id}-${row.aa_position}`}>
-            <dt><span class="info-annotation-label">Posición {row.aa_position} · {row.aa_ref}</span><span class="info-annotation-key">qc_status: {row.qc_status}</span></dt>
-            <dd>{Object.entries(row.values).map(([key, value]) => {
-              const unit = row.units?.[key];
-              const rendered = valueText(value);
-              return `${key}=${rendered}${unit && rendered !== 'NA' ? ` ${unit}` : ''}`;
-            }).join(' · ') || 'NA'}</dd>
-          </div>
-        ))}
-      </dl>
-      {rows.length > sample.length && <p class="info-empty-note">Se muestran las primeras {sample.length}; el endpoint conserva todas las filas.</p>}
-    </div>
-  );
+function sourceLabel(run) {
+  const source = run?.configuration?.structure_source;
+  return STRUCTURE_SOURCE_TEXT[source] ?? 'Fuente estructural no publicada';
 }
 
-function ArtifactDownload({ artifact, label = artifact.artifact_type }) {
-  const [downloading, setDownloading] = useState('');
-  const [downloadError, setDownloadError] = useState('');
-
-  const downloadArtifact = async (artifact) => {
-    if (downloading) return;
-    setDownloading(artifact.id);
-    setDownloadError('');
-    try {
-      const objectUrl = URL.createObjectURL(await getArtifactBlob(artifact.id));
-      const anchor = document.createElement('a');
-      anchor.href = objectUrl;
-      anchor.download = artifact.artifact_type;
-      anchor.click();
-      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
-    } catch (error) {
-      setDownloadError(error instanceof ApiError ? error.message : 'No se pudo descargar el artefacto.');
-    } finally {
-      setDownloading('');
-    }
-  };
-
-  return (
-    <div class="artifact-download" aria-live="polite">
-      <button type="button" class="artifact-link" onClick={() => downloadArtifact(artifact)} disabled={Boolean(downloading)} title={`Descargar ${label}`}>
-        <LucideIcon name="file-text" /><span class="artifact-name">{downloading ? 'Descargando…' : label}</span><LucideIcon name="download" />
-      </button>
-      {downloadError && <p class="artifact-download-error" role="alert">{downloadError}</p>}
-    </div>
-  );
-}
-
-function ArtifactList({ artifacts }) {
-  if (!artifacts.length) return <div class="artifact-none">Sin artefactos disponibles para esta etapa.</div>;
-  return (
-    <div class="artifact-list">
-      {artifacts.map((artifact) => <ArtifactDownload key={artifact.id} artifact={artifact} />)}
-    </div>
-  );
-}
-
-function evidenceStatus(stage, rows) {
-  if (stage.status === 'failed') return 'failed';
-  if (stage.status === 'skipped' || stage.status === 'disabled') return 'skipped';
-  if (stage.status === 'cancelled') return 'cancelled';
-  if (!['success', 'reused'].includes(stage.status)) return 'pending';
-  return rows.length || stage.artifacts.length ? 'available' : 'partial';
-}
-
-function EvidenceStatus({ stage, rows }) {
-  const status = evidenceStatus(stage, rows);
-  return <span class={`info-evidence-status evidence-${status}`}>{EVIDENCE_STATUS_TEXT[status]}</span>;
-}
-
-function Provenance({ stage }) {
-  const provenance = stage.provenance ?? {};
-  if (!Object.keys(provenance).length) return null;
-  return (
-    <details class="info-provenance">
-      <summary>Fuente y provenance publicados</summary>
-      <pre>{JSON.stringify(provenance, null, 2)}</pre>
-    </details>
-  );
+function runLoadError(requestError, fallback) {
+  return userErrorMessage(requestError, fallback);
 }
 
 export default function InformationView({ proteinId }) {
   const [run, setRun] = useState(null);
-  const [annotations, setAnnotations] = useState(null);
   const [state, setState] = useState('loading');
   const [error, setError] = useState('');
   const [refreshWarning, setRefreshWarning] = useState('');
@@ -136,152 +55,124 @@ export default function InformationView({ proteinId }) {
       setState('missing-run');
       return undefined;
     }
-    let active = true;
-    let timer;
-    let streamController;
-    let latestRun = null;
 
-    const applySnapshot = (runData, annotationData) => {
-      if (!active) return;
-      latestRun = runData;
-      setRun(runData);
-      setAnnotations(annotationData);
+    let active = true;
+    let timer = null;
+    let streamController = null;
+    let fallbackAttempts = 0;
+    let latestStatus = null;
+
+    const clearTimer = () => {
+      if (timer !== null) window.clearTimeout(timer);
+      timer = null;
+    };
+
+    const scheduleFallback = (load, delay = 4000) => {
+      if (!active || RUN_TERMINAL.has(latestStatus) || fallbackAttempts >= 3) {
+        if (active && fallbackAttempts >= 3) setRefreshWarning('La actualización automática se detuvo; recarga para consultar el estado actual.');
+        return;
+      }
+      fallbackAttempts += 1;
+      clearTimer();
+      timer = window.setTimeout(load, delay);
+    };
+
+    const applySnapshot = (snapshot) => {
+      if (!active || !snapshot) return;
+      latestStatus = snapshot.status;
+      setRun(snapshot);
       setState('ready');
+      setError('');
       setRefreshWarning('');
     };
 
-    const refreshAnnotations = async () => {
-      try {
-        const annotationData = await getAnnotations(runId);
-        if (active) setAnnotations(annotationData);
-      } catch (requestError) {
-        if (active) setRefreshWarning(requestError instanceof ApiError ? requestError.message : 'No se pudieron actualizar las anotaciones.');
-      }
-    };
-
-    const schedulePolling = (delay = 2_000) => {
-      if (!active) return;
-      if (timer) window.clearTimeout(timer);
-      timer = window.setTimeout(async () => {
-        try {
-          const [runData, annotationData] = await Promise.all([getRun(runId), getAnnotations(runId)]);
-          applySnapshot(runData, annotationData);
-          if (!RUN_TERMINAL.has(runData.status)) connectStream();
-        } catch (requestError) {
-          if (!active) return;
-          setRefreshWarning(requestError instanceof ApiError ? requestError.message : 'No se pudo actualizar la información.');
-          schedulePolling(4_000);
-        }
-      }, delay);
-    };
-
-    const connectStream = async () => {
-      if (!active || RUN_TERMINAL.has(latestRun?.status)) return;
+    const connectStream = async (load) => {
+      if (!active || RUN_TERMINAL.has(latestStatus)) return;
       streamController?.abort();
-      streamController = new AbortController();
+      const controller = new AbortController();
+      streamController = controller;
       try {
         await subscribeRunEvents(runId, {
-          signal: streamController.signal,
+          signal: controller.signal,
           onSnapshot: (snapshot) => {
-            latestRun = snapshot;
-            if (active) {
-              setRun(snapshot);
-              setState('ready');
-              void refreshAnnotations();
+            applySnapshot(snapshot);
+            if (RUN_TERMINAL.has(snapshot?.status)) {
+              clearTimer();
+              controller.abort();
             }
           },
         });
-        if (active && !RUN_TERMINAL.has(latestRun?.status)) schedulePolling();
+        if (active && !controller.signal.aborted && !RUN_TERMINAL.has(latestStatus)) scheduleFallback(load);
       } catch (streamError) {
-        if (active && !streamController.signal.aborted) {
-          setRefreshWarning(streamError instanceof ApiError ? streamError.message : 'La actualización en vivo se desconectó; se reintentará automáticamente.');
-          schedulePolling();
-        }
+        if (!active || controller.signal.aborted || RUN_TERMINAL.has(latestStatus)) return;
+        setRefreshWarning(runLoadError(streamError, 'La actualización en vivo no está disponible.'));
+        scheduleFallback(load);
       }
     };
 
-    Promise.all([getRun(runId), getAnnotations(runId)])
-      .then(([runData, annotationData]) => {
-        applySnapshot(runData, annotationData);
-        if (!RUN_TERMINAL.has(runData.status)) void connectStream();
-      })
-      .catch((requestError) => {
+    const load = async () => {
+      if (!active) return;
+      try {
+        const snapshot = await getRun(runId);
+        applySnapshot(snapshot);
+        clearTimer();
+        if (!RUN_TERMINAL.has(snapshot?.status)) await connectStream(load);
+      } catch (requestError) {
         if (!active) return;
         setState('error');
-        setError(requestError instanceof ApiError ? requestError.message : 'No se pudo cargar la información de la corrida.');
-      });
+        setError(runLoadError(requestError, 'No se pudo cargar la corrida.'));
+        scheduleFallback(load);
+      }
+    };
+
+    void load();
     return () => {
       active = false;
+      clearTimer();
       streamController?.abort();
-      if (timer) window.clearTimeout(timer);
     };
   }, [runId]);
 
-  const stages = useMemo(() => {
-    if (!run?.stages?.length) return [];
-    try {
-      return presentRunStages(
-        run.stages,
-      );
-    } catch (visibilityError) {
-      console.error(visibilityError);
-      return run.stages;
-    }
-  }, [run]);
+  const uploads = run?.uploads ?? [];
+  const configuration = run?.configuration ?? {};
 
-  const rowsByStage = useMemo(() => {
-    const grouped = new Map();
-    for (const row of annotations?.rows ?? []) grouped.set(row.stage_id, [...(grouped.get(row.stage_id) ?? []), row]);
-    return grouped;
-  }, [annotations]);
-
-  if (state === 'missing-run') return <section class="info-view info-message"><h1>No hay una corrida seleccionada</h1><p>La información se muestra sólo para una corrida persistida.</p><a class="protein-open" href={`/proteins/${encodeURIComponent(proteinId)}/progress/`}>Ver progreso</a></section>;
-  if (state === 'loading') return <section class="info-view info-message"><p>Cargando evidencia persistida…</p></section>;
-  if (state === 'error') return <section class="info-view info-message" role="alert"><h1>No se pudo cargar la información</h1><p>{error}</p></section>;
-
-  const allArtifacts = run.stages.flatMap((stage) => stage.artifacts ?? []);
+  if (state === 'missing-run') {
+    return <section class="info-view info-message"><h1>No hay una corrida seleccionada</h1><p>Selecciona una corrida persistida para consultar sus datos.</p><a class="protein-open" href={`/proteins/${encodeURIComponent(proteinId)}/progress/`}>Ver progreso</a></section>;
+  }
+  if (state === 'loading') return <section class="info-view info-message"><p>Cargando datos de la corrida…</p></section>;
+  if (state === 'error' && !run) return <section class="info-view info-message" role="alert"><h1>No se pudo cargar la corrida</h1><p>{error}</p></section>;
+  if (!run) return null;
 
   return (
-    <section class="info-view" aria-label="Información y artefactos del pipeline">
+    <section class="info-view" aria-label="Información general de la corrida">
       <header class="info-head">
-        <div><h1>Información</h1><span class="run-id">Run {run.id}</span></div>
-        <div class="info-head-meta">{run.requested_variants.length} variante{run.requested_variants.length === 1 ? '' : 's'} solicitada{run.requested_variants.length === 1 ? '' : 's'}</div>
+        <div><h1>Información</h1><span class="info-accession">{configuration.scientific_accession ?? 'Sin acceso científico'}</span></div>
+        <span class={`info-run-status status-${run.status}`}>{STATUS_TEXT[run.status] ?? run.status}</span>
       </header>
       <div class="info-body">
-        <div class="info-notice">Los valores se muestran únicamente cuando el backend ha publicado filas de anotación o artefactos. Ausencia de filas no equivale a cero.</div>
         {refreshWarning && <div class="info-refresh-warning" role="status">{refreshWarning}</div>}
-        <div class="info-stages">
-          <article class="info-stage" id="resultados-completos">
-            <header class="info-stage-head">
-              <span class="info-stage-icon"><LucideIcon name="folder" /></span>
-              <div class="info-stage-title"><strong>Artefactos publicados</strong><span>Descargas autorizadas de la corrida</span></div>
-            </header>
-            <div class="info-pane">
-              <ArtifactList artifacts={allArtifacts} />
-            </div>
+        <div class="info-summary-grid">
+          <article class="info-card">
+            <h2>Corrida</h2>
+            <dl class="info-facts">
+              <div><dt>Acceso</dt><dd>{configuration.scientific_accession ?? 'No publicado'}</dd></div>
+              <div><dt>Fecha de creación</dt><dd>{formatDate(run.created_at)}</dd></div>
+              <div><dt>Fuente estructural</dt><dd>{sourceLabel(run)}</dd></div>
+              <div><dt>Cadena</dt><dd>{configuration.structure_chain || 'No especificada'}</dd></div>
+            </dl>
           </article>
-          {stages.map((stage, index) => {
-            const rows = rowsByStage.get(stage.id) ?? [];
-            return (
-              <article class="info-stage" id={`stage-${stage.id}`} data-info-stage={stage.id} key={stage.id}>
-                <header class="info-stage-head">
-                  <span class="info-stage-icon"><LucideIcon name="workflow" /></span>
-                  <div class="info-stage-title"><strong>{index + 1}. {stage.title}</strong><span>{stage.id} · {stage.legacy_id}{stage.optional ? ' · opcional' : ''}</span></div>
-                  <div class="info-stage-status-group">
-                    <span class={`info-stage-status ${stage.status === 'failed' ? 'status-failed-text' : stage.status === 'skipped' || stage.status === 'disabled' ? 'optional' : ''}`}><LucideIcon name={stage.status === 'failed' ? 'circle-x' : stage.status === 'skipped' ? 'circle-dot' : stage.status === 'disabled' ? 'circle-slash' : 'circle-check'} />{STATUS_TEXT[stage.status] ?? stage.status}{stage.status === 'skipped' && stage.omission_reason ? ` · ${OMISSION_REASON_TEXT[stage.omission_reason] ?? stage.omission_reason}` : ''}</span>
-                    <EvidenceStatus stage={stage} rows={rows} />
-                  </div>
-                </header>
-                <div class="info-stage-grid">
-                  <section class="info-pane"><h2 class="info-pane-title">Anotaciones</h2><AnnotationRows rows={rows} /></section>
-                  <section class="info-pane"><h2 class="info-pane-title">Artefactos</h2><ArtifactList artifacts={stage.artifacts} /></section>
-                </div>
-                <Provenance stage={stage} />
-                {stage.error_message && <p class="stage-error" role="alert">{stage.error_code}: {stage.error_message}</p>}
-              </article>
-            );
-          })}
         </div>
+
+        <section class="info-card info-card-wide">
+          <h2>Entradas de la corrida</h2>
+          {uploads.length ? (
+            <ul class="info-input-list">
+              {uploads.map((upload) => <li key={upload.id}><span>{upload.input_type === 'structure' ? 'Estructura' : 'Secuencia'}</span><strong>{upload.original_filename}</strong></li>)}
+            </ul>
+          ) : <p class="info-card-note">No hay archivos de entrada asociados.</p>}
+        </section>
+
+        {run.error_message && <p class="info-run-error" role="alert">{runFailureMessage(run.error_code, run.error_message)}</p>}
       </div>
     </section>
   );

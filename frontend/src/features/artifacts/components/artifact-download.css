@@ -10,7 +10,7 @@
   border-radius: 2px;
   background: #fff;
   display: grid;
-  grid-template-columns: 16px minmax(0, 1fr) auto 15px;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 8px;
   color: var(--ink);
@@ -30,11 +30,6 @@
   opacity: .58;
 }
 
-.artifact-download-link .icon-slot {
-  width: 14px;
-  height: 14px;
-}
-
 .artifact-download-name {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -44,6 +39,13 @@
 .artifact-download-type {
   color: var(--muted);
   font-size: 8px;
+}
+
+.artifact-download-action {
+  color: var(--muted);
+  font-size: 8px;
+  font-weight: 700;
+  white-space: nowrap;
 }
 
 .authenticated-artifact > small {

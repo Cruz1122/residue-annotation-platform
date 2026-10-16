@@ -1,0 +1,93 @@
+---
+import Icon from '@shared/components/icons/Icon.astro';
+import './session-navigation.css';
+
+interface Props {
+  active?: string;
+}
+
+const { active = '' } = Astro.props as Props;
+---
+<div class="session-navigation" data-session-navigation data-active={active} hidden>
+  <a
+    class:list={['sidebar-session-item', { active: active === 'users' }]}
+    href="/auth/users/"
+    aria-current={active === 'users' ? 'page' : undefined}
+    data-session-admin
+    hidden
+  >
+    <Icon name="users-round" />
+    <span>Usuarios</span>
+  </a>
+  <a
+    class:list={['sidebar-session-item', 'session-account', { active: active === 'session' }]}
+    href="/auth/session/"
+    aria-current={active === 'session' ? 'page' : undefined}
+    data-session-account
+    hidden
+  >
+    <Icon name="user-round" />
+    <span class="session-identity">
+      <strong data-session-email></strong>
+      <small data-session-role></small>
+    </span>
+  </a>
+</div>
+
+<script>
+  const AUTH_STORAGE_KEY = 'residue-annotation-auth-v1';
+  const SESSION_EVENT = 'residue-annotation:session-change';
+
+  function readSessionUser() {
+    try {
+      const raw = window.sessionStorage.getItem(AUTH_STORAGE_KEY);
+      if (!raw) return null;
+      const value = JSON.parse(raw);
+      const user = value?.user;
+      if (
+        !user
+        || typeof user.email !== 'string'
+        || (user.role !== 'admin' && user.role !== 'user')
+      ) return null;
+      return { email: user.email, role: user.role };
+    } catch {
+      return null;
+    }
+  }
+
+  function renderSessionNavigation() {
+    const user = readSessionUser();
+    for (const root of document.querySelectorAll('[data-session-navigation]')) {
+      const admin = root.querySelector('[data-session-admin]');
+      const account = root.querySelector('[data-session-account]');
+      const email = root.querySelector('[data-session-email]');
+      const role = root.querySelector('[data-session-role]');
+      const active = root.getAttribute('data-active') ?? '';
+
+      root.toggleAttribute('hidden', !user);
+      if (admin) {
+        admin.toggleAttribute('hidden', !user || user.role !== 'admin');
+        admin.classList.toggle('active', active === 'users');
+        if (active === 'users') admin.setAttribute('aria-current', 'page');
+        else admin.removeAttribute('aria-current');
+      }
+      if (account) {
+        account.toggleAttribute('hidden', !user);
+        account.classList.toggle('active', active === 'session');
+        if (active === 'session') account.setAttribute('aria-current', 'page');
+        else account.removeAttribute('aria-current');
+        if (user) account.setAttribute('title', user.email);
+        else account.removeAttribute('title');
+      }
+      if (email) email.textContent = user?.email ?? '';
+      if (role) role.textContent = user?.role === 'admin' ? 'Admin' : 'Usuario';
+    }
+  }
+
+  renderSessionNavigation();
+  if (!document.documentElement.dataset.rapSessionNavigation) {
+    document.documentElement.dataset.rapSessionNavigation = '1';
+    window.addEventListener(SESSION_EVENT, renderSessionNavigation);
+    document.addEventListener('astro:page-load', renderSessionNavigation);
+  }
+</script>

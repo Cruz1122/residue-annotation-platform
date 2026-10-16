@@ -1,6 +1,6 @@
 ---
 import Icon from '@shared/components/icons/Icon.astro';
-import SessionNavigation from './SessionNavigation';
+import SessionNavigation from './SessionNavigation.astro';
 
 const {
   active = 'library',
@@ -14,8 +14,13 @@ const libraryItems = [
 
 const pipelineItems = proteinId ? [
   { id: 'progress', label: 'Progreso', icon: 'workflow', href: `/proteins/${proteinId}/progress/` },
-  { id: 'viewer', label: 'Visor', icon: 'eye', href: `/proteins/${proteinId}/viewer/` },
   { id: 'info', label: 'Información', icon: 'info', href: `/proteins/${proteinId}/info/` },
+  { id: 'topology', label: 'Topología', icon: 'waves', href: `/proteins/${proteinId}/topology/` },
+  { id: 'frustration', label: 'Frustración', icon: 'activity', href: `/proteins/${proteinId}/frustration/` },
+  { id: 'conservation', label: 'Conservación', icon: 'scan-search', href: `/proteins/${proteinId}/conservation/` },
+  { id: 'functional', label: 'Región funcional', icon: 'route', href: `/proteins/${proteinId}/functional-regions/` },
+  { id: 'ddg', label: 'ΔΔG de variante', icon: 'zap', href: `/proteins/${proteinId}/variant-ddg/` },
+  { id: 'contacts', label: 'Contactos', icon: 'network', href: `/proteins/${proteinId}/contacts/` },
 ] : libraryItems;
 
 const items = mode === 'library' ? libraryItems : pipelineItems;
@@ -37,7 +42,10 @@ const items = mode === 'library' ? libraryItems : pipelineItems;
       </a>
     ))}
   </div>
-  <SessionNavigation client:load active={active} />
+  <!-- Session state exists only in the browser's sessionStorage. This component
+       updates its own DOM instead of hydrating a Preact island, so route swaps
+       cannot produce an SSR/client tree mismatch. -->
+  <SessionNavigation active={active} />
 </nav>
 
 <style>
@@ -76,10 +84,10 @@ const items = mode === 'library' ? libraryItems : pipelineItems;
     text-transform: uppercase;
   }
   .brand a:hover { text-decoration: underline; text-underline-offset: 3px; }
-  .sidebar-items { display: flex; flex-direction: column; gap: 8px; min-height: 0; }
+  .sidebar-items { display: flex; flex-direction: column; gap: 6px; min-height: 0; overflow-y: auto; scrollbar-width: thin; }
   .sidebar-item {
     position: relative;
-    min-height: 62px;
+    min-height: 54px;
     border: 1px solid var(--line-strong);
     border-radius: 2px;
     background: #fff;
