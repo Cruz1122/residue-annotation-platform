@@ -1,0 +1,7 @@
+---
+import AppLayout from '../../../layouts/AppLayout.astro';
+import ArpeggioView from '@features/annotations/components/arpeggio/ArpeggioView.jsx';
+---
+<AppLayout title="ARPEGGIO" active="arpeggio" proteinId={Astro.params.id}>
+  <ArpeggioView client:only="preact" proteinId={Astro.params.id} />
+</AppLayout>

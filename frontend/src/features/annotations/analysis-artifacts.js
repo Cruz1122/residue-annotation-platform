@@ -1,4 +1,5 @@
 const MAX_INLINE_ARTIFACT_BYTES = 2 * 1024 * 1024;
+const MAX_DECOMPRESSED_ARTIFACT_BYTES = 32 * 1024 * 1024;
 
 export const ANALYSIS_DETAIL_ARTIFACTS = {
   topology: ['tmbed_per_residue', 'tm_segments', 'span_metadata'],
@@ -6,7 +7,7 @@ export const ANALYSIS_DETAIL_ARTIFACTS = {
   conservation: ['evolution_per_residue', 'metadata'],
   functional: ['ldlc_statin_evidence', 'functional_features_long', 'summary'],
   ddg: ['variant_annotations', 'provenance', 'rosetta_metadata'],
-  contacts: ['contact_residue_summary', 'contacts_long'],
+  contacts: ['contact_residue_summary', 'contacts_long', 'provenance'],
 };
 
 function parseDelimitedLine(line, delimiter) {
@@ -63,6 +64,50 @@ export function parseAnalysisArtifact(text, mediaType = '') {
   });
 }
 
+function isGzipArtifact(artifact) {
+  const mediaType = String(artifact?.media_type ?? '').toLowerCase();
+  const filename = String(artifact?.download_filename ?? '').toLowerCase();
+  return mediaType.includes('gzip') || filename.endsWith('.gz');
+}
+
+async function readBoundedStream(stream, maxBytes) {
+  const reader = stream.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        try { await reader.cancel(); } catch { /* stream is already closed */ }
+        throw new Error('decompressed artifact exceeds the inline limit');
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const buffer = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    buffer.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(buffer);
+}
+
+async function readArtifactText(blob, artifact) {
+  if (!isGzipArtifact(artifact)) return blob.text();
+  if (typeof DecompressionStream === 'undefined') {
+    throw new Error('gzip decompression is not available in this browser');
+  }
+  const source = blob.stream ? blob.stream() : new Response(blob).body;
+  if (!source) throw new Error('artifact stream is unavailable');
+  const decompressed = source.pipeThrough(new DecompressionStream('gzip'));
+  return readBoundedStream(decompressed, MAX_DECOMPRESSED_ARTIFACT_BYTES);
+}
+
 export async function loadAnalysisArtifactDetails(run, analysis, getBlob) {
   const wanted = new Set(ANALYSIS_DETAIL_ARTIFACTS[analysis] ?? []);
   const artifacts = (run?.stages ?? [])
@@ -71,6 +116,12 @@ export async function loadAnalysisArtifactDetails(run, analysis, getBlob) {
       const isConformationalEvidence = analysis === 'frustration'
         && stage.id === 'conformational_ensemble'
         && ['metadata', 'frames_index'].includes(artifact.artifact_type);
+      // A normal run contains provenance artifacts from several stages. The
+      // contacts view must use the provenance that belongs to the Arpeggio
+      // stage, otherwise an unrelated stage can overwrite its parameters.
+      const isContactsEvidence = analysis === 'contacts'
+        && ['contact_residue_summary', 'contacts_long', 'provenance'].includes(artifact.artifact_type);
+      if (isContactsEvidence && stage.id !== 'structural_contacts') return false;
       return (wanted.has(artifact.artifact_type) || isConformationalEvidence)
         && artifact.size <= MAX_INLINE_ARTIFACT_BYTES;
     });
@@ -79,7 +130,7 @@ export async function loadAnalysisArtifactDetails(run, analysis, getBlob) {
     const type = analysis === 'frustration' && stage.id === 'conformational_ensemble'
       ? `conformational_ensemble_${artifact.artifact_type}`
       : artifact.artifact_type;
-    return [type, parseAnalysisArtifact(await blob.text(), artifact.media_type)];
+    return [type, parseAnalysisArtifact(await readArtifactText(blob, artifact), artifact.media_type)];
   }));
   const details = {};
   for (const result of settled) {

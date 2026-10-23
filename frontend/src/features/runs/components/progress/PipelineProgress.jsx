@@ -120,7 +120,7 @@ const STAGE_ANALYSIS_ROUTES = {
   functional_region_evidence: 'functional-regions',
   uniprot_features: 'functional-regions',
   variant_ddg: 'variant-ddg',
-  structural_contacts: 'contacts',
+  structural_contacts: 'arpeggio',
   structural_frustration: 'frustration',
   sequence_frustration: 'frustration',
   ensemble_frustration: 'frustration',

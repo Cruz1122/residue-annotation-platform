@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { gzipSync } from 'node:zlib';
 import {
   firstDetailValue,
   functionalFeatureClass,
@@ -138,4 +139,89 @@ test('loads conformational ensemble metadata under a stage-specific key', async 
   assert.deepEqual(requested.sort(), ['frames', 'metadata']);
   assert.equal(details.conformational_ensemble_metadata[0].ensemble_size, 207);
   assert.equal(details.conformational_ensemble_frames_index.length, 1);
+});
+
+test('decompresses gzip detail artifacts before parsing', async () => {
+  const tsv = 'aa_position_1\taa_position_2\tinteraction_type\tdistance_A\n79\t127\tpolar\t3.1\n';
+  const compressed = gzipSync(tsv);
+  const run = {
+    stages: [{
+      id: 'structural_contacts',
+      artifacts: [{
+        id: 'long',
+        artifact_type: 'contacts_long',
+        size: compressed.length,
+        media_type: 'application/gzip',
+        download_filename: 'contacts_long.tsv.gz',
+      }],
+    }],
+  };
+  const details = await loadAnalysisArtifactDetails(run, 'contacts', async () => new Blob([compressed], { type: 'application/gzip' }));
+  assert.equal(details.contacts_long.length, 1);
+  assert.equal(details.contacts_long[0].aa_position_2, '127');
+});
+
+test('loads only structural_contacts provenance for the contacts analysis', async () => {
+  const requested = [];
+  const run = {
+    stages: [
+      {
+        id: 'structural_frustration',
+        artifacts: [{ id: 'wrong-provenance', artifact_type: 'provenance', size: 64, media_type: 'application/json' }],
+      },
+      {
+        id: 'structural_contacts',
+        artifacts: [{ id: 'right-provenance', artifact_type: 'provenance', size: 64, media_type: 'application/json' }],
+      },
+    ],
+  };
+  const details = await loadAnalysisArtifactDetails(run, 'contacts', async (id) => {
+    requested.push(id);
+    return {
+      text: async () => (id === 'right-provenance'
+        ? '{"parameters":{"interacting_A":5,"ph":7.4}}'
+        : '{"parameters":{"interacting_A":4.5,"ph":6.5}}'),
+    };
+  });
+  assert.deepEqual(requested, ['right-provenance']);
+  assert.equal(details.provenance[0].parameters.interacting_A, 5);
+});
+
+test('keeps the summary when gzip detail is unreadable', async () => {
+  const run = {
+    stages: [{
+      id: 'structural_contacts',
+      artifacts: [
+        { id: 'summary', artifact_type: 'contact_residue_summary', size: 128, media_type: 'text/tab-separated-values' },
+        { id: 'broken', artifact_type: 'contacts_long', size: 64, media_type: 'application/gzip' },
+      ],
+    }],
+  };
+  const details = await loadAnalysisArtifactDetails(run, 'contacts', async (id) => {
+    if (id === 'broken') return new Blob([new Uint8Array([1, 2, 3])], { type: 'application/gzip' });
+    return { text: async () => 'aa_position\tstructural_contacts_n_contacts\n79\t11\n' };
+  });
+  assert.equal(details.contact_residue_summary.length, 1);
+  assert.equal(details.contact_residue_summary[0].structural_contacts_n_contacts, '11');
+  assert.equal(details.contacts_long, undefined);
+});
+
+test('aborts oversized decompressed detail and keeps the summary', async () => {
+  const huge = 'x'.repeat(33 * 1024 * 1024);
+  const compressed = gzipSync(huge);
+  const run = {
+    stages: [{
+      id: 'structural_contacts',
+      artifacts: [
+        { id: 'summary', artifact_type: 'contact_residue_summary', size: 128, media_type: 'text/tab-separated-values' },
+        { id: 'huge', artifact_type: 'contacts_long', size: compressed.length, media_type: 'application/gzip' },
+      ],
+    }],
+  };
+  const details = await loadAnalysisArtifactDetails(run, 'contacts', async (id) => {
+    if (id === 'huge') return new Blob([compressed], { type: 'application/gzip' });
+    return { text: async () => 'aa_position\tstructural_contacts_n_contacts\n79\t11\n' };
+  });
+  assert.equal(details.contact_residue_summary.length, 1);
+  assert.equal(details.contacts_long, undefined);
 });

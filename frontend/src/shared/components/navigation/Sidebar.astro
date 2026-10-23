@@ -28,7 +28,7 @@ const pipelineItems: NavigationItem[] = proteinId ? [
   { id: 'conservation', label: 'Conservación', icon: 'evolutionary_conservation', iconKind: 'stage', href: `/proteins/${proteinId}/conservation/` },
   { id: 'functional', label: 'Región funcional', icon: 'functional_region_evidence', iconKind: 'stage', href: `/proteins/${proteinId}/functional-regions/` },
   { id: 'ddg', label: 'ΔΔG de variante', icon: 'variant_ddg', iconKind: 'stage', href: `/proteins/${proteinId}/variant-ddg/` },
-  { id: 'contacts', label: 'Contactos', icon: 'structural_contacts', iconKind: 'stage', href: `/proteins/${proteinId}/contacts/` },
+  { id: 'arpeggio', label: 'ARPEGGIO', icon: 'structural_contacts', iconKind: 'stage', href: `/proteins/${proteinId}/arpeggio/` },
 ] : [];
 
 const groups = mode === 'library'
@@ -41,7 +41,7 @@ const groups = mode === 'library'
 <nav class="sidebar" aria-label="Navegación principal">
   <div class="brand">
     <a href="/" aria-label="Ir al inicio" title="Residue Annotation Platform">
-      <span class="brand-mark"><Icon name="dna" /></span>
+      <span class="brand-mark"><Icon name="protein" /></span>
       <span class="brand-copy"><strong>RAP</strong><small>Residue annotation</small></span>
     </a>
   </div>
@@ -160,7 +160,9 @@ const groups = mode === 'library'
     background: var(--green);
   }
   .sidebar-icon-wrap { width: 28px; height: 28px; display: grid; place-items: center; color: var(--muted); }
-  .sidebar-icon { width: 17px; height: 17px; }
+  /* PackIcon is a framework component, so Astro scoped styles cannot target its
+     root element. Keep this selector global to give UI icons an explicit size. */
+  .sidebar-icon-wrap :global(.sidebar-icon) { width: 17px; height: 17px; }
   .sidebar-item.active .sidebar-icon-wrap { color: var(--green-dark); }
 
   @media (max-width: 1100px) {
@@ -189,7 +191,6 @@ const groups = mode === 'library'
     .sidebar-group-items { display: flex; gap: 2px; }
     .sidebar-item { min-width: max-content; min-height: 48px; grid-template-columns: 24px minmax(0,1fr); gap: 6px; padding: 0 9px; font-size: 10px; }
     .sidebar-item.active::before { left: 9px; right: 9px; top: auto; bottom: -6px; width: auto; height: 2px; border-radius: 2px 2px 0 0; }
-    .sidebar-icon { width: 17px; height: 17px; }
     .brand { flex: 0 0 auto; padding: 0 7px 0 0; min-height: 48px; border: 0; border-right: 1px solid var(--line); }
     .brand a { width: auto; grid-template-columns: 32px; gap: 0; }
     .brand-mark { width: 32px; height: 32px; }
