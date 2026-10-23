@@ -73,6 +73,11 @@ const FALLBACK_NAMES = {
   arpeggio_log: 'Registro de Arpeggio',
 };
 
+const SAFE_DOWNLOAD_EXTENSIONS = new Set([
+  '.bin', '.cif', '.csv', '.fa', '.faa', '.fasta', '.gz', '.json', '.log',
+  '.mmcif', '.pdb', '.tar', '.tsv', '.txt', '.xml', '.xlsx', '.yaml', '.yml', '.zip',
+]);
+
 function fallbackName(value) {
   return String(value ?? '')
     .trim()
@@ -102,14 +107,24 @@ export function artifactFormatLabel(artifact) {
 }
 
 export function artifactDownloadFormat(artifact) {
-  if (artifact?.download_format) return artifact.download_format;
+  if (artifact?.download_format === 'original' || artifact?.download_format === 'xlsx') {
+    return artifact.download_format;
+  }
   const mediaType = String(artifact?.media_type ?? '').toLowerCase();
   return mediaType.includes('tab-separated') || mediaType.includes('csv') ? 'xlsx' : 'original';
 }
 
-export function artifactDownloadFilename(artifact) {
-  if (artifact?.download_filename) return artifact.download_filename;
-  const name = artifactDisplayName(artifact)
+function filenameBasename(value) {
+  return String(value ?? '')
+    .replace(/[\u0000-\u001f\u007f]/g, '')
+    .split(/[\\/]/)
+    .pop()
+    ?.trim() ?? '';
+}
+
+function safeDownloadStem(value) {
+  return filenameBasename(value)
+    .replace(/\.[a-z0-9]{1,12}$/i, '')
     .toLowerCase()
     .replace(/δ/g, 'd')
     .replace(/Δ/g, 'd')
@@ -119,13 +134,32 @@ export function artifactDownloadFilename(artifact) {
     .replace(/[\u0300-\u036f]/g, '')
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '') || 'archivo-cientifico';
+}
+
+function mediaTypeExtension(mediaType) {
+  const normalized = String(mediaType ?? '').toLowerCase();
+  return normalized.includes('json') ? '.json'
+    : normalized.includes('pdb') ? '.pdb'
+      : normalized.includes('mmcif') ? '.mmcif'
+        : normalized.includes('cif') ? '.cif'
+          : normalized.includes('tab-separated') ? '.tsv'
+            : normalized.includes('csv') ? '.csv'
+              : normalized.includes('plain') ? '.txt'
+                : normalized.includes('gzip') ? '.gz'
+                  : normalized.includes('tar') ? '.tar'
+                    : null;
+}
+
+export function sanitizeArtifactFilename(value, artifact = {}) {
+  const source = filenameBasename(value) || artifactDisplayName(artifact);
+  const sourceExtension = source.match(/\.[a-z0-9]{1,12}$/i)?.[0]?.toLowerCase() ?? '';
   const format = artifactDownloadFormat(artifact);
-  if (format === 'xlsx') return `${name}.xlsx`;
-  const mediaType = String(artifact?.media_type ?? '').toLowerCase();
-  const suffix = mediaType.includes('json') ? '.json'
-    : mediaType.includes('pdb') ? '.pdb'
-      : mediaType.includes('cif') ? '.cif'
-        : mediaType.includes('plain') ? '.txt'
-          : '.bin';
-  return `${name}${suffix}`;
+  const extension = format === 'xlsx'
+    ? '.xlsx'
+    : mediaTypeExtension(artifact?.media_type) ?? (SAFE_DOWNLOAD_EXTENSIONS.has(sourceExtension) ? sourceExtension : '.bin');
+  return `${safeDownloadStem(source)}${extension}`;
+}
+
+export function artifactDownloadFilename(artifact) {
+  return sanitizeArtifactFilename(artifact?.download_filename, artifact);
 }

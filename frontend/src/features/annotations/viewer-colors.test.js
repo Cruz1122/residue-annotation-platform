@@ -41,6 +41,9 @@ test('ConSurf uses its native fixed 1-to-9 scale', () => {
   assert.equal(low, VISUALIZATION_MODES.conservation.colors[0]);
   assert.equal(high, VISUALIZATION_MODES.conservation.colors.at(-1));
   assert.equal(colorForValues('conservation', { consurf_grade: 'NA' }, domain), null);
+  assert.equal(colorForValues('conservation', { consurf_grade: 0 }, domain), null);
+  assert.equal(colorForValues('conservation', { consurf_grade: 10 }, domain), null);
+  assert.equal(colorForValues('conservation', { consurf_grade: 5.5 }, domain), null);
 });
 
 test('fixed numeric domains do not depend on the values in the current run', () => {

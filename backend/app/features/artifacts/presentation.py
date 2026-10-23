@@ -366,6 +366,30 @@ HEADER_NAMES: dict[str, str] = {
 
 XLSX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
+SAFE_STORAGE_SUFFIXES = frozenset(
+    {
+        ".bin",
+        ".cif",
+        ".csv",
+        ".faa",
+        ".fasta",
+        ".fa",
+        ".gz",
+        ".json",
+        ".log",
+        ".mmcif",
+        ".pdb",
+        ".tar",
+        ".tsv",
+        ".txt",
+        ".xml",
+        ".xlsx",
+        ".yaml",
+        ".yml",
+        ".zip",
+    }
+)
+
 
 @dataclass(frozen=True, slots=True)
 class ArtifactPresentation:
@@ -423,7 +447,26 @@ def _original_suffix(storage_key: str, media_type: str) -> str:
     }.get(media)
     if media_suffix:
         return media_suffix
-    return Path(storage_key).suffix.lower() or ".bin"
+    storage_suffix = Path(str(storage_key)).suffix.lower()
+    if storage_suffix in SAFE_STORAGE_SUFFIXES and re.fullmatch(
+        r"\.[a-z0-9]{1,12}", storage_suffix
+    ):
+        return storage_suffix
+    return ".bin"
+
+
+def safe_download_media_type(media_type: str) -> str:
+    """Return a safe MIME type for an attachment response.
+
+    Artifact media types are persisted metadata, but an invalid value must not
+    become a response-header injection vector or make a scientific download
+    render as active browser content.
+    """
+
+    normalized = str(media_type or "").split(";", 1)[0].strip().lower()
+    if re.fullmatch(r"[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+", normalized):
+        return normalized
+    return "application/octet-stream"
 
 
 def artifact_presentation(

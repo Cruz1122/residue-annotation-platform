@@ -1,3 +1,5 @@
+import { conservationRowsFromArtifact } from './conservation-presentation.js';
+
 const MAX_INLINE_ARTIFACT_BYTES = 2 * 1024 * 1024;
 const MAX_DECOMPRESSED_ARTIFACT_BYTES = 32 * 1024 * 1024;
 
@@ -122,6 +124,15 @@ export async function loadAnalysisArtifactDetails(run, analysis, getBlob) {
       const isContactsEvidence = analysis === 'contacts'
         && ['contact_residue_summary', 'contacts_long', 'provenance'].includes(artifact.artifact_type);
       if (isContactsEvidence && stage.id !== 'structural_contacts') return false;
+      // ``metadata`` is a shared artifact name across stages. Conservation
+      // must read the metadata published by its own stage, otherwise a later
+      // predictor/feature metadata file can silently replace its method and
+      // provenance in the panel.
+      const isForeignConservationMetadata = analysis === 'conservation'
+        && artifact.artifact_type === 'metadata'
+        && stage.id
+        && stage.id !== 'evolutionary_conservation';
+      if (isForeignConservationMetadata) return false;
       return (wanted.has(artifact.artifact_type) || isConformationalEvidence)
         && artifact.size <= MAX_INLINE_ARTIFACT_BYTES;
     });
@@ -204,6 +215,9 @@ export function recordsForPosition(details, artifactType, position) {
 }
 
 export function presentationRowsFromArtifacts(details, analysis) {
+  if (analysis === 'conservation') {
+    return conservationRowsFromArtifact(details?.evolution_per_residue);
+  }
   if (analysis === 'functional') {
     const grouped = new Map();
     for (const record of details?.functional_features_long ?? []) {

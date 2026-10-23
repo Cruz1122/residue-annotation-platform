@@ -4,6 +4,7 @@ import os
 from zipfile import ZipFile
 
 import pytest
+from app.features.artifacts.presentation import artifact_presentation, safe_download_media_type
 from app.features.artifacts.storage import ArtifactIntegrityError, ArtifactStore
 from app.features.proteins.models import Protein
 from app.features.runs.models import Artifact, Run, RunStage, StageResult
@@ -151,12 +152,27 @@ def test_artifact_download_serves_matching_content(client, session, tmp_path):
 
     assert response.status_code == 200
     assert response.content == b"data"
+    assert response.headers["content-disposition"].startswith('attachment; filename="')
+    assert response.headers["cache-control"] == "private, no-store"
+    assert response.headers["x-content-type-options"] == "nosniff"
+
+
+def test_artifact_presentation_sanitizes_original_extension_and_media_type():
+    presentation = artifact_presentation(
+        "new_scientific_table",
+        "application/octet-stream\r\nX-Injected: yes",
+        "exports/report.html",
+    )
+
+    assert presentation.download_filename == "new-scientific-table.bin"
+    assert safe_download_media_type("text/plain; charset=utf-8") == "text/plain"
+    assert safe_download_media_type("text/plain\r\nX-Injected: yes") == "application/octet-stream"
 
 
 def test_tabular_artifact_download_defaults_to_readable_excel(client, session, tmp_path):
     content = (
         b"aa_position\taa_ref\taa_alt\tddg_value\tcadd_phred_mean\tp_tm_alpha"
-        b"\tvariant_ddg_R43C_sd\n43\tR\tC\t-1.25\t12.5\t0.8\t0.25\n"
+        b"\tvariant_ddg_R43C_sd\tnote\n43\tR\tC\t-1.25\t12.5\t0.8\t0.25\t=2+2\n"
     )
     artifact_id = _artifact_with_content(
         session,
@@ -184,6 +200,8 @@ def test_tabular_artifact_download_defaults_to_readable_excel(client, session, t
     assert "Probabilidad TM α" in sheet
     assert "ΔΔG R43C · desviación estándar" in sheet
     assert "R" in sheet
+    assert "=2+2" in sheet
+    assert "<f>" not in sheet
 
     original = client.get(
         f"/api/v1/artifacts/{artifact_id}/content?format=original", headers=HEADERS

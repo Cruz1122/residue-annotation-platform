@@ -1,3 +1,5 @@
+import { formatConservationGrade, normalizeConservationGrade } from './conservation-presentation.js';
+
 export const AA3 = {
   A: 'ALA', R: 'ARG', N: 'ASN', D: 'ASP', C: 'CYS', Q: 'GLN', E: 'GLU', G: 'GLY', H: 'HIS',
   I: 'ILE', L: 'LEU', K: 'LYS', M: 'MET', F: 'PHE', P: 'PRO', S: 'SER', T: 'THR', W: 'TRP', Y: 'TYR', V: 'VAL',
@@ -35,7 +37,7 @@ export const ANALYSIS_VIEWS = {
   },
   conservation: {
     title: 'Conservación evolutiva',
-    shortTitle: 'Conservación',
+    shortTitle: 'Conservación evolutiva',
     icon: 'scan-search',
     mode: 'conservation',
     stageIds: ['evolutionary_conservation', 'uniprot_features'],
@@ -145,7 +147,7 @@ export const MODE_SCALE_COPY = {
   },
   conservation: {
     magnitude: 'Grado ConSurf',
-    note: 'Escala nativa',
+    note: 'Escala ordinal nativa 1–9',
   },
   ddg: {
     magnitude: 'ΔΔG de la variante',
@@ -210,6 +212,7 @@ const VALUE_LABELS = {
   'LDL-receptor class A': 'Receptor LDL clase A', 'EGF-like': 'Tipo EGF', 'Beta-propeller': 'Propela β', 'C-terminal region': 'Región C-terminal',
   true: 'Sí', false: 'No', exact: 'Exacto', not_in_reference: 'Fuera de la referencia',
   ok: 'Válido', success: 'Completado', failed: 'Fallido', skipped: 'Omitido', NA: 'Sin dato',
+  reliable: 'Fiable',
   tmbed_only: 'Solo TMbed', uniprot_only: 'Solo UniProt', concordant: 'Concordante',
   discordant: 'Discordante', both: 'Concordante',
   curated_region: 'Región funcional curada', functional_interest: 'Región de interés funcional',
@@ -320,6 +323,10 @@ export function finiteAnnotationValue(value) {
 export function measurementForMode(mode, values) {
   const spec = VISUALIZATION_MODES[mode];
   if (!spec || spec.kind !== 'continuous' || !values) return null;
+  if (mode === 'conservation') {
+    const grade = normalizeConservationGrade(values[spec.field]);
+    return grade === null ? null : { field: spec.field, value: grade };
+  }
   const fields = [spec.field, ...(spec.fallbackFields ?? [])];
   for (const field of fields) {
     const value = finiteAnnotationValue(values[field]);
@@ -446,7 +453,7 @@ export function viewerModeAvailability(rows, { structureAvailable = false, mappi
     regime: mappedStructure && hasPublishedField(rows, VISUALIZATION_MODES.regime.field, 'categorical'),
     frustration: mappedStructure && hasPublishedField(rows, VISUALIZATION_MODES.frustration.field, 'continuous', VISUALIZATION_MODES.frustration.fallbackFields),
     contacts: mappedStructure && hasPublishedField(rows, VISUALIZATION_MODES.contacts.field, 'continuous'),
-    conservation: mappedStructure && hasPublishedField(rows, VISUALIZATION_MODES.conservation.field, 'continuous'),
+    conservation: mappedStructure && (rows ?? []).some((row) => normalizeConservationGrade(row?.values?.consurf_grade) !== null),
     functional: mappedStructure && (
       hasPublishedField(rows, VISUALIZATION_MODES.functional.field, 'categorical')
       || hasPublishedField(rows, 'functional_feature_class', 'categorical')
@@ -483,7 +490,8 @@ export function colorForValues(mode, values, domain) {
     return spec.colors[category] ?? null;
   }
   if (!domain) return null;
-  return colorOnScale(normalizeValue(measurementForMode(mode, values)?.value, domain.min, domain.max), spec.colors);
+  const measurement = measurementForMode(mode, values);
+  return colorOnScale(normalizeValue(measurement?.value, domain.min, domain.max), spec.colors);
 }
 
 export function residueDisplayColor(mode, residue, row, domain) {
@@ -503,7 +511,7 @@ export function formatScaleNumber(value) {
 export function readableValue(key, value) {
   const text = String(value ?? 'NA');
   if (key === 'structural_contacts_n_contacts' && text !== 'NA') return `${text} contactos`;
-  if (key === 'consurf_grade' && text !== 'NA') return `${text} / 9`;
+  if (key === 'consurf_grade') return formatConservationGrade(value);
   if (key === 'cadd_phred_mean' && text !== 'NA') return `${text} PHRED`;
   return VALUE_LABELS[text] || VALUE_LABELS[text.toLowerCase()] || text;
 }

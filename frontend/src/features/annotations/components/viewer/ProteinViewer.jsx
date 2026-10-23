@@ -7,6 +7,17 @@ import { getAnnotations, getArtifactBlob, getArtifactObjectUrl, getProtein, getR
 import { userErrorMessage } from '@shared/lib/error-presentation';
 import { firstDetailValue, loadAnalysisArtifactDetails, presentationRowsFromArtifacts, recordsForPosition, summarizeArtifactRecord } from '@features/annotations/analysis-artifacts.js';
 import {
+  CONSERVATION_SCALE,
+  CONSERVATION_REFERENCE_URL,
+  RATE4SITE_REFERENCE_URL,
+  conservationEvidenceForResidue,
+  conservationProvenance,
+  formatConservationGrade,
+  formatConservationInterval,
+  normalizeConservationGrade,
+  publishedConservationField,
+} from '@features/annotations/conservation-presentation.js';
+import {
   AA_NAMES,
   ANALYSIS_VIEWS,
   booleanClass,
@@ -197,20 +208,59 @@ function ContinuousLegend({ mode, domain, value, residueSelected }) {
   );
 }
 
+function ConservationLegend({ domain, value, showRate4SiteReference }) {
+  const t = domain ? normalizeValue(value, domain.min, domain.max) : null;
+  const colors = VISUALIZATION_MODES.conservation.colors;
+  const stops = colors.map((color, index) => `${color} ${(index / (colors.length - 1)) * 100}%`).join(', ');
+  const background = `linear-gradient(90deg, ${stops})`;
+  return (
+    <div class="continuous-legend conservation-legend" aria-label="Escala de conservación ConSurf de 1 a 9">
+      <p class="continuous-legend__note">
+        <strong>ConSurf</strong>
+      </p>
+      <div class={`continuous-legend__track ${domain ? '' : 'is-empty'}`} style={domain ? { background } : undefined}>
+        {t !== null && (
+          <span
+            class="continuous-legend__marker"
+            style={{ left: `${t * 100}%` }}
+            title={`Residuo seleccionado: ${formatConservationGrade(value)}`}
+          />
+        )}
+      </div>
+      {domain && (
+        <div class="continuous-legend__labels conservation-legend__ticks">
+          {CONSERVATION_SCALE.ticks.map((tick) => <span key={tick}>{tick}</span>)}
+        </div>
+      )}
+      <div class="conservation-legend__direction" aria-hidden="true">
+        <span>{CONSERVATION_SCALE.lowLabel}</span>
+        <span>{CONSERVATION_SCALE.highLabel}</span>
+      </div>
+      <div class="conservation-legend__sources">
+        <a class="conservation-legend__source" href={CONSERVATION_REFERENCE_URL} target="_blank" rel="noreferrer">{CONSERVATION_SCALE.sourceLabel}</a>
+        {showRate4SiteReference && (
+          <a class="conservation-legend__source" href={RATE4SITE_REFERENCE_URL} target="_blank" rel="noreferrer">Rate4Site</a>
+        )}
+      </div>
+    </div>
+  );
+}
+
 const ResidueButton = memo(function ResidueButton({ residue, index, inRange, active, color, onActivate }) {
+  const position = residue.aaPosition ?? residue.canonicalPosition ?? residue.authSeqId;
   return (
     <button
       data-sequence-index={index}
       class={`viewer-residue ${inRange ? 'in-range' : ''} ${active ? 'active' : ''}`}
       style={`--mode-color:${color}`}
       type="button"
-      title={`${residue.compId} ${residue.authSeqId}`}
+      title={`${residue.compId} ${position}`}
       aria-pressed={inRange}
       onClick={(event) => {
         if (event.detail === 0) onActivate(index);
       }}
     >
-      <span class="viewer-residue-pos">{index % 10 === 0 ? residue.authSeqId : ''}</span>
+      <span class="viewer-residue-pos">{position % 10 === 0 ? position : ''}</span>
       <span>{residue.one}</span>
     </button>
   );
@@ -315,7 +365,10 @@ function AnalysisDetails({ analysis, annotation, residue, run, view, artifactDet
   const canonicalPosition = residue?.aaPosition ?? residue?.canonicalPosition ?? null;
   const requestedVariant = (run?.requested_variants ?? []).find((variant) => variant.aa_position === canonicalPosition);
   const relatedStages = (run?.stages ?? []).filter((stage) => view.stageIds.includes(stage.id));
-  const artifacts = relatedStages.flatMap((stage) => stage.artifacts ?? []);
+  const artifactStages = analysis === 'conservation'
+    ? relatedStages.filter((stage) => stage.id === view.primaryStageId)
+    : relatedStages;
+  const artifacts = artifactStages.flatMap((stage) => stage.artifacts ?? []);
   const topologyDetail = recordsForPosition(artifactDetails, 'tmbed_per_residue', canonicalPosition)[0];
   const frustrationDetail = recordsForPosition(artifactDetails, 'frustratometer_per_residue', canonicalPosition)[0];
   const frustrationMeasurement = measurementForMode('frustration', annotation?.values);
@@ -327,6 +380,15 @@ function AnalysisDetails({ analysis, annotation, residue, run, view, artifactDet
         ? 'Frustración por secuencia'
         : 'Sin dato';
   const conservationDetail = recordsForPosition(artifactDetails, 'evolution_per_residue', canonicalPosition)[0];
+  const conservationEvidence = conservationEvidenceForResidue(annotation, conservationDetail);
+  const conservationMetadata = artifactDetails?.metadata?.[0] ?? null;
+  const conservationStage = (run?.stages ?? []).find((stage) => stage.id === 'evolutionary_conservation');
+  const conservationProvenanceRows = conservationProvenance(conservationMetadata, conservationStage?.provenance)
+    .filter((row) => row.label !== 'Referencia publicada');
+  const conservationInterval = formatConservationInterval(conservationEvidence.ciLow, conservationEvidence.ciHigh);
+  const conservationRate4SiteDisplay = conservationEvidence.rate4siteScore === null
+    ? 'Sin dato publicado'
+    : `${readableValue('rate4site_score', conservationEvidence.rate4siteScore)}${conservationEvidence.rate4siteUnit ? ` ${conservationEvidence.rate4siteUnit}` : ''}`;
   const functionalDetail = recordsForPosition(artifactDetails, 'ldlc_statin_evidence', canonicalPosition)[0];
   const functionalFeatures = recordsForPosition(artifactDetails, 'functional_features_long', canonicalPosition);
   const functionalFeatureTypes = [...new Set(functionalFeatures.map((record) => String(record?.feature_type ?? '').trim()).filter(Boolean))];
@@ -345,6 +407,7 @@ function AnalysisDetails({ analysis, annotation, residue, run, view, artifactDet
   const functionalFeatureClasses = String(annotation?.values?.functional_feature_class ?? '').split('|');
   const functionalFeatureTone = ['highlighted_segment', 'functional_interest', 'curated_region', 'annotation']
     .find((candidate) => functionalFeatureClasses.includes(candidate)) ?? '';
+  const uniprotDomain = publishedField(annotation, 'uniprot_domain');
 
   return (
     <>
@@ -354,10 +417,12 @@ function AnalysisDetails({ analysis, annotation, residue, run, view, artifactDet
             <div><strong>{residue.one}</strong><span>{residue.compId} · {AA_NAMES[residue.compId] ?? 'Residuo'}</span></div>
             <b>{canonicalPosition ?? `${residue.authSeqId}${residue.insCode || ''}`}</b>
           </div>
-          <div class="analysis-context">
-            <span>Contexto funcional</span>
-            <EvidenceRow label="Dominio UniProt" value={displayField(annotation, 'uniprot_domain')} />
-          </div>
+          {uniprotDomain !== 'NA' && (
+            <div class="analysis-context">
+              <span>Contexto funcional</span>
+              <EvidenceRow label="Dominio UniProt" value={readableValue('uniprot_domain', uniprotDomain)} />
+            </div>
+          )}
         </>
       ) : (
         <div class="analysis-select-prompt"><strong>Selecciona un residuo</strong><span>Haz clic en la secuencia o en el modelo 3D para ver la evidencia publicada.</span></div>
@@ -391,11 +456,39 @@ function AnalysisDetails({ analysis, annotation, residue, run, view, artifactDet
       )}
 
       {residue && analysis === 'conservation' && (
-        <EvidenceSection title="Conservación del residuo" meta={displayField(annotation, 'consurf_grade')} open>
+        <EvidenceSection
+          title="Conservación del residuo"
+          meta={conservationEvidence.consurfGrade !== null
+            ? formatConservationGrade(conservationEvidence.consurfGrade)
+            : conservationEvidence.rate4siteScore !== null ? 'Rate4Site' : 'Sin dato publicado'}
+          description="En la escala ordinal ConSurf, 1 es el extremo variable y 9 el extremo conservado."
+          open
+        >
           <dl>
-            <EvidenceRow label="Rate4Site" value={displayField(annotation, 'rate4site_score')} />
-            <EvidenceRow label="ConSurf" value={displayField(annotation, 'consurf_grade')} />
-            {conservationDetail && <EvidenceRow label="Motivo de ausencia" value={displayDetail(conservationDetail, ['na_reason'])} />}
+            <EvidenceRow
+              label="Grado ConSurf"
+              value={formatConservationGrade(conservationEvidence.consurfGrade)}
+              tone={normalizeConservationGrade(conservationEvidence.consurfGrade) === null ? '' : 'conservation'}
+            />
+            {conservationEvidence.rate4siteScore !== null && (
+              <EvidenceRow label="Puntuación Rate4Site" value={conservationRate4SiteDisplay} />
+            )}
+            {conservationInterval && <EvidenceRow label="Intervalo publicado" value={conservationInterval} />}
+            {conservationEvidence.ciGradeSpan !== null && !conservationInterval && (
+              <EvidenceRow label="Amplitud del grado" value={conservationEvidence.ciGradeSpan} />
+            )}
+            {conservationEvidence.reliable !== null && (
+              <EvidenceRow label="Resultado fiable" value={readableValue('reliable', conservationEvidence.reliable)} />
+            )}
+            {conservationEvidence.nongap !== null && (
+              <EvidenceRow label="Posiciones no gap" value={conservationEvidence.nongap} />
+            )}
+            {conservationEvidence.naReason !== null && (
+              <EvidenceRow label="Motivo de ausencia" value={readableValue('na_reason', conservationEvidence.naReason)} />
+            )}
+            {conservationProvenanceRows.map((row) => (
+              <EvidenceRow key={`${row.label}-${row.value}`} label={row.label} value={row.value} tone="source" />
+            ))}
           </dl>
         </EvidenceSection>
       )}
@@ -443,21 +536,23 @@ function AnalysisDetails({ analysis, annotation, residue, run, view, artifactDet
         />
       )}
 
-      <EvidenceSection title="Archivos publicados" meta={`${artifacts.length} archivo${artifacts.length === 1 ? '' : 's'}`}>
-        <div class="analysis-artifacts">
-          {artifacts.length ? artifacts.map((artifact) => (
-            <AuthenticatedArtifactLink
-              key={artifact.id}
-              id={artifact.id}
-              artifact={artifact}
-              label={artifact.display_name}
-              filename={artifact.download_filename}
-              formatLabel={artifact.format_label}
-              downloadFormat={artifact.download_format}
-            />
-          )) : <span class="analysis-no-data">No hay artefactos publicados.</span>}
-        </div>
-      </EvidenceSection>
+      {(artifacts.length > 0 || analysis !== 'conservation') && (
+        <EvidenceSection title="Archivos publicados" meta={`${artifacts.length} archivo${artifacts.length === 1 ? '' : 's'}`}>
+          <div class="analysis-artifacts">
+            {artifacts.length > 0 ? artifacts.map((artifact) => (
+              <AuthenticatedArtifactLink
+                key={artifact.id}
+                id={artifact.id}
+                artifact={artifact}
+                label={artifact.display_name}
+                filename={artifact.download_filename}
+                formatLabel={artifact.format_label}
+                downloadFormat={artifact.download_format}
+              />
+            )) : <span class="analysis-no-data">No hay artefactos publicados.</span>}
+          </div>
+        </EvidenceSection>
+      )}
     </>
   );
 }
@@ -478,6 +573,7 @@ export default function ProteinViewer({ proteinId, analysis = 'topology' }) {
   const chainsRef = useRef([]);
   const chainIdRef = useRef('');
   const selectionRef = useRef(EMPTY_SELECTION);
+  const selectionInitializedRef = useRef(false);
   const dragRef = useRef(null);
   const molstarFrameRef = useRef(null);
   const molstarFocusFrameRef = useRef(null);
@@ -496,7 +592,8 @@ export default function ProteinViewer({ proteinId, analysis = 'topology' }) {
   const [wipe, setWipe] = useState('covering');
   const [selection, setSelection] = useState(EMPTY_SELECTION);
   const [annotationsOpen, setAnnotationsOpen] = useState(true);
-  const runId = typeof window === 'undefined' ? '' : new URLSearchParams(window.location.search).get('run') ?? '';
+  const queryRunId = typeof window === 'undefined' ? '' : new URLSearchParams(window.location.search).get('run') ?? '';
+  const runId = queryRunId;
   const [structureRequest, setStructureRequest] = useState(null);
   const structureSourceRef = useRef(null);
   const structureMappingRef = useRef({});
@@ -527,6 +624,10 @@ export default function ProteinViewer({ proteinId, analysis = 'topology' }) {
     let finished = false;
     let reconnectAttempts = 0;
     const maxReconnectAttempts = 3;
+
+    selectionInitializedRef.current = false;
+    selectionRef.current = EMPTY_SELECTION;
+    setSelection(EMPTY_SELECTION);
 
     const applyRun = (runData) => {
       if (!active) return;
@@ -616,7 +717,10 @@ export default function ProteinViewer({ proteinId, analysis = 'topology' }) {
       setStructureRequest(nextStructure);
     };
 
-    Promise.all([getProtein(proteinId), runId ? getRun(runId) : Promise.resolve(null)])
+    Promise.all([
+      getProtein(proteinId),
+      runId ? getRun(runId) : Promise.resolve(null),
+    ])
       .then(async ([proteinData, runData]) => {
         const annotationData = runData ? await getAnnotations(runData.id) : null;
         if (!active) return;
@@ -656,7 +760,7 @@ export default function ProteinViewer({ proteinId, analysis = 'topology' }) {
         if (active) setArtifactDetails({});
       });
     return () => { active = false; };
-  }, [run?.id, artifactSignature, analysis]);
+  }, [analysis, artifactSignature, run?.id]);
 
   const activeChain = chains.find((chain) => chain.id === chainId) ?? chains[0] ?? null;
   const residues = activeChain?.residues ?? [];
@@ -669,10 +773,15 @@ export default function ProteinViewer({ proteinId, analysis = 'topology' }) {
     );
     return mappedPositions.size >= Math.ceil(protein.sequence.length * 0.8);
   }, [activeChain, protein, structureParsed]);
-  const presentationRows = useMemo(
-    () => [...annotations, ...presentationRowsFromArtifacts(artifactDetails, analysis)],
-    [analysis, annotations, artifactDetails],
-  );
+  const presentationRows = useMemo(() => {
+    const artifactRows = presentationRowsFromArtifacts(artifactDetails, analysis);
+    // Conservation annotations are the stage's published API result. The
+    // per-residue artifact adds coverage and optional evidence, but must not
+    // overwrite a value already published in the annotation row.
+    return analysis === 'conservation'
+      ? [...artifactRows, ...annotations]
+      : [...annotations, ...artifactRows];
+  }, [analysis, annotations, artifactDetails]);
   const annotationByPosition = useMemo(() => {
     return mergeAnnotationRows(presentationRows);
   }, [presentationRows]);
@@ -692,10 +801,12 @@ export default function ProteinViewer({ proteinId, analysis = 'topology' }) {
   const activeAnnotation = activeResidue ? annotationForResidue(activeResidue, annotationByPosition) : null;
   const activeMeasurement = measurementForMode(mode, activeAnnotation?.values)?.value ?? null;
   const fieldAvailable = presentationRows.some((row) => publishedModeValue(mode, row?.values) !== null);
+  const rate4siteAvailable = analysis === 'conservation'
+    && presentationRows.some((row) => publishedConservationField(row?.values, 'rate4site_score') !== null);
 
   useEffect(() => {
     const textualFallbackAvailable = !structureParsed && (viewerState === 'unavailable' || viewerState === 'error');
-    if (selection.active !== null || (!mappingValid && !textualFallbackAvailable) || !residues.length) return;
+    if (selection.active !== null || selectionInitializedRef.current || (!mappingValid && !textualFallbackAvailable) || !residues.length) return;
     const preferredPosition = analysis === 'ddg' ? run?.requested_variants?.[0]?.aa_position : null;
     let index = preferredPosition == null ? -1 : residues.findIndex((residue) => (residue.aaPosition ?? residue.canonicalPosition) === preferredPosition);
     if (index < 0) {
@@ -705,6 +816,7 @@ export default function ProteinViewer({ proteinId, analysis = 'topology' }) {
     }
     if (index < 0) return;
     const next = { lo: index, hi: index, active: index };
+    selectionInitializedRef.current = true;
     selectionRef.current = next;
     setSelection(next);
   }, [analysis, annotationByPosition, mappingValid, mode, residues, run, selection.active, structureParsed, viewerState]);
@@ -788,6 +900,12 @@ export default function ProteinViewer({ proteinId, analysis = 'topology' }) {
         });
         viewerRef.current = viewer;
         await viewer.loadStructureFromUrl(structureObjectUrl, structureRequest.format, false, { label: structureRequest.label });
+        const canvas3d = viewer.plugin.canvas3d;
+        const boundingSphere = canvas3d?.boundingSphereVisible ?? canvas3d?.boundingSphere;
+        canvas3d?.requestResize?.();
+        if (canvas3d?.camera && boundingSphere?.radius > 0) {
+          canvas3d.camera.focus(boundingSphere.center, boundingSphere.radius * 0.8, CAMERA_RESET_DURATION_MS);
+        }
         const loaded = viewer.plugin.managers.structure.hierarchy.current.structures[0]?.cell?.obj?.data ?? null;
         structureRef.current = loaded;
         if (loaded) {
@@ -848,7 +966,7 @@ export default function ProteinViewer({ proteinId, analysis = 'topology' }) {
             setChainId(chain.id);
           }
           const index = chain.residues.findIndex((residue) => residue.authSeqId === picked.authSeqId && (residue.insCode || '') === picked.insCode);
-          if (index >= 0) selectSingle(index, true);
+          if (index >= 0) selectSingle(index);
         });
         if (!disposed) setViewerState('ready');
       } catch (viewerErrorValue) {
@@ -872,7 +990,7 @@ export default function ProteinViewer({ proteinId, analysis = 'topology' }) {
       structureRef.current = null;
       residueLociRef.current = new Map();
       rangeLociRef.current = new Map();
-      if (structureObjectUrl) URL.revokeObjectURL(structureObjectUrl);
+      if (structureObjectUrl.startsWith('blob:')) URL.revokeObjectURL(structureObjectUrl);
     };
   }, [structureRequest]);
 
@@ -974,7 +1092,7 @@ export default function ProteinViewer({ proteinId, analysis = 'topology' }) {
     });
   };
 
-  const selectSingle = (index, fromCanvas = false) => {
+  const selectSingle = (index) => {
     const previous = selectionRef.current;
     if (previous.active === index && previous.lo === index && previous.hi === index) {
       clearSelection();
@@ -985,7 +1103,7 @@ export default function ProteinViewer({ proteinId, analysis = 'topology' }) {
     molstarFocusFrameRef.current = null;
     selectionRef.current = next;
     setSelection(next);
-    if (!fromCanvas) scheduleMolstar(() => syncMolstar(index, index, true));
+    scheduleMolstar(() => syncMolstar(index, index, true));
     requestAnimationFrame(() => document.querySelector(`[data-sequence-index="${index}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' }));
   };
 
@@ -1047,6 +1165,7 @@ export default function ProteinViewer({ proteinId, analysis = 'topology' }) {
   const chooseChain = (nextChainId) => {
     if (nextChainId === chainId) return;
     setChainId(nextChainId);
+    selectionInitializedRef.current = false;
     selectionRef.current = EMPTY_SELECTION;
     setSelection(EMPTY_SELECTION);
     rangeLociRef.current = new Map();
@@ -1068,16 +1187,14 @@ export default function ProteinViewer({ proteinId, analysis = 'topology' }) {
 
       <div class="viewer-top-stack">
         <div class="viewer-chain-panel">
-          <div class="viewer-chain-title">
-            <span>{activeChain ? `Cadena ${activeChain.id}` : 'Cadenas'}</span>
-            {chains.length > 1 && (
-              <div class="viewer-chain-switch" role="tablist" aria-label="Cadenas">
-                {chains.map((chain) => (
-                  <button key={chain.id} type="button" class={chain.id === activeChain?.id ? 'active' : ''} aria-pressed={chain.id === activeChain?.id} onClick={() => chooseChain(chain.id)}>{chain.id}</button>
-                ))}
-              </div>
-            )}
-          </div>
+          {chains.length > 1 && analysis !== 'conservation' && <div class="viewer-chain-title">
+            <span>Cadenas</span>
+            <div class="viewer-chain-switch" role="tablist" aria-label="Cadenas">
+              {chains.map((chain) => (
+                <button key={chain.id} type="button" class={chain.id === activeChain?.id ? 'active' : ''} aria-pressed={chain.id === activeChain?.id} onClick={() => chooseChain(chain.id)}>{chain.id}</button>
+              ))}
+            </div>
+          </div>}
           <div class="viewer-sequence-scroll" onPointerDown={sequencePointerDown} onPointerMove={sequencePointerMove} onPointerUp={sequencePointerUp} onPointerCancel={sequencePointerCancel}>
             <div class={`viewer-sequence-track ${selection.lo !== null ? 'has-selection' : ''}`}>
               {residues.map((residue, index) => (
@@ -1097,9 +1214,22 @@ export default function ProteinViewer({ proteinId, analysis = 'topology' }) {
 
       </div>
 
+      {mode === 'conservation' && (
+        <div class="viewer-scale-overlay" aria-label="Escala de conservación evolutiva">
+          <ConservationLegend
+            domain={domain}
+            value={activeMeasurement}
+            showRate4SiteReference={rate4siteAvailable}
+          />
+        </div>
+      )}
+
       <aside class={`viewer-annotations ${annotationsOpen ? 'is-expanded' : 'is-collapsed'}`} aria-label={`Evidencia de ${analysisView.title}`}>
         <div class="viewer-annotations-head">
-          <div><span>Análisis</span><h2>{analysisView.title}</h2></div>
+          <div>
+            <span>Análisis</span>
+            <h2>{analysisView.title}</h2>
+          </div>
           <button
             type="button"
             class="annotations-toggle"
@@ -1111,7 +1241,7 @@ export default function ProteinViewer({ proteinId, analysis = 'topology' }) {
           </button>
         </div>
         <div id="viewer-annotations-body" class="viewer-annotations-body" hidden={!annotationsOpen}>
-          <div class="viewer-mode-panel">
+          {mode !== 'conservation' && <div class="viewer-mode-panel">
             <div class={`viewer-mode-info ${categoricalMode ? '' : 'is-continuous'}`}>
               {!fieldAvailable && <span class="viewer-mode-pending">No hay un valor publicado para esta vista.</span>}
               {fieldAvailable && !modeAvailability[mode] && <span class="viewer-mode-pending">Hay datos publicados, pero el modelo no tiene un mapeo estructural válido.</span>}
@@ -1124,7 +1254,7 @@ export default function ProteinViewer({ proteinId, analysis = 'topology' }) {
                 <ContinuousLegend mode={mode} domain={domain} value={activeMeasurement} residueSelected={Boolean(activeResidue)} />
               )}
             </div>
-          </div>
+          </div>}
           <AnalysisDetails analysis={analysis} annotation={activeAnnotation} residue={activeResidue} run={run} view={analysisView} artifactDetails={artifactDetails} />
         </div>
       </aside>

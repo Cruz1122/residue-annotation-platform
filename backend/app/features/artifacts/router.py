@@ -10,6 +10,7 @@ from app.features.artifacts.presentation import (
     XLSX_MEDIA_TYPE,
     artifact_presentation,
     artifact_read_fields,
+    safe_download_media_type,
 )
 from app.features.artifacts.spreadsheet import SpreadsheetExportError, tabular_to_xlsx
 from app.features.artifacts.storage import (
@@ -114,13 +115,17 @@ def download_artifact(
             headers={
                 "Content-Length": str(len(exported)),
                 "Content-Disposition": f'attachment; filename="{presentation.download_filename}"',
+                "Cache-Control": "private, no-store",
+                "X-Content-Type-Options": "nosniff",
             },
         )
     return StreamingResponse(
         store.iter_open(stream),
-        media_type=artifact.media_type,
+        media_type=safe_download_media_type(artifact.media_type),
         headers={
             "Content-Length": str(artifact.size),
             "Content-Disposition": f'attachment; filename="{presentation.download_filename}"',
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
         },
     )

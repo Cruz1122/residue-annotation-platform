@@ -38,3 +38,14 @@ test('normalizes unknown backend names instead of exposing snake case', () => {
     'New Scientific Table',
   );
 });
+
+test('sanitizes artifact download names and derives a safe extension', () => {
+  const artifact = {
+    artifact_type: 'metadata',
+    media_type: 'application/json',
+    download_filename: '../../Resultados\r\n<script>.exe',
+  };
+
+  assert.equal(artifactDownloadFilename(artifact), 'resultados-script.json');
+  assert.doesNotMatch(artifactDownloadFilename(artifact), /[\\/\u0000-\u001f\u007f\"]/);
+});

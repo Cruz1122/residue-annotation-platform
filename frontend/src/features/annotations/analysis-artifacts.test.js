@@ -119,6 +119,29 @@ test('skips oversized and failed detail artifacts without losing valid artifacts
   assert.deepEqual(details, { evolution_per_residue: [{ aa_position: 7, reliable: true }] });
 });
 
+test('conservation metadata is read only from the conservation stage', async () => {
+  const requested = [];
+  const run = {
+    stages: [
+      {
+        id: 'variant_predictors',
+        artifacts: [{ id: 'foreign-metadata', artifact_type: 'metadata', size: 128, media_type: 'application/json' }],
+      },
+      {
+        id: 'evolutionary_conservation',
+        artifacts: [{ id: 'conservation-metadata', artifact_type: 'metadata', size: 128, media_type: 'application/json' }],
+      },
+    ],
+  };
+  const details = await loadAnalysisArtifactDetails(run, 'conservation', async (id) => {
+    requested.push(id);
+    return { text: async () => JSON.stringify({ method: id === 'conservation-metadata' ? 'ConSurf' : 'Predictor' }) };
+  });
+
+  assert.deepEqual(requested, ['conservation-metadata']);
+  assert.deepEqual(details.metadata, [{ method: 'ConSurf' }]);
+});
+
 test('loads conformational ensemble metadata under a stage-specific key', async () => {
   const requested = [];
   const run = {

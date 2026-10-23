@@ -32,14 +32,16 @@ export default function AuthenticatedArtifactLink({
   const [state, setState] = useState<'idle' | 'loading' | 'error'>('idle');
   const [error, setError] = useState('');
   const resolvedArtifact = artifact ?? { id, artifact_type: '', media_type: mediaType ?? '' } as Artifact;
-  const artifactName = filename ?? resolvedArtifact.download_filename ?? artifactDownloadFilename(resolvedArtifact);
-  const displayName = label ?? artifactDisplayName(resolvedArtifact);
-  const displayFormat = formatLabel ?? artifactFormatLabel({
+  const downloadArtifact = {
     ...resolvedArtifact,
     media_type: mediaType ?? resolvedArtifact.media_type,
     download_format: downloadFormat ?? resolvedArtifact.download_format,
-  });
-  const exportFormat = downloadFormat ?? artifactDownloadFormat(resolvedArtifact);
+    download_filename: filename ?? resolvedArtifact.download_filename,
+  };
+  const artifactName = artifactDownloadFilename(downloadArtifact);
+  const displayName = label ?? artifactDisplayName(downloadArtifact);
+  const displayFormat = formatLabel ?? artifactFormatLabel(downloadArtifact);
+  const exportFormat = artifactDownloadFormat(downloadArtifact);
 
   const download = async () => {
     setState('loading');
