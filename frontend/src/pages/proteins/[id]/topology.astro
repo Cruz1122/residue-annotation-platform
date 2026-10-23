@@ -1,7 +1,7 @@
 ---
 import AppLayout from '../../../layouts/AppLayout.astro';
-import ProteinViewer from '@features/annotations/components/viewer/ProteinViewer.jsx';
+import TopologyView from '@features/annotations/components/topology/TopologyView.jsx';
 ---
-<AppLayout title="Topología · Residue Annotation" active="topology" proteinId={Astro.params.id}>
-  <ProteinViewer client:only="preact" proteinId={Astro.params.id} analysis="topology" />
+<AppLayout title="Topología" active="topology" proteinId={Astro.params.id}>
+  <TopologyView client:only="preact" proteinId={Astro.params.id} />
 </AppLayout>

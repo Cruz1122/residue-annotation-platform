@@ -482,7 +482,10 @@ export async function getArtifactBlob(
   artifactId: string,
   exportFormat: 'original' | 'xlsx' = 'original',
 ): Promise<Blob> {
-  const query = exportFormat === 'original' ? '' : `?format=${exportFormat}`;
+  // The artifact endpoint may negotiate a spreadsheet for tabular files when
+  // the format is omitted. Analysis views need the published TSV/CSV bytes so
+  // their parsers must request the original representation explicitly.
+  const query = `?format=${exportFormat}`;
   const response = await fetchResponse(`/artifacts/${encodeURIComponent(artifactId)}/content${query}`);
   return await response.blob();
 }
