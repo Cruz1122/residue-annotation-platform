@@ -1,6 +1,5 @@
 x-worker-common: &worker-common
   init: true
-  restart: unless-stopped
   # The SSH secret bind mount keeps the host file owner/mode. Match its UID
   # explicitly instead of running the worker as root. Use the backend app
   # group as the worker's primary GID so both services can read the shared
@@ -71,7 +70,6 @@ services:
     build:
       context: ./infra/mn5-vpn
     init: true
-    restart: unless-stopped
     # The VPN is the only container allowed to create the PPP tunnel. It gets
     # DAC_READ_SEARCH only because Docker local preserves the host UID on the
     # protected secret bind mount; it cannot write the mounted secret.
@@ -137,7 +135,6 @@ services:
 
   db:
     image: postgres:16-alpine
-    restart: unless-stopped
     environment:
       POSTGRES_DB: residue_annotation
       POSTGRES_USER: residue
@@ -160,7 +157,6 @@ services:
       db:
         condition: service_healthy
     command: ["alembic", "upgrade", "head"]
-    restart: "no"
 
   backend:
     build:
@@ -180,7 +176,6 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
-    restart: unless-stopped
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8742"]
     healthcheck:
       test:
@@ -353,7 +348,6 @@ services:
     depends_on:
       backend:
         condition: service_healthy
-    restart: unless-stopped
 
 volumes:
   residue-postgres-data:

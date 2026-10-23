@@ -470,17 +470,28 @@ export function getStageDefinitions(): Promise<StageDefinition[]> {
   return request<StageDefinition[]>('/stages');
 }
 
-export function getAnnotations(runId: string): Promise<AnnotationResponse> {
-  return request<AnnotationResponse>(`/runs/${encodeURIComponent(runId)}/annotations`);
+export function getAnnotations(runId: string, limit?: number, offset = 0): Promise<AnnotationResponse> {
+  const params = new URLSearchParams();
+  if (limit !== undefined) params.set('limit', String(Math.min(50_000, Math.max(1, Math.trunc(limit)))));
+  if (offset > 0) params.set('offset', String(Math.trunc(offset)));
+  const query = params.toString();
+  return request<AnnotationResponse>(`/runs/${encodeURIComponent(runId)}/annotations${query ? `?${query}` : ''}`);
 }
 
-export async function getArtifactBlob(artifactId: string): Promise<Blob> {
-  const response = await fetchResponse(`/artifacts/${encodeURIComponent(artifactId)}/content`);
+export async function getArtifactBlob(
+  artifactId: string,
+  exportFormat: 'original' | 'xlsx' = 'original',
+): Promise<Blob> {
+  const query = exportFormat === 'original' ? '' : `?format=${exportFormat}`;
+  const response = await fetchResponse(`/artifacts/${encodeURIComponent(artifactId)}/content${query}`);
   return await response.blob();
 }
 
-export async function getArtifactObjectUrl(artifactId: string): Promise<string> {
-  return URL.createObjectURL(await getArtifactBlob(artifactId));
+export async function getArtifactObjectUrl(
+  artifactId: string,
+  exportFormat: 'original' | 'xlsx' = 'original',
+): Promise<string> {
+  return URL.createObjectURL(await getArtifactBlob(artifactId, exportFormat));
 }
 
 export async function getUploadBlob(uploadId: string): Promise<Blob> {

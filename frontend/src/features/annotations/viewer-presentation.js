@@ -210,6 +210,8 @@ const VALUE_LABELS = {
   'LDL-receptor class A': 'Receptor LDL clase A', 'EGF-like': 'Tipo EGF', 'Beta-propeller': 'Propela β', 'C-terminal region': 'Región C-terminal',
   true: 'Sí', false: 'No', exact: 'Exacto', not_in_reference: 'Fuera de la referencia',
   ok: 'Válido', success: 'Completado', failed: 'Fallido', skipped: 'Omitido', NA: 'Sin dato',
+  tmbed_only: 'Solo TMbed', uniprot_only: 'Solo UniProt', concordant: 'Concordante',
+  discordant: 'Discordante', both: 'Concordante',
   curated_region: 'Región funcional curada', functional_interest: 'Región de interés funcional',
   highlighted_segment: 'Segmento funcional destacado', annotation: 'Anotación UniProt',
 };

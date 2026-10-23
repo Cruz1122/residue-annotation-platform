@@ -1,38 +1,39 @@
-@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap');
-
 :root {
-  --font: "IBM Plex Sans", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --ink: #111318;
-  --muted: #747a83;
-  --line: rgba(17, 19, 24, .14);
-  --line-strong: rgba(17, 19, 24, .25);
-  --panel: rgba(252, 252, 251, .96);
-  --canvas: #f3f4f4;
-  --surface: #f7f8f8;
-  --green: #51ab75;
-  --green-dark: #2f8050;
-  --green-soft: rgba(81, 171, 117, .10);
-  --danger: #d62828;
-  --nav-w: 204px;
+  color-scheme: light;
+  --font: Inter, "Helvetica Neue", Arial, system-ui, sans-serif;
+  --font-mono: "Noto Sans Mono", "SFMono-Regular", Consolas, monospace;
+  --ink: #172126;
+  --muted: #637078;
+  --line: #d9dfe1;
+  --line-strong: #bcc6c9;
+  --panel: #ffffff;
+  --canvas: #edf1f1;
+  --surface: #f7f9f8;
+  --green: #2e8877;
+  --green-dark: #176858;
+  --green-soft: #e7f2ef;
+  --danger: #b4232f;
+  --danger-soft: #f9ebed;
+  --warning: #8a6216;
+  --warning-soft: #f8f2e5;
+  --nav-w: 216px;
   --ann-w: 392px;
   --gap: 16px;
-  --radius: 3px;
+  --radius: 6px;
+  --shadow-sm: 0 1px 2px rgba(17, 33, 38, .05);
+  --app-inset: 28px;
 }
 
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 html { min-width: 320px; background: var(--canvas); }
-html, body { margin: 0; min-height: 100%; color: var(--ink); font-family: var(--font); }
+html, body { margin: 0; min-height: 100%; color: var(--ink); font-family: var(--font); font-size: 14px; line-height: 1.5; }
 body { background: var(--canvas); }
-button, input { font: inherit; color: inherit; }
+button, input, select, textarea { font: inherit; color: inherit; }
 a { color: inherit; }
 button { -webkit-tap-highlight-color: transparent; }
-
-.api-health { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: 10px; font-weight: 700; white-space: nowrap; }
-.api-health-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
-.api-health-connected { color: var(--green-dark); }
-.api-health-connected .api-health-dot { background: var(--green); }
-.api-health-unavailable { color: var(--danger); }
-.api-health-unavailable .api-health-dot { background: var(--danger); }
+button, a, input, select, textarea { outline-color: var(--green); }
+:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
 
 .app-page {
   min-height: 100svh;
@@ -46,11 +47,12 @@ button { -webkit-tap-highlight-color: transparent; }
 
 .page-panel {
   width: 100%;
-  min-height: calc(100svh - 28px);
+  min-height: calc(100svh - var(--app-inset));
   border: 1px solid var(--line-strong);
   border-radius: var(--radius);
   background: var(--surface);
   overflow: hidden;
+  box-shadow: var(--shadow-sm);
 }
 
 .sr-only {
@@ -72,13 +74,9 @@ button { -webkit-tap-highlight-color: transparent; }
 }
 
 @media (max-width: 760px) {
-  :root { --nav-w: 156px; --gap: 10px; }
-  .page-with-sidebar { padding: 10px 10px 10px calc(10px + var(--nav-w) + var(--gap)); }
-  .page-panel { min-height: calc(100svh - 20px); }
-}
-
-@media (max-width: 560px) {
-  :root { --nav-w: 136px; }
+  :root { --gap: 10px; --app-inset: 90px; }
+  .page-with-sidebar { padding: 80px 10px 10px; }
+  .page-panel { min-height: calc(100svh - var(--app-inset)); }
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks';
-import LucideIcon from '@shared/components/icons/LucideIcon.jsx';
+import PackIcon from '@shared/components/icons/PackIcon.jsx';
 import { withViewTransition } from '@shared/lib/transition.js';
 import { StatusNotice } from '@features/auth/components/AuthFrame';
 import { ApiError, createProtein, createRun, uploadInput } from '@shared/api/client';
@@ -124,6 +124,7 @@ function UploadCard({ kind, label, icon, accept, state, onFile }) {
   const inputRef = useRef(null);
   const loading = state.status === 'loading';
   const done = state.status === 'done';
+  const formatHint = kind === 'pdb' ? 'PDB, CIF o mmCIF' : 'FASTA, FA o FAA';
 
   const openPicker = () => {
     if (!loading) inputRef.current?.click();
@@ -155,13 +156,16 @@ function UploadCard({ kind, label, icon, accept, state, onFile }) {
           handleFile(event.dataTransfer?.files?.[0]);
         }}
       >
-        <span class="upload-icon"><LucideIcon name={icon} /></span>
-        <span class="upload-hover-label">Adjunta tu {label}</span>
+        <span class="upload-icon"><PackIcon name={done ? 'circle-check' : icon} kind="ui" /></span>
+        <span class="upload-copy">
+          <strong>{label}</strong>
+          <span>{done ? state.name : 'Seleccionar o arrastrar archivo'}</span>
+          <small>{done ? 'Archivo listo' : formatHint}</small>
+        </span>
         <span class="upload-progress" aria-hidden="true">
           <span class="upload-progress-fill" style={{ width: `${state.progress}%` }} />
         </span>
       </button>
-      <div class="upload-label">{label}</div>
       <input
         ref={inputRef}
         type="file"
@@ -535,11 +539,20 @@ export default function OnboardingFlow() {
 
   return (
     <main class="auth-page onboarding-page" aria-label="Carga de proteína">
-      <h1 class={`onboarding-title${step === 'variants' ? ' is-variants' : ''}${step === 'structure' ? ' structure-choice__title' : ''}`}>
-        {step === 'upload' && '¡Ingresa tu proteína!'}
-        {step === 'structure' && '¿Deseas volver a generar una estructura para tu proteína?'}
-        {step === 'variants' && 'Seleccionar variantes'}
-      </h1>
+      <header class="onboarding-head">
+        <a class="onboarding-back" href="/proteins/">← Proteínas</a>
+        <span class="onboarding-kicker">Nueva corrida</span>
+        <h1 class={`onboarding-title${step === 'variants' ? ' is-variants' : ''}${step === 'structure' ? ' structure-choice__title' : ''}`}>
+          {step === 'upload' && 'Datos de entrada'}
+          {step === 'structure' && 'Fuente estructural'}
+          {step === 'variants' && 'Variantes'}
+        </h1>
+        <p class="onboarding-lede">
+          {step === 'upload' && 'Adjunta una secuencia FASTA, una estructura experimental o ambas.'}
+          {step === 'structure' && 'Elige la estructura que se utilizará en las etapas estructurales.'}
+          {step === 'variants' && 'Selecciona únicamente las sustituciones que deseas evaluar.'}
+        </p>
+      </header>
       {step === 'upload' ? (
         <>
           <div class="upload-options">
@@ -548,13 +561,13 @@ export default function OnboardingFlow() {
           </div>
           {error && <StatusNotice kind="error">{error}</StatusNotice>}
           <button class="auth-button onboarding-action" type="button" disabled={!ready || upload.pdb.status === 'loading'} onClick={showVariants}>
-            ¡Estoy listo!
+            Continuar
           </button>
         </>
       ) : step === 'structure' ? (
         <div class="structure-choice__actions">
-          <button class="auth-button structure-choice__button" type="button" onClick={() => chooseStructure('provided_pdb')}>No, usar mi PDB adjunto</button>
-          <button class="auth-button structure-choice__button" type="button" onClick={() => chooseStructure('alphafold3')}>Sí, regenerar estructura con AF3</button>
+          <button class="auth-button structure-choice__button" type="button" onClick={() => chooseStructure('provided_pdb')}>Usar estructura adjunta</button>
+          <button class="auth-button structure-choice__button" type="button" onClick={() => chooseStructure('alphafold3')}>Generar con AlphaFold 3</button>
         </div>
       ) : (
         <>

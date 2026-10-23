@@ -2,7 +2,7 @@ const MAX_INLINE_ARTIFACT_BYTES = 2 * 1024 * 1024;
 
 export const ANALYSIS_DETAIL_ARTIFACTS = {
   topology: ['tmbed_per_residue', 'tm_segments', 'span_metadata'],
-  frustration: ['frustratometer_conformers', 'frustratometer_per_residue', 'frustration_per_residue', 'frustraiseq_per_residue', 'metadata', 'closure'],
+  frustration: ['frustratometer_conformers', 'frustratometer_per_residue', 'frustration_per_residue', 'frustraiseq_per_residue', 'metadata', 'closure', 'frames_index'],
   conservation: ['evolution_per_residue', 'metadata'],
   functional: ['ldlc_statin_evidence', 'functional_features_long', 'summary'],
   ddg: ['variant_annotations', 'provenance', 'rosetta_metadata'],
@@ -66,11 +66,20 @@ export function parseAnalysisArtifact(text, mediaType = '') {
 export async function loadAnalysisArtifactDetails(run, analysis, getBlob) {
   const wanted = new Set(ANALYSIS_DETAIL_ARTIFACTS[analysis] ?? []);
   const artifacts = (run?.stages ?? [])
-    .flatMap((stage) => stage.artifacts ?? [])
-    .filter((artifact) => wanted.has(artifact.artifact_type) && artifact.size <= MAX_INLINE_ARTIFACT_BYTES);
-  const settled = await Promise.allSettled(artifacts.map(async (artifact) => {
+    .flatMap((stage) => (stage.artifacts ?? []).map((artifact) => ({ stage, artifact })))
+    .filter(({ stage, artifact }) => {
+      const isConformationalEvidence = analysis === 'frustration'
+        && stage.id === 'conformational_ensemble'
+        && ['metadata', 'frames_index'].includes(artifact.artifact_type);
+      return (wanted.has(artifact.artifact_type) || isConformationalEvidence)
+        && artifact.size <= MAX_INLINE_ARTIFACT_BYTES;
+    });
+  const settled = await Promise.allSettled(artifacts.map(async ({ stage, artifact }) => {
     const blob = await getBlob(artifact.id);
-    return [artifact.artifact_type, parseAnalysisArtifact(await blob.text(), artifact.media_type)];
+    const type = analysis === 'frustration' && stage.id === 'conformational_ensemble'
+      ? `conformational_ensemble_${artifact.artifact_type}`
+      : artifact.artifact_type;
+    return [type, parseAnalysisArtifact(await blob.text(), artifact.media_type)];
   }));
   const details = {};
   for (const result of settled) {

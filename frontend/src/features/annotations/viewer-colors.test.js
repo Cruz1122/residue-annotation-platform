@@ -12,6 +12,7 @@ import {
   normalizeValue,
   publishedModeValue,
   relativeDomain,
+  readableValue,
   residueDisplayColor,
   topologyClass,
   VISUALIZATION_MODES,
@@ -66,6 +67,12 @@ test('categorical modes expose published values to the shared viewer shell', () 
     value: 'curated_region',
   });
   assert.equal(publishedModeValue('topology', { tmbed_topology: 'NA' }), null);
+});
+
+test('scientific evidence values do not expose backend agreement tokens', () => {
+  assert.equal(readableValue('topology_agreement', 'tmbed_only'), 'Solo TMbed');
+  assert.equal(readableValue('topology_agreement', 'uniprot_only'), 'Solo UniProt');
+  assert.equal(readableValue('topology_agreement', 'concordant'), 'Concordante');
 });
 
 test('functional colors come from published UniProt feature classes', () => {

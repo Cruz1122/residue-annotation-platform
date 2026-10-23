@@ -11,7 +11,7 @@ Los puertos de desarrollo definidos para este proyecto son deliberadamente:
 - frontend: `4742`
 - backend: `8742`
 
-`compose.yml` soporta dos perfiles de ejecución HPC; se debe activar uno según dónde corre el stack. `vpn` es el modo de workstation: levanta la VPN, espera el endpoint SSH de MareNostrum y usa SSH/SCP para transferir y enviar automáticamente las runs validadas a Slurm. `mn5` es el modo directo: se ejecuta dentro de MareNostrum, no levanta VPN ni usa SSH y llama al Slurm local sobre el GPFS montado. PostgreSQL, migraciones, API y frontend son comunes a ambos perfiles. Todos los servicios persistentes usan `restart: unless-stopped`, por lo que el stack vuelve a levantarse cuando el daemon de Docker arranca de nuevo.
+`compose.yml` soporta dos perfiles de ejecución HPC; se debe activar uno según dónde corre el stack. `vpn` es el modo de workstation: levanta la VPN, espera el endpoint SSH de MareNostrum y usa SSH/SCP para transferir y enviar automáticamente las runs validadas a Slurm. `mn5` es el modo directo: se ejecuta dentro de MareNostrum, no levanta VPN ni usa SSH y llama al Slurm local sobre el GPFS montado. PostgreSQL, migraciones, API y frontend son comunes a ambos perfiles. El Compose no configura una política de reinicio automático: el stack sólo se inicia cuando ejecutas explícitamente `docker compose up`.
 
 ```text
 residue-annotation-platform/
@@ -73,7 +73,7 @@ la migración documentada de permisos del volumen `residue-artifacts` en
 worker no-root. La migración preserva los contenidos y no es necesaria para un
 volumen nuevo.
 
-Para el arranque automático, configura una sola vez en `.env` los paths host de los secretos y del `known_hosts` verificado. No pongas passwords en `.env`, en argumentos de proceso ni en el repositorio:
+Para arrancar manualmente el perfil VPN, configura una sola vez en `.env` los paths host de los secretos y del `known_hosts` verificado. No pongas passwords en `.env`, en argumentos de proceso ni en el repositorio:
 
 ```bash
 COMPOSE_PROFILES=vpn \

@@ -1,7 +1,7 @@
 ---
 import AppLayout from '../../../layouts/AppLayout.astro';
-import ProteinViewer from '@features/annotations/components/viewer/ProteinViewer.jsx';
+import FrustrationComparison from '@features/annotations/components/frustration/FrustrationComparison.jsx';
 ---
-<AppLayout title="Frustración por residuo · Residue Annotation" active="frustration" proteinId={Astro.params.id}>
-  <ProteinViewer client:only="preact" proteinId={Astro.params.id} analysis="frustration" />
+<AppLayout title="Frustración" active="frustration" proteinId={Astro.params.id}>
+  <FrustrationComparison client:only="preact" proteinId={Astro.params.id} />
 </AppLayout>

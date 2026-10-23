@@ -103,8 +103,39 @@ test('retryable preparation stays visible as pending instead of terminal failure
     stages: [],
   });
   assert.equal(phase.label, 'Preparación pendiente');
-  assert.equal(phase.detail, 'Falta el caché externo.');
-  assert.equal(phase.tone, 'failed');
+  assert.equal(phase.detail, 'La ejecución no se completó. El equipo técnico puede consultar el diagnóstico interno.');
+  assert.equal(phase.tone, 'warning');
+  assert.equal(phase.presentation, 'overlay');
+});
+
+test('the shared phase distinguishes submission from the Slurm queue', () => {
+  const submitting = runPhase({
+    status: 'pending',
+    stages: [{ status: 'queued', slurm_job_id: null }],
+  });
+  const queued = runPhase({
+    status: 'pending',
+    stages: [{ status: 'queued', slurm_job_id: '184205' }],
+  });
+
+  assert.deepEqual(submitting, {
+    label: 'Envío al ejecutor',
+    detail: 'El worker está confirmando la ejecución del stage.',
+    tone: 'waiting',
+    presentation: 'overlay',
+  });
+  assert.deepEqual(queued, {
+    label: 'Esperando recursos de cómputo',
+    detail: 'El job está en cola de Slurm.',
+    tone: 'waiting',
+    presentation: 'overlay',
+  });
+});
+
+test('active and terminal phases keep the pipeline visible', () => {
+  assert.equal(runPhase({ status: 'running', stages: [] }).presentation, 'banner');
+  assert.equal(runPhase({ status: 'success', stages: [] }).presentation, 'banner');
+  assert.equal(runPhase({ status: 'failed', error_message: 'worker failed', stages: [] }).presentation, 'banner');
 });
 
 test('wait time is normalized to seconds, minutes, and hours', async () => {

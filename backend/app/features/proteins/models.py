@@ -22,9 +22,10 @@ def new_id() -> str:
 
 class Protein(Base):
     __tablename__ = "proteins"
+    __table_args__ = (UniqueConstraint("sequence_sha256", name="uq_proteins_sequence_sha256"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    sequence_sha256: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    sequence_sha256: Mapped[str] = mapped_column(String(64), index=True)
     sequence: Mapped[str] = mapped_column(Text)
     length: Mapped[int] = mapped_column(Integer)
     owner_id: Mapped[str] = mapped_column(String(128), index=True)

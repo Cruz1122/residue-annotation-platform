@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'preact/hooks';
 import { getCurrentUser, listAuthUsers, updateUserRole } from '@shared/api/client';
 import { clearAuthSession, type AuthUser, type UserRole } from '@shared/auth/session';
-import LucideIcon from '@shared/components/icons/LucideIcon.jsx';
+import PackIcon from '@shared/components/icons/PackIcon.jsx';
 import { AuthFrame, LoadingState, StatusNotice } from './AuthFrame';
 import { authErrorMessage } from '../lib/ui';
 
@@ -96,7 +96,7 @@ export default function UsersAdminView() {
           <div class="auth-admin-toolbar">
             <p>{users.length} cuenta{users.length === 1 ? '' : 's'} registrada{users.length === 1 ? '' : 's'}</p>
             <a class="auth-button auth-button-secondary auth-button-compact" href="/proteins/">
-              <LucideIcon name="arrow-left" />
+              <PackIcon name="arrow-left" kind="ui" />
               Volver
             </a>
           </div>
@@ -139,7 +139,7 @@ export default function UsersAdminView() {
                             <span>Cambiar a <strong>{roleLabel(pending.role)}</strong> e invalidar sus sesiones.</span>
                             <button class="auth-button auth-button-secondary auth-button-compact" type="button" disabled={Boolean(savingId)} onClick={() => setPending(null)}>Cancelar</button>
                             <button class="auth-button auth-button-compact" type="button" disabled={Boolean(savingId)} onClick={confirmChange}>
-                              <LucideIcon name={savingId ? 'loader-circle' : 'circle-check'} className={savingId ? 'auth-spin' : ''} />
+                              <PackIcon name={savingId ? 'loader-circle' : 'circle-check'} kind="ui" className={savingId ? 'auth-spin' : ''} />
                               {savingId ? 'Guardando…' : 'Confirmar'}
                             </button>
                           </div>

@@ -1,6 +1,8 @@
-import LucideIcon from '@shared/components/icons/LucideIcon.jsx';
-import EmptyState from '@shared/components/feedback/EmptyState.jsx';
+import PackIcon from '@shared/components/icons/PackIcon.jsx';
+import StatePanel from '@shared/components/feedback/StatePanel.jsx';
+import AuthenticatedArtifactLink from '@features/artifacts/components/AuthenticatedArtifactLink.tsx';
 import { runFailureMessage } from '@shared/lib/error-presentation';
+import { proteinDisplayName } from '@features/proteins/protein-display.js';
 import '@features/proteins/styles/library.css';
 
 const STATUS_TEXT = {
@@ -12,10 +14,6 @@ const STATUS_TEXT = {
   cancelled: 'Cancelada',
 };
 
-function proteinLabel(protein) {
-  return protein?.aliases?.[0]?.identifier || protein?.id || 'Proteína no disponible';
-}
-
 function formatDate(value) {
   if (!value) return 'Fecha no disponible';
   const date = new Date(value);
@@ -26,17 +24,7 @@ function formatDate(value) {
   }).format(date);
 }
 
-function stageCounts(stages) {
-  return stages.reduce((counts, stage) => {
-    if (stage.status === 'success') counts.success += 1;
-    if (stage.status === 'reused') counts.reused += 1;
-    if (stage.status === 'failed') counts.failed += 1;
-    if (stage.status === 'skipped') counts.skipped += 1;
-    return counts;
-  }, { success: 0, reused: 0, failed: 0, skipped: 0 });
-}
-
-export default function RunHistory({ runs, proteins, state }) {
+export default function RunHistory({ runs, proteins }) {
   const proteinsById = new Map(proteins.map((protein) => [protein.id, protein]));
 
   return (
@@ -44,53 +32,61 @@ export default function RunHistory({ runs, proteins, state }) {
       <header class="run-history-head">
         <div>
           <h2>Historial de corridas</h2>
-          <p>Cada ejecución conserva su configuración, estado y resultados por separado.</p>
         </div>
-        {state === 'ready' && <span class="run-history-count">{runs.length}</span>}
+        <span class="run-history-count">{runs.length}</span>
       </header>
-      {state === 'loading' && <div class="library-empty">Cargando historial autorizado…</div>}
-      {state === 'error' && <div class="library-empty" role="alert">No se pudo cargar el historial.</div>}
-      {state === 'ready' && runs.length === 0 && (
-        <EmptyState
-          className="empty-state-compact"
+      {runs.length === 0 && (
+        <StatePanel
+          kind="empty"
+          compact
           icon="workflow"
-          label="Historial vacío"
+          eyebrow="Historial vacío"
           title="Todavía no tienes corridas registradas."
-          copy="Cuando inicies un análisis, sus ejecuciones aparecerán aquí."
+          description="Cuando inicies un análisis, sus ejecuciones aparecerán aquí."
         />
       )}
-      {state === 'ready' && runs.length > 0 && (
+      {runs.length > 0 && (
         <div class="run-history-list">
           {runs.map((run) => {
             const protein = proteinsById.get(run.protein_id);
-            const counts = stageCounts(run.stages ?? []);
             const configuration = run.configuration;
+            const variants = configuration?.normalized_variants ?? run.requested_variants ?? [];
             return (
               <article class="run-history-card" key={run.id}>
                 <div class="run-history-main">
                   <div class="run-history-title">
                     <div>
-                      <strong>{proteinLabel(protein)}</strong>
+                      <strong>{proteinDisplayName(protein)}</strong>
                       <span>{formatDate(run.created_at)}</span>
                     </div>
                     <span class={`run-history-status run-status-${run.status}`}>
                       <i />{STATUS_TEXT[run.status] ?? run.status}
                     </span>
                   </div>
-                  <code class="run-history-id">{run.id}</code>
                   <div class="run-history-meta">
-                    <span><LucideIcon name="workflow" />{run.stages?.length ?? 0} stages</span>
-                    <span><LucideIcon name="play" />{counts.success} ejecutados</span>
-                    <span><LucideIcon name="copy" />{counts.reused} reutilizados</span>
-                    <span><LucideIcon name="triangle-alert" />{counts.failed} fallidos</span>
-                    {configuration && <span><LucideIcon name="dna" />{configuration.normalized_variants?.length ?? 0} variantes · {configuration.structure_source}</span>}
+                    {variants.length > 0 && <span><PackIcon name="dna" kind="ui" />{variants.map((variant) => `${variant.aa_ref}${variant.aa_position}${variant.aa_alt}`).join(' · ')}</span>}
+                    {configuration?.structure_source && <span><PackIcon name="box" kind="ui" />{configuration.structure_source === 'alphafold3' ? 'AlphaFold 3' : 'Estructura adjunta'}</span>}
                   </div>
                   {run.error_message && <p class="run-history-error" role="alert">{runFailureMessage(run.error_code, run.error_message)}</p>}
+                  {run.run_artifacts?.length > 0 && (
+                    <div class="run-history-exports" aria-label="Exportaciones publicadas">
+                      {run.run_artifacts.filter((artifact) => ['final_annotations', 'selected_variants'].includes(artifact.artifact_type)).map((artifact) => (
+                        <AuthenticatedArtifactLink
+                          key={artifact.id}
+                          id={artifact.id}
+                          artifact={artifact}
+                          label={artifact.display_name}
+                          filename={artifact.download_filename}
+                          formatLabel={artifact.format_label}
+                          downloadFormat={artifact.download_format}
+                        />
+                      ))}
+                    </div>
+                  )}
                 </div>
-                <nav class="run-history-actions" aria-label={`Abrir la corrida ${run.id}`}>
-                  <a href={`/proteins/${encodeURIComponent(run.protein_id)}/progress/?run=${encodeURIComponent(run.id)}`}>Progreso</a>
-                  <a href={`/proteins/${encodeURIComponent(run.protein_id)}/info/?run=${encodeURIComponent(run.id)}`}>Información</a>
-                  <a href={`/proteins/${encodeURIComponent(run.protein_id)}/topology/?run=${encodeURIComponent(run.id)}`}>Explorar resultados</a>
+                <nav class="run-history-actions" aria-label={`Acciones de la corrida de ${proteinDisplayName(protein)}`}>
+                  <a href={`/proteins/${encodeURIComponent(run.protein_id)}/topology/?run=${encodeURIComponent(run.id)}`}>Abrir resultados</a>
+                  <a href={`/proteins/${encodeURIComponent(run.protein_id)}/progress/?run=${encodeURIComponent(run.id)}`}>Ver progreso</a>
                 </nav>
               </article>
             );

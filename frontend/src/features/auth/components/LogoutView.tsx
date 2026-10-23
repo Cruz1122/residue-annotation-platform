@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { logout } from '@shared/api/client';
-import LucideIcon from '@shared/components/icons/LucideIcon.jsx';
+import PackIcon from '@shared/components/icons/PackIcon.jsx';
 import { AuthFrame, LoadingState, StatusNotice } from './AuthFrame';
 
 type LogoutState = 'closing' | 'closed';
@@ -24,7 +24,7 @@ export default function LogoutView() {
         <div class="auth-success">
           <StatusNotice kind="success">La sesión se cerró en este navegador.</StatusNotice>
           <a class="auth-button auth-button-block" href="/auth/login/">
-            <LucideIcon name="log-in" />
+            <PackIcon name="log-in" kind="ui" />
             Iniciar sesión
           </a>
         </div>

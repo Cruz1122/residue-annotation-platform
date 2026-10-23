@@ -1,6 +1,6 @@
 import { useState } from 'preact/hooks';
 import { changePassword } from '@shared/api/client';
-import LucideIcon from '@shared/components/icons/LucideIcon.jsx';
+import PackIcon from '@shared/components/icons/PackIcon.jsx';
 import { AuthFrame, StatusNotice } from './AuthFrame';
 import { PasswordField } from './PasswordField';
 import { authErrorMessage, passwordValidation } from '../lib/ui';
@@ -85,7 +85,7 @@ export default function ChangePasswordView() {
         />
         {error && <StatusNotice kind="error">{error}</StatusNotice>}
         <button class="auth-button auth-button-block" type="submit" disabled={submitting}>
-          <LucideIcon name={submitting ? 'loader-circle' : 'key-round'} className={submitting ? 'auth-spin' : ''} />
+          <PackIcon name={submitting ? 'loader-circle' : 'key-round'} kind="ui" className={submitting ? 'auth-spin' : ''} />
           {submitting ? 'Actualizando…' : 'Actualizar contraseña'}
         </button>
       </form>

@@ -8,12 +8,35 @@ from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import op
-from app.features.stages.registry import STAGE_DEFINITIONS
 
 revision = "0001_initial"
 down_revision: str | None = None
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
+
+# This is deliberately frozen. Alembic revisions must describe the schema at
+# their own point in history, not whatever the live stage registry contains
+# years later. ClinVar was added by 0011_clinvar_annotation.
+INITIAL_ANNOTATION_STAGE_IDS = (
+    "protein_identity",
+    "variant_predictors",
+    "pharmacogenomics",
+    "uniprot_features",
+    "conformational_ensemble",
+    "sequence_frustration",
+    "evolutionary_conservation",
+    "functional_region_evidence",
+    "experimental_variant_evidence",
+    "membrane_topology",
+    "ensemble_frustration",
+    "structure_modeling",
+    "structural_regime",
+    "protein_relaxation_energy",
+    "physicochemical_context",
+    "variant_ddg",
+    "structural_frustration",
+    "structural_contacts",
+)
 
 
 def upgrade() -> None:
@@ -144,8 +167,8 @@ def upgrade() -> None:
     )
     op.create_index("ix_artifacts_stage_result_id", "artifacts", ["stage_result_id"])
 
-    for definition in STAGE_DEFINITIONS:
-        table_name = f"annotation_{definition.id}"
+    for stage_id in INITIAL_ANNOTATION_STAGE_IDS:
+        table_name = f"annotation_{stage_id}"
         op.create_table(
             table_name,
             sa.Column("id", sa.String(36), primary_key=True),
@@ -166,10 +189,13 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    for definition in reversed(STAGE_DEFINITIONS):
-        table_name = f"annotation_{definition.id}"
-        op.drop_index(f"ix_{table_name}_stage_result_id", table_name=table_name)
-        op.drop_table(table_name)
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    for stage_id in reversed(INITIAL_ANNOTATION_STAGE_IDS):
+        table_name = f"annotation_{stage_id}"
+        if inspector.has_table(table_name):
+            op.drop_index(f"ix_{table_name}_stage_result_id", table_name=table_name)
+            op.drop_table(table_name)
     op.drop_index("ix_artifacts_stage_result_id", table_name="artifacts")
     op.drop_table("artifacts")
     for index_name in (

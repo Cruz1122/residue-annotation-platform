@@ -86,6 +86,37 @@ STAGE_DEFINITIONS: tuple[StageDefinition, ...] = (
         description="Build the canonical sequence and identity evidence scaffold.",
     ),
     StageDefinition(
+        "clinvar",
+        "P21",
+        "Evidencia ClinVar (SNV germinal, GRCh38)",
+        ("protein_identity",),
+        optional=True,
+        cpu=2,
+        required_annotations=("gene",),
+        columns=(
+            "clinvar_n_variants",
+            "clinvar_n_pathogenic_or_likely",
+            "clinvar_n_benign_or_likely",
+            "clinvar_n_vus",
+            "clinvar_n_conflicting",
+            "clinvar_status",
+        ),
+        consumed_artifacts=(("protein_identity", "canonical_fasta"),),
+        produced_artifacts=(
+            "clinvar_variants",
+            "clinvar_per_position",
+            "clinvar_metadata",
+            "genomic_mapping",
+            "genomic_substitutions",
+        ),
+        technical_requirements=("clinvar_local_grch38_vcf", "genomic_mapping"),
+        stage_version="clinvar-germline-snv-grch38-v1",
+        description=(
+            "Link exact GRCh38 missense SNVs to canonical residues while preserving "
+            "ClinVar classifications without inferring residue-level pathogenicity."
+        ),
+    ),
+    StageDefinition(
         "variant_predictors",
         "P16",
         "Predictores de variantes",
@@ -359,7 +390,11 @@ STAGE_DEFINITIONS: tuple[StageDefinition, ...] = (
             "rosetta_metadata",
             "variant_set",
         ),
-        technical_requirements=("slurm:SLURM_JOB_ID",),
+        # The remote contract does not repeat the launcher capability, but the
+        # registered Rosetta path runs inside an allocated Slurm step. Keep
+        # the local execution gate explicit so a normal run cannot claim that
+        # DDG is executable on a workstation without the worker capability.
+        technical_requirements=("slurm:SLURM_JOB_ID", "command:srun"),
         description="Evaluate requested substitutions against the selected reference structure.",
     ),
     StageDefinition(
@@ -426,8 +461,10 @@ STAGE_BY_ID = {stage.id: stage for stage in STAGE_DEFINITIONS}
 def validate_stage_registry() -> None:
     """Validate the local projection of the remote StageSpec contract."""
 
-    if len(STAGE_DEFINITIONS) != 18:
-        raise ValueError("the product registry must contain exactly 18 stages")
+    if len(STAGE_DEFINITIONS) != 19:
+        raise ValueError(
+            "the product registry must contain 18 baseline stages plus optional ClinVar"
+        )
     if len(STAGE_BY_ID) != len(STAGE_DEFINITIONS):
         raise ValueError("stage identifiers must be unique")
     for stage in STAGE_DEFINITIONS:

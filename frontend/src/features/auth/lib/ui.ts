@@ -1,15 +1,5 @@
 import { ApiError } from '@shared/api/client';
-
-const DEFAULT_STATUS_MESSAGES: Record<number, string> = {
-  0: 'No se pudo conectar con el backend. Verifica que el servicio esté disponible.',
-  400: 'La solicitud no es válida. Revisa los datos e inténtalo de nuevo.',
-  401: 'La sesión o las credenciales no son válidas.',
-  403: 'No tienes permiso para realizar esta acción.',
-  404: 'No se encontró el recurso solicitado.',
-  409: 'La operación entra en conflicto con el estado actual de la cuenta.',
-  422: 'Revisa los campos marcados e inténtalo de nuevo.',
-  429: 'Se alcanzó el límite de intentos. Espera un momento antes de volver a intentar.',
-};
+import { userErrorMessage } from '@shared/lib/error-presentation';
 
 export function authErrorMessage(
   error: unknown,
@@ -17,7 +7,7 @@ export function authErrorMessage(
   overrides: Partial<Record<number, string>> = {},
 ): string {
   if (!(error instanceof ApiError)) return fallback;
-  return overrides[error.status] ?? DEFAULT_STATUS_MESSAGES[error.status] ?? fallback;
+  return overrides[error.status] ?? userErrorMessage(error, fallback);
 }
 
 export function passwordValidation(password: string, confirmation: string): string | null {

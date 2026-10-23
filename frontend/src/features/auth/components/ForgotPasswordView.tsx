@@ -1,6 +1,6 @@
 import { useState } from 'preact/hooks';
 import { requestPasswordReset } from '@shared/api/client';
-import LucideIcon from '@shared/components/icons/LucideIcon.jsx';
+import PackIcon from '@shared/components/icons/PackIcon.jsx';
 import { AuthFrame, StatusNotice } from './AuthFrame';
 import { authErrorMessage } from '../lib/ui';
 
@@ -39,7 +39,7 @@ export default function ForgotPasswordView() {
           {resetToken && (
             <>
               <a class="auth-button auth-button-block" href={`/auth/reset-password/#token=${encodeURIComponent(resetToken)}`}>
-                <LucideIcon name="key-round" />
+                <PackIcon name="key-round" kind="ui" />
                 Abrir enlace de desarrollo
               </a>
               <p class="auth-field-help">Este acceso solo aparece cuando el backend expone tokens en desarrollo.</p>
@@ -70,7 +70,7 @@ export default function ForgotPasswordView() {
           </label>
           {error && <StatusNotice kind="error">{error}</StatusNotice>}
           <button class="auth-button auth-button-block" type="submit" disabled={submitting}>
-            <LucideIcon name={submitting ? 'loader-circle' : 'mail'} className={submitting ? 'auth-spin' : ''} />
+            <PackIcon name={submitting ? 'loader-circle' : 'mail'} kind="ui" className={submitting ? 'auth-spin' : ''} />
             {submitting ? 'Solicitando…' : 'Enviar enlace de recuperación'}
           </button>
         </form>

@@ -1,5 +1,6 @@
 import type { ComponentChildren } from 'preact';
-import LucideIcon from '@shared/components/icons/LucideIcon.jsx';
+import PackIcon from '@shared/components/icons/PackIcon.jsx';
+import StatePanel from '@shared/components/feedback/StatePanel.jsx';
 
 interface AuthFrameProps {
   children: ComponentChildren;
@@ -13,6 +14,7 @@ export function AuthFrame({ children, footer, title, wide = false }: AuthFramePr
     <main class={`auth-page${wide ? ' auth-page-wide' : ''}`}>
       <section class="auth-surface" aria-labelledby="auth-title">
         <header class="auth-header">
+          <a class="auth-brand" href="/" aria-label="Residue Annotation Platform">Residue Annotation Platform</a>
           <h1 id="auth-title">{title}</h1>
         </header>
 
@@ -34,7 +36,7 @@ export function StatusNotice({ children, kind = 'info' }: StatusNoticeProps) {
 
   return (
     <div class={`auth-notice auth-notice-${kind}`} role={kind === 'error' ? 'alert' : 'status'}>
-      <LucideIcon name={icon} />
+      <PackIcon name={icon} kind="ui" />
       <div>{children}</div>
     </div>
   );
@@ -46,10 +48,6 @@ interface LoadingStateProps {
 
 export function LoadingState({ label = 'Cargando…' }: LoadingStateProps) {
   return (
-    <div class="auth-loading" role="status" aria-live="polite">
-      <LucideIcon name="loader-circle" className="auth-spin" />
-      <span>{label}</span>
-    </div>
+    <StatePanel kind="loading" compact title={label} className="auth-loading" />
   );
 }
-

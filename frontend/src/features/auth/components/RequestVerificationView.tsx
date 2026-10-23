@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'preact/hooks';
 import { requestEmailVerification } from '@shared/api/client';
-import LucideIcon from '@shared/components/icons/LucideIcon.jsx';
+import PackIcon from '@shared/components/icons/PackIcon.jsx';
 import { AuthFrame, StatusNotice } from './AuthFrame';
 import { authErrorMessage, queryValue } from '../lib/ui';
 
@@ -41,7 +41,7 @@ export default function RequestVerificationView() {
           {verificationToken && (
             <>
               <a class="auth-button auth-button-block" href={`/auth/verify-email/#token=${encodeURIComponent(verificationToken)}`}>
-                <LucideIcon name="mail-check" />
+                <PackIcon name="mail-check" kind="ui" />
                 Abrir enlace de desarrollo
               </a>
               <p class="auth-field-help">Este acceso solo aparece cuando el backend expone tokens en desarrollo.</p>
@@ -72,7 +72,7 @@ export default function RequestVerificationView() {
           </label>
           {error && <StatusNotice kind="error">{error}</StatusNotice>}
           <button class="auth-button auth-button-block" type="submit" disabled={submitting}>
-            <LucideIcon name={submitting ? 'loader-circle' : 'mail-check'} className={submitting ? 'auth-spin' : ''} />
+            <PackIcon name={submitting ? 'loader-circle' : 'mail-check'} kind="ui" className={submitting ? 'auth-spin' : ''} />
             {submitting ? 'Solicitando…' : 'Enviar verificación'}
           </button>
         </form>

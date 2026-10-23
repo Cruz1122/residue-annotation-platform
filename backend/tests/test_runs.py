@@ -23,11 +23,11 @@ def test_run_is_created_with_persisted_stage_graph(client, session):
     assert response.status_code == 201
     payload = response.json()
     assert payload["status"] == "pending"
-    assert len(payload["stages"]) == 18
+    assert len(payload["stages"]) == len(STAGE_DEFINITIONS)
     assert payload["stages"][0]["status"] == "ready"
-    assert payload["stages"][15]["status"] == "skipped"
+    assert payload["stages"][-1]["status"] == "skipped"
     assert session.query(Run).count() == 1
-    assert session.query(RunStage).count() == 18
+    assert session.query(RunStage).count() == len(STAGE_DEFINITIONS)
 
 
 def test_run_history_keeps_two_runs_of_one_protein_independent(client):
@@ -58,7 +58,9 @@ def test_run_history_keeps_two_runs_of_one_protein_independent(client):
     assert by_id[second_id]["requested_variants"] == [
         {"aa_position": 1, "aa_ref": "A", "aa_alt": "C"}
     ]
-    assert len(by_id[first_id]["stages"]) == len(by_id[second_id]["stages"]) == 18
+    assert (
+        len(by_id[first_id]["stages"]) == len(by_id[second_id]["stages"]) == len(STAGE_DEFINITIONS)
+    )
 
 
 def test_projects_create_independent_runs_from_the_same_shared_protein(client, session):
@@ -148,6 +150,7 @@ def test_cpu_only_remote_run_uses_selected_stage_resources(client):
     configuration = response.json()["configuration"]
     assert configuration["selected_stage_ids"] == [
         "protein_identity",
+        "clinvar",
         "variant_predictors",
         "pharmacogenomics",
         "uniprot_features",

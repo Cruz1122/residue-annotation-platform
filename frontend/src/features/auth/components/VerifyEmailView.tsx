@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { verifyEmail } from '@shared/api/client';
-import LucideIcon from '@shared/components/icons/LucideIcon.jsx';
+import PackIcon from '@shared/components/icons/PackIcon.jsx';
 import { AuthFrame, LoadingState, StatusNotice } from './AuthFrame';
 import { authErrorMessage, consumeUrlValue } from '../lib/ui';
 
@@ -52,7 +52,7 @@ export default function VerifyEmailView() {
         <div class="auth-success">
           <StatusNotice kind="success">Tu correo fue verificado. Ya puedes iniciar sesión.</StatusNotice>
           <a class="auth-button auth-button-block" href="/auth/login/">
-            <LucideIcon name="log-in" />
+            <PackIcon name="log-in" kind="ui" />
             Iniciar sesión
           </a>
         </div>

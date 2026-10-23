@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'preact/hooks';
 import { getCurrentUser, logout } from '@shared/api/client';
 import { readAuthSession, type AuthUser } from '@shared/auth/session';
-import LucideIcon from '@shared/components/icons/LucideIcon.jsx';
+import PackIcon from '@shared/components/icons/PackIcon.jsx';
 import { AuthFrame, LoadingState, StatusNotice } from './AuthFrame';
 import { authErrorMessage } from '../lib/ui';
 
@@ -72,17 +72,17 @@ export default function SessionView() {
           </dl>
           <div class="auth-actions">
             <a class="auth-button auth-button-secondary" href="/auth/change-password/">
-              <LucideIcon name="key-round" />
+              <PackIcon name="key-round" kind="ui" />
               Cambiar contraseña
             </a>
             {user.role === 'admin' && (
               <a class="auth-button auth-button-secondary" href="/auth/users/">
-                <LucideIcon name="users-round" />
+              <PackIcon name="users-round" kind="ui" />
                 Administrar usuarios
               </a>
             )}
             <button class="auth-button auth-button-danger" type="button" disabled={state === 'logging-out'} onClick={closeSession}>
-              <LucideIcon name={state === 'logging-out' ? 'loader-circle' : 'log-out'} className={state === 'logging-out' ? 'auth-spin' : ''} />
+              <PackIcon name={state === 'logging-out' ? 'loader-circle' : 'log-out'} kind="ui" className={state === 'logging-out' ? 'auth-spin' : ''} />
               {state === 'logging-out' ? 'Cerrando…' : 'Cerrar sesión'}
             </button>
           </div>

@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'preact/hooks';
 import { ApiError, getCurrentUser } from '@shared/api/client';
 import { readAuthSession, safeInternalPath } from '@shared/auth/session';
-import LucideIcon from '@shared/components/icons/LucideIcon.jsx';
+import StatePanel from '@shared/components/feedback/StatePanel.jsx';
 import { userErrorMessage } from '@shared/lib/error-presentation';
 import './auth-gate.css';
 
@@ -48,17 +48,20 @@ export default function AuthGate() {
   if (state === 'ready') return null;
 
   return (
-    <div class="auth-gate" role={state === 'error' ? 'alert' : 'status'} aria-live="polite">
-      <div class={`auth-gate-content auth-gate-${state}`}>
-        <LucideIcon name={state === 'error' ? 'circle-x' : 'loader-circle'} />
-        <strong>{state === 'error' ? 'No pudimos validar la sesión' : 'Validando sesión'}</strong>
-        <span>{state === 'error' ? message : 'Espera un momento.'}</span>
+    <div class="auth-gate">
+      <StatePanel
+        kind={state === 'error' ? 'error' : 'loading'}
+        compact
+        title={state === 'error' ? 'No pudimos validar la sesión' : 'Validando sesión'}
+        description={state === 'error' ? message : 'Espera un momento.'}
+        className="auth-gate-content"
+      >
         {state === 'error' && (
           <button type="button" onClick={() => setAttempt((value) => value + 1)}>
             Reintentar
           </button>
         )}
-      </div>
+      </StatePanel>
     </div>
   );
 }

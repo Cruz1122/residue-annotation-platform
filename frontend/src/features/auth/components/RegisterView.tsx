@@ -1,6 +1,6 @@
 import { useState } from 'preact/hooks';
 import { ApiError, registerAccount } from '@shared/api/client';
-import LucideIcon from '@shared/components/icons/LucideIcon.jsx';
+import PackIcon from '@shared/components/icons/PackIcon.jsx';
 import { AuthFrame, StatusNotice } from './AuthFrame';
 import { PasswordField } from './PasswordField';
 import { authErrorMessage, passwordValidation } from '../lib/ui';
@@ -57,7 +57,7 @@ export default function RegisterView() {
           <div class="auth-success-actions">
             {verificationToken ? (
               <a class="auth-button auth-button-block" href={`/auth/verify-email/#token=${encodeURIComponent(verificationToken)}`}>
-                <LucideIcon name="mail-check" />
+                <PackIcon name="mail-check" kind="ui" />
                 Verificar ahora
               </a>
             ) : (
@@ -120,7 +120,7 @@ export default function RegisterView() {
           {error && <StatusNotice kind="error">{error}</StatusNotice>}
 
           <button class="auth-button auth-button-block" type="submit" disabled={submitting}>
-            <LucideIcon name={submitting ? 'loader-circle' : 'user-round-plus'} className={submitting ? 'auth-spin' : ''} />
+            <PackIcon name={submitting ? 'loader-circle' : 'user-round-plus'} kind="ui" className={submitting ? 'auth-spin' : ''} />
             {submitting ? 'Creando cuenta…' : 'Crear cuenta de usuario'}
           </button>
         </form>

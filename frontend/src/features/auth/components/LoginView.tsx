@@ -1,7 +1,7 @@
 import { useState } from 'preact/hooks';
 import { login } from '@shared/api/client';
 import { safeInternalPath } from '@shared/auth/session';
-import LucideIcon from '@shared/components/icons/LucideIcon.jsx';
+import PackIcon from '@shared/components/icons/PackIcon.jsx';
 import { AuthFrame, StatusNotice } from './AuthFrame';
 import { PasswordField } from './PasswordField';
 import { authErrorMessage } from '../lib/ui';
@@ -89,11 +89,10 @@ export default function LoginView() {
         )}
 
         <button class="auth-button auth-button-block" type="submit" disabled={submitting}>
-          <LucideIcon name={submitting ? 'loader-circle' : 'log-in'} className={submitting ? 'auth-spin' : ''} />
+          <PackIcon name={submitting ? 'loader-circle' : 'log-in'} kind="ui" className={submitting ? 'auth-spin' : ''} />
           {submitting ? 'Validando sesión…' : 'Entrar'}
         </button>
       </form>
     </AuthFrame>
   );
 }
-

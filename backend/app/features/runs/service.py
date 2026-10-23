@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.core.auth import Principal
 from app.core.config import Settings, get_settings
 from app.core.security import sanitize_error_message
+from app.features.artifacts.presentation import artifact_read_fields
 from app.features.auth.service import record_audit
 from app.features.proteins.models import Protein
 from app.features.proteins.service import normalize_sequence, protein_accessible_to
@@ -147,14 +148,7 @@ def _active_run_conflict(run: Run | None) -> HTTPException:
 def _stage_read(stage: RunStage) -> StageRead:
     definition = STAGE_BY_ID[stage.stage_id]
     artifacts = [
-        ArtifactRead(
-            id=artifact.id,
-            artifact_type=artifact.artifact_type,
-            media_type=artifact.media_type,
-            size=artifact.size,
-            sha256=artifact.sha256,
-            download_url=f"/api/v1/artifacts/{artifact.id}/content",
-        )
+        ArtifactRead(**artifact_read_fields(artifact))
         for artifact in (stage.stage_result.artifacts if stage.stage_result else [])
     ]
     return StageRead(
@@ -360,6 +354,10 @@ def serialize_run(run: Run) -> RunRead:
             if run.preparation is not None
             else None
         ),
+        run_artifacts=[
+            ArtifactRead(**artifact_read_fields(artifact))
+            for artifact in run.run_artifacts
+        ],
         created_at=run.created_at,
         started_at=run.started_at,
         finished_at=run.finished_at,
@@ -389,6 +387,7 @@ def get_owned_run(session: Session, run_id: str, principal: Principal) -> Run:
             .selectinload(StageResult.artifacts),
             selectinload(Run.configuration),
             selectinload(Run.preparation),
+            selectinload(Run.run_artifacts),
             selectinload(Run.uploads),
         )
         .where(Run.id == run_id)

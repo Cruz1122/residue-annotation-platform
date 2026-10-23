@@ -15,6 +15,7 @@ for definition in STAGE_DEFINITIONS:
             "stage_result_id",
             String(36),
             ForeignKey("stage_results.id", ondelete="CASCADE"),
+            nullable=False,
             index=True,
         ),
         Column("aa_position", Integer, nullable=False),

@@ -64,6 +64,10 @@ export interface Artifact {
   size: number;
   sha256: string;
   download_url: string;
+  display_name?: string;
+  format_label?: string;
+  download_format?: 'original' | 'xlsx';
+  download_filename?: string;
 }
 
 export interface RunStage {
@@ -146,6 +150,7 @@ export interface Run {
   error_message: string | null;
   configuration: RunConfiguration | null;
   preparation: RunPreparation | null;
+  run_artifacts: Artifact[];
   created_at: string | null;
   started_at: string | null;
   finished_at: string | null;

@@ -117,3 +117,25 @@ test('skips oversized and failed detail artifacts without losing valid artifacts
   assert.deepEqual(requested.sort(), ['failed', 'valid']);
   assert.deepEqual(details, { evolution_per_residue: [{ aa_position: 7, reliable: true }] });
 });
+
+test('loads conformational ensemble metadata under a stage-specific key', async () => {
+  const requested = [];
+  const run = {
+    stages: [{
+      id: 'conformational_ensemble',
+      artifacts: [
+        { id: 'metadata', artifact_type: 'metadata', size: 128, media_type: 'application/json' },
+        { id: 'frames', artifact_type: 'frames_index', size: 128, media_type: 'text/tab-separated-values' },
+      ],
+    }],
+  };
+  const details = await loadAnalysisArtifactDetails(run, 'frustration', async (id) => {
+    requested.push(id);
+    if (id === 'metadata') return { text: async () => '{"ensemble_size":207,"model":"bioemu-v1.2"}' };
+    return { text: async () => 'table_row\tround\txtc_frame\n0\t0\t0\n' };
+  });
+
+  assert.deepEqual(requested.sort(), ['frames', 'metadata']);
+  assert.equal(details.conformational_ensemble_metadata[0].ensemble_size, 207);
+  assert.equal(details.conformational_ensemble_frames_index.length, 1);
+});

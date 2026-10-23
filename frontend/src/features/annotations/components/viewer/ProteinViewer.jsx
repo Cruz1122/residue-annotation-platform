@@ -1,7 +1,8 @@
 import { memo } from 'preact/compat';
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
-import LucideIcon from '@shared/components/icons/LucideIcon.jsx';
 import AuthenticatedArtifactLink from '@features/artifacts/components/AuthenticatedArtifactLink.tsx';
+import { artifactDisplayName } from '@features/artifacts/artifact-display.js';
+import StatePanel from '@shared/components/feedback/StatePanel.jsx';
 import { getAnnotations, getArtifactBlob, getArtifactObjectUrl, getProtein, getRun, getUploadObjectUrl, subscribeRunEvents } from '@shared/api/client';
 import { userErrorMessage } from '@shared/lib/error-presentation';
 import { firstDetailValue, loadAnalysisArtifactDetails, presentationRowsFromArtifacts, recordsForPosition, summarizeArtifactRecord } from '@features/annotations/analysis-artifacts.js';
@@ -72,7 +73,7 @@ function structureSource(run) {
   if (artifact) {
     return {
       id: artifact.id,
-      label: artifact.artifact_type,
+      label: artifactDisplayName(artifact),
       format: structureFormat(artifact.artifact_type, artifact.media_type),
       loadUrl: () => getArtifactObjectUrl(artifact.id),
     };
@@ -232,31 +233,6 @@ function displayField(annotation, key) {
   return readableValue(key, publishedField(annotation, key));
 }
 
-const ARTIFACT_LABELS = {
-  frustration_per_residue: 'Índice de frustración por residuo',
-  frustraiseq_per_residue: 'Índice FrustraSeq por residuo',
-  frustratometer_per_residue: 'Frustración estructural por residuo',
-  frustratometer_conformers: 'Distribución entre conformeros',
-  tmbed_per_residue: 'Clasificación topológica por residuo',
-  tm_segments: 'Segmentos transmembrana',
-  span_metadata: 'Metadatos de topología',
-  evolution_per_residue: 'Conservación por residuo',
-  ldlc_statin_evidence: 'Evidencia de región LDL-C / estatinas',
-  functional_features_long: 'Regiones y sitios UniProt',
-  summary: 'Resumen científico',
-  variant_annotations: 'Resultados de variantes',
-  provenance: 'Procedencia del resultado',
-  rosetta_metadata: 'Metadatos de la predicción',
-  contact_residue_summary: 'Resumen de contactos por residuo',
-  contacts_long: 'Contactos estructurales',
-  metadata: 'Metadatos del análisis',
-};
-
-function artifactLabel(type) {
-  const value = String(type ?? '').trim();
-  return ARTIFACT_LABELS[value] ?? value.replace(/[_-]+/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
-}
-
 function displayDetail(record, keys, unitKeys = [], fallbackUnit = null) {
   const valueKey = keys.find((key) => firstDetailValue(record, [key]) !== null) ?? keys[0];
   const value = firstDetailValue(record, [valueKey]);
@@ -290,14 +266,47 @@ function EvidenceSection({ title, meta, description, open = false, children }) {
   );
 }
 
-function BioEmuMock({ stage }) {
+function numericDetailValue(record, keys) {
+  const value = firstDetailValue(record, keys);
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function ConformationalEnsembleEvidence({ stage, artifactDetails }) {
+  const metadata = artifactDetails?.conformational_ensemble_metadata?.[0] ?? null;
+  const frames = artifactDetails?.conformational_ensemble_frames_index ?? [];
+  const retained = numericDetailValue(metadata, ['qc_retained_total', 'ensemble_size']);
+  const rawSamples = numericDetailValue(metadata, ['raw_samples']);
+  const failed = numericDetailValue(metadata, ['qc_failed']);
+  const rounds = numericDetailValue(metadata, ['bioemu_rounds_done']);
+  const status = stage ? (STAGE_STATUS[stage.status] ?? stage.status) : 'No publicada';
+  const isPublished = stage?.status === 'success' || stage?.status === 'reused';
+  const meta = retained !== null ? `${retained} conformeros retenidos` : status;
+
   return (
-    <EvidenceSection title="Ensamble BioEmu" meta="200 conformeros" description="Integración pendiente; el conjunto se mantiene reservado para una iteración posterior.">
-      <div class="bioemu-mock" aria-label="Maqueta del explorador BioEmu">
-        <div><span>Conformero 1</span><span>200</span></div>
-        <input type="range" min="1" max="200" value="1" disabled aria-label="Selector de conformero no disponible" />
-        <small>{stage ? `Etapa: ${STAGE_STATUS[stage.status] ?? stage.status}` : 'Etapa no incluida en la corrida'}</small>
-      </div>
+    <EvidenceSection
+      title="Ensamble conformacional publicado"
+      meta={meta}
+      description="Resumen calculado a partir de los metadatos y el índice de frames publicados por MN5. Los archivos numéricos completos quedan disponibles en la sección de descargas."
+      open
+    >
+      {isPublished && metadata ? (
+        <dl class="ensemble-evidence">
+          <EvidenceRow label="Estado de la etapa" value={status} tone="source" />
+          <EvidenceRow label="Modelo" value={firstDetailValue(metadata, ['model']) ?? 'Sin dato'} />
+          <EvidenceRow label="Conformeros retenidos" value={retained ?? 'Sin dato'} />
+          <EvidenceRow label="Frames indexados" value={frames.length || retained || 'Sin dato'} />
+          <EvidenceRow label="Muestras brutas" value={rawSamples ?? 'Sin dato'} />
+          <EvidenceRow label="Frames descartados por QC" value={failed ?? 'Sin dato'} />
+          <EvidenceRow label="Rondas completadas" value={rounds ?? 'Sin dato'} />
+          <EvidenceRow label="Unidad de coordenadas" value={firstDetailValue(metadata, ['coordinate_unit']) ?? 'Sin dato'} />
+          <EvidenceRow label="Política de selección" value={firstDetailValue(metadata, ['selection_policy', 'selection']) ?? 'Sin dato'} />
+        </dl>
+      ) : (
+        <p class="analysis-no-data">
+          {stage ? `La etapa está ${status.toLowerCase()}, pero no hay metadatos publicados para mostrar.` : 'La etapa conformacional no está incluida en esta corrida.'}
+        </p>
+      )}
     </EvidenceSection>
   );
 }
@@ -427,12 +436,25 @@ function AnalysisDetails({ analysis, annotation, residue, run, view, artifactDet
         </EvidenceSection>
       )}
 
-      {analysis === 'frustration' && <BioEmuMock stage={(run?.stages ?? []).find((stage) => stage.id === 'conformational_ensemble')} />}
+      {analysis === 'frustration' && (
+        <ConformationalEnsembleEvidence
+          stage={(run?.stages ?? []).find((stage) => stage.id === 'conformational_ensemble')}
+          artifactDetails={artifactDetails}
+        />
+      )}
 
       <EvidenceSection title="Archivos publicados" meta={`${artifacts.length} archivo${artifacts.length === 1 ? '' : 's'}`}>
         <div class="analysis-artifacts">
           {artifacts.length ? artifacts.map((artifact) => (
-            <AuthenticatedArtifactLink key={artifact.id} id={artifact.id} filename={artifact.artifact_type} label={artifactLabel(artifact.artifact_type)} mediaType={artifact.media_type} />
+            <AuthenticatedArtifactLink
+              key={artifact.id}
+              id={artifact.id}
+              artifact={artifact}
+              label={artifact.display_name}
+              filename={artifact.download_filename}
+              formatLabel={artifact.format_label}
+              downloadFormat={artifact.download_format}
+            />
           )) : <span class="analysis-no-data">No hay artefactos publicados.</span>}
         </div>
       </EvidenceSection>
@@ -1031,7 +1053,7 @@ export default function ProteinViewer({ proteinId, analysis = 'topology' }) {
   };
 
   if (state === 'error' && wipe === 'gone') {
-    return <section class="viewer-shell viewer-message" role="alert"><h1>No se pudo cargar la proteína</h1><p>{error}</p></section>;
+    return <section class="viewer-shell"><StatePanel kind="error" fill title="No se pudo cargar la proteína" description={error} /></section>;
   }
 
   const categoricalMode = VISUALIZATION_MODES[mode].kind === 'categorical';
@@ -1039,9 +1061,9 @@ export default function ProteinViewer({ proteinId, analysis = 'topology' }) {
 
   return (
     <section class={`viewer-shell has-annotations analysis-workspace ${annotationsOpen ? 'annotations-expanded' : 'annotations-collapsed'}`} data-analysis={analysis} aria-label={`${analysisView.title}: modelo molecular, secuencia y evidencia`} onContextMenu={(event) => event.preventDefault()}>
-      <div ref={hostRef} class="molstar-host" aria-label={structureRequest ? 'Visor molecular Mol*' : 'Sin estructura publicada'} />
-      {viewerState === 'unavailable' && wipe === 'gone' && <div class="viewer-boot viewer-empty"><LucideIcon name="box" /><strong>Estructura no disponible</strong><span>La corrida no tiene un PDB o mmCIF subido ni un artefacto publicado.</span></div>}
-      {viewerState === 'error' && wipe === 'gone' && <div class="viewer-boot error"><strong>No se pudo cargar la estructura</strong><span>{viewerError || 'Verifica el artefacto y vuelve a intentarlo.'}</span></div>}
+      <div ref={hostRef} class="molstar-host" aria-label={structureRequest ? 'Visor molecular Mol*' : 'Sin modelo 3D disponible'} />
+      {viewerState === 'unavailable' && wipe === 'gone' && <StatePanel kind="empty" compact icon="box" title="Estructura no disponible" description="La corrida no tiene un PDB o mmCIF subido ni un artefacto publicado." className="viewer-boot-state" />}
+      {viewerState === 'error' && wipe === 'gone' && <StatePanel kind="error" compact title="No se pudo cargar la estructura" description={viewerError || 'Verifica el artefacto y vuelve a intentarlo.'} className="viewer-boot-state" />}
       {(viewerState === 'unavailable' || viewerState === 'error') && wipe === 'gone' && <p class="viewer-accessibility-note" role="status">La secuencia y los estados de evidencia siguen disponibles en formato textual; la vista 3D no está disponible.</p>}
 
       <div class="viewer-top-stack">

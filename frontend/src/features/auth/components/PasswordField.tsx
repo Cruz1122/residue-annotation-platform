@@ -1,5 +1,5 @@
 import { useState } from 'preact/hooks';
-import LucideIcon from '@shared/components/icons/LucideIcon.jsx';
+import PackIcon from '@shared/components/icons/PackIcon.jsx';
 
 interface PasswordFieldProps {
   autoComplete: string;
@@ -56,10 +56,9 @@ export function PasswordField({
           aria-pressed={visible}
           disabled={disabled}
         >
-          <LucideIcon name={visible ? 'eye-off' : 'eye'} />
+          <PackIcon name={visible ? 'eye-off' : 'eye'} kind="ui" />
         </button>
       </span>
     </label>
   );
 }
-

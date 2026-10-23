@@ -5,6 +5,7 @@ from uuid import uuid4
 
 from sqlalchemy import (
     JSON,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
@@ -26,6 +27,14 @@ def new_id() -> str:
 
 class Run(Base):
     __tablename__ = "runs"
+    __table_args__ = (
+        UniqueConstraint(
+            "owner_id",
+            "project_id",
+            "remote_job_id",
+            name="uq_runs_owner_project_remote_job",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     protein_id: Mapped[str] = mapped_column(
@@ -61,6 +70,11 @@ class Run(Base):
     uploads: Mapped[list[Upload]] = relationship(
         back_populates="run", cascade="all, delete-orphan", order_by="Upload.created_at"
     )
+    run_artifacts: Mapped[list[Artifact]] = relationship(
+        back_populates="run",
+        foreign_keys="Artifact.run_id",
+        order_by="Artifact.created_at",
+    )
     preparation: Mapped[RunPreparation | None] = relationship(
         back_populates="run",
         uselist=False,
@@ -95,11 +109,10 @@ class Upload(Base):
 
 class ActiveRunSlot(Base):
     __tablename__ = "active_run_slots"
+    __table_args__ = (UniqueConstraint("run_id", name="uq_active_run_slots_run_id"),)
 
     owner_id: Mapped[str] = mapped_column(String(128), primary_key=True)
-    run_id: Mapped[str] = mapped_column(
-        ForeignKey("runs.id", ondelete="CASCADE"), unique=True, index=True
-    )
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id", ondelete="CASCADE"), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -193,6 +206,7 @@ class RunIdempotencyKey(Base):
             "idempotency_key",
             name="uq_run_idempotency_owner_project_key",
         ),
+        UniqueConstraint("run_id", name="uq_run_idempotency_run_id"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -201,7 +215,7 @@ class RunIdempotencyKey(Base):
     idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
     request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     run_id: Mapped[str] = mapped_column(
-        ForeignKey("runs.id", ondelete="CASCADE"), nullable=False, unique=True, index=True
+        ForeignKey("runs.id", ondelete="CASCADE"), nullable=False, index=True
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -299,10 +313,19 @@ class RunStage(Base):
 
 class Artifact(Base):
     __tablename__ = "artifacts"
+    __table_args__ = (
+        CheckConstraint(
+            "(run_id IS NULL) <> (stage_result_id IS NULL)",
+            name="ck_artifact_exactly_one_owner",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    stage_result_id: Mapped[str] = mapped_column(
-        ForeignKey("stage_results.id", ondelete="CASCADE"), index=True
+    stage_result_id: Mapped[str | None] = mapped_column(
+        ForeignKey("stage_results.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("runs.id", ondelete="CASCADE"), nullable=True, index=True
     )
     artifact_type: Mapped[str] = mapped_column(String(64))
     storage_backend: Mapped[str] = mapped_column(String(32))
@@ -312,4 +335,8 @@ class Artifact(Base):
     media_type: Mapped[str] = mapped_column(String(256), default="application/octet-stream")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
-    stage_result: Mapped[StageResult] = relationship(back_populates="artifacts")
+    stage_result: Mapped[StageResult | None] = relationship(back_populates="artifacts")
+    run: Mapped[Run | None] = relationship(
+        back_populates="run_artifacts",
+        foreign_keys=[run_id],
+    )

@@ -1,0 +1,4 @@
+Bioicons author: DBCLS, alpha-helix SVG; license CC BY 4.0.
+Link: https://github.com/duerrsimon/bioicons/blob/main/static/icons/cc-by-4.0/Intracellular_components/DBCLS/alpha-helix.svg
+Full license: https://creativecommons.org/licenses/by/4.0/legalcode
+The existing V2 membrane_topology icon recombines/scales the original shape together with a Tabler icon. Attribution retained.

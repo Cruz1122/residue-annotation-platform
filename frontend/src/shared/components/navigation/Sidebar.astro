@@ -8,38 +8,62 @@ const {
   proteinId = undefined,
 } = Astro.props;
 
-const libraryItems = [
-  { id: 'library', label: 'Mis proteínas', icon: 'folder', href: '/proteins/' },
+interface NavigationItem {
+  id: string;
+  label: string;
+  icon: string;
+  iconKind: 'ui' | 'stage';
+  href: string;
+}
+
+const workspaceItems: NavigationItem[] = [
+  { id: 'library', label: 'Mis proteínas', icon: 'folder', iconKind: 'ui', href: '/proteins/' },
 ];
 
-const pipelineItems = proteinId ? [
-  { id: 'progress', label: 'Progreso', icon: 'workflow', href: `/proteins/${proteinId}/progress/` },
-  { id: 'info', label: 'Información', icon: 'info', href: `/proteins/${proteinId}/info/` },
-  { id: 'topology', label: 'Topología', icon: 'waves', href: `/proteins/${proteinId}/topology/` },
-  { id: 'frustration', label: 'Frustración', icon: 'activity', href: `/proteins/${proteinId}/frustration/` },
-  { id: 'conservation', label: 'Conservación', icon: 'scan-search', href: `/proteins/${proteinId}/conservation/` },
-  { id: 'functional', label: 'Región funcional', icon: 'route', href: `/proteins/${proteinId}/functional-regions/` },
-  { id: 'ddg', label: 'ΔΔG de variante', icon: 'zap', href: `/proteins/${proteinId}/variant-ddg/` },
-  { id: 'contacts', label: 'Contactos', icon: 'network', href: `/proteins/${proteinId}/contacts/` },
-] : libraryItems;
+const pipelineItems: NavigationItem[] = proteinId ? [
+  { id: 'progress', label: 'Progreso', icon: 'workflow', iconKind: 'ui', href: `/proteins/${proteinId}/progress/` },
+  { id: 'info', label: 'Información', icon: 'info', iconKind: 'ui', href: `/proteins/${proteinId}/info/` },
+  { id: 'topology', label: 'Topología', icon: 'membrane_topology', iconKind: 'stage', href: `/proteins/${proteinId}/topology/` },
+  { id: 'frustration', label: 'Frustración', icon: 'structural_frustration', iconKind: 'stage', href: `/proteins/${proteinId}/frustration/` },
+  { id: 'conservation', label: 'Conservación', icon: 'evolutionary_conservation', iconKind: 'stage', href: `/proteins/${proteinId}/conservation/` },
+  { id: 'functional', label: 'Región funcional', icon: 'functional_region_evidence', iconKind: 'stage', href: `/proteins/${proteinId}/functional-regions/` },
+  { id: 'ddg', label: 'ΔΔG de variante', icon: 'variant_ddg', iconKind: 'stage', href: `/proteins/${proteinId}/variant-ddg/` },
+  { id: 'contacts', label: 'Contactos', icon: 'structural_contacts', iconKind: 'stage', href: `/proteins/${proteinId}/contacts/` },
+] : [];
 
-const items = mode === 'library' ? libraryItems : pipelineItems;
+const groups = mode === 'library'
+  ? [{ label: 'Espacio de trabajo', items: workspaceItems }]
+  : [
+      { label: 'Espacio de trabajo', items: workspaceItems },
+      { label: 'Análisis activo', items: pipelineItems },
+    ];
 ---
 <nav class="sidebar" aria-label="Navegación principal">
   <div class="brand">
-    <a href="/" aria-label="Ir al inicio" title="Residue Annotation Platform">RAP</a>
+    <a href="/" aria-label="Ir al inicio" title="Residue Annotation Platform">
+      <span class="brand-mark"><Icon name="dna" /></span>
+      <span class="brand-copy"><strong>RAP</strong><small>Residue annotation</small></span>
+    </a>
   </div>
 
   <div class="sidebar-items">
-    {items.map((item) => (
-      <a
-        class:list={['sidebar-item', { active: active === item.id }]}
-        href={item.href}
-        aria-current={active === item.id ? 'page' : undefined}
-      >
-        <Icon name={item.icon} class="sidebar-icon" />
-        <span>{item.label}</span>
-      </a>
+    {groups.map((group) => group.items.length > 0 && (
+      <section class="sidebar-group" aria-label={group.label}>
+        <p class="sidebar-group-label">{group.label}</p>
+        <div class="sidebar-group-items">
+          {group.items.map((item) => (
+            <a
+              class:list={['sidebar-item', { active: active === item.id }]}
+              href={item.href}
+              aria-current={active === item.id ? 'page' : undefined}
+              title={item.label}
+            >
+              <span class="sidebar-icon-wrap"><Icon name={item.icon} kind={item.iconKind ?? 'ui'} class="sidebar-icon" /></span>
+              <span>{item.label}</span>
+            </a>
+          ))}
+        </div>
+      </section>
     ))}
   </div>
   <!-- Session state exists only in the browser's sessionStorage. This component
@@ -59,73 +83,122 @@ const items = mode === 'library' ? libraryItems : pipelineItems;
     border: 1px solid var(--line-strong);
     border-radius: var(--radius);
     background: var(--panel);
-    backdrop-filter: blur(12px);
     padding: 8px;
     display: flex;
     flex-direction: column;
     gap: 8px;
     overflow: hidden;
+    box-shadow: var(--shadow-sm);
   }
   .brand {
-    min-height: 52px;
+    min-height: 62px;
     display: flex;
     align-items: center;
-    justify-content: center;
-    padding: 0 12px;
+    padding: 0 8px 8px;
     border-bottom: 1px solid var(--line);
     user-select: none;
   }
   .brand a {
+    width: 100%;
     color: var(--ink);
     text-decoration: none;
-    font-size: 12px;
-    font-weight: 700;
-    letter-spacing: .08em;
-    text-transform: uppercase;
+    display: grid;
+    grid-template-columns: 34px minmax(0, 1fr);
+    align-items: center;
+    gap: 10px;
   }
-  .brand a:hover { text-decoration: underline; text-underline-offset: 3px; }
-  .sidebar-items { display: flex; flex-direction: column; gap: 6px; min-height: 0; overflow-y: auto; scrollbar-width: thin; }
+  .brand-mark {
+    width: 34px;
+    height: 34px;
+    border: 1px solid rgba(46,136,119,.38);
+    border-radius: 5px;
+    background: var(--green-soft);
+    color: var(--green-dark);
+    display: grid;
+    place-items: center;
+  }
+  .brand-mark :global(.icon-slot) { width: 18px; height: 18px; }
+  .brand-copy { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+  .brand-copy strong { font-size: 12px; font-weight: 780; letter-spacing: .08em; }
+  .brand-copy small { overflow: hidden; color: var(--muted); font-size: 8px; font-weight: 650; letter-spacing: .035em; white-space: nowrap; text-overflow: ellipsis; }
+  .brand a:hover .brand-mark { border-color: var(--green-dark); }
+  .sidebar-items { display: flex; flex-direction: column; gap: 13px; min-height: 0; overflow-y: auto; scrollbar-width: thin; padding: 4px 0; }
+  .sidebar-group { display: grid; gap: 5px; }
+  .sidebar-group-label { margin: 0; padding: 0 9px; color: #78838a; font-size: 8px; font-weight: 750; letter-spacing: .09em; text-transform: uppercase; }
+  .sidebar-group-items { display: grid; gap: 2px; }
   .sidebar-item {
     position: relative;
-    min-height: 54px;
-    border: 1px solid var(--line-strong);
-    border-radius: 2px;
-    background: #fff;
+    min-height: 40px;
+    border: 1px solid transparent;
+    border-radius: 5px;
+    background: transparent;
     color: var(--ink);
     display: grid;
-    grid-template-columns: 26px minmax(0, 1fr);
+    grid-template-columns: 28px minmax(0, 1fr);
     align-items: center;
-    gap: 12px;
-    padding: 0 14px;
+    gap: 8px;
+    padding: 0 8px;
     text-decoration: none;
-    font-size: 12px;
-    font-weight: 600;
-    transition: background 150ms ease, border-color 150ms ease, transform 150ms ease;
+    font-size: 11px;
+    font-weight: 630;
+    transition: background 150ms ease, border-color 150ms ease, color 150ms ease;
   }
-  .sidebar-item:hover { border-color: rgba(17,19,24,.45); transform: translateX(1px); }
+  .sidebar-item:hover { background: var(--surface); }
   .sidebar-item.active {
-    background: rgba(81,171,117,.11);
-    border-color: rgba(81,171,117,.46);
-    color: var(--ink);
-    box-shadow: 0 5px 18px rgba(17,19,24,.035);
+    background: var(--green-soft);
+    border-color: rgba(46,136,119,.28);
+    color: var(--green-dark);
   }
   .sidebar-item.active::before {
     content: '';
     position: absolute;
-    left: -1px;
-    top: -1px;
-    bottom: -1px;
-    width: 3px;
+    left: -9px;
+    top: 8px;
+    bottom: 8px;
+    width: 2px;
+    border-radius: 0 2px 2px 0;
     background: var(--green);
   }
-  .sidebar-icon { width: 21px; height: 21px; }
-  .sidebar-item.active .sidebar-icon { color: var(--green-dark); }
+  .sidebar-icon-wrap { width: 28px; height: 28px; display: grid; place-items: center; color: var(--muted); }
+  .sidebar-icon { width: 17px; height: 17px; }
+  .sidebar-item.active .sidebar-icon-wrap { color: var(--green-dark); }
+
+  @media (max-width: 1100px) {
+    .brand-copy small { display: none; }
+    .sidebar-item { grid-template-columns: 24px minmax(0, 1fr); gap: 6px; padding-inline: 6px; font-size: 10px; }
+    .sidebar-icon-wrap { width: 24px; }
+  }
 
   @media (max-width: 760px) {
-    .sidebar { left: 10px; top: 10px; bottom: 10px; padding: 6px; }
-    .sidebar-item { min-height: 56px; grid-template-columns: 22px minmax(0,1fr); gap: 9px; padding: 0 10px; font-size: 11px; }
-    .sidebar-icon { width: 18px; height: 18px; }
-    .brand { padding: 0 9px; min-height: 48px; }
-    .brand a { font-size: 10px; }
+    .sidebar {
+      left: 10px;
+      right: 10px;
+      top: 10px;
+      bottom: auto;
+      width: auto;
+      height: 60px;
+      padding: 5px;
+      flex-direction: row;
+      align-items: stretch;
+    }
+    .sidebar-items { min-width: 0; flex: 1; flex-direction: row; gap: 4px; padding: 0; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
+    .sidebar-items::-webkit-scrollbar { display: none; }
+    .sidebar-group { display: block; }
+    .sidebar-group + .sidebar-group { padding-left: 4px; border-left: 1px solid var(--line); }
+    .sidebar-group-label { display: none; }
+    .sidebar-group-items { display: flex; gap: 2px; }
+    .sidebar-item { min-width: max-content; min-height: 48px; grid-template-columns: 24px minmax(0,1fr); gap: 6px; padding: 0 9px; font-size: 10px; }
+    .sidebar-item.active::before { left: 9px; right: 9px; top: auto; bottom: -6px; width: auto; height: 2px; border-radius: 2px 2px 0 0; }
+    .sidebar-icon { width: 17px; height: 17px; }
+    .brand { flex: 0 0 auto; padding: 0 7px 0 0; min-height: 48px; border: 0; border-right: 1px solid var(--line); }
+    .brand a { width: auto; grid-template-columns: 32px; gap: 0; }
+    .brand-mark { width: 32px; height: 32px; }
+    .brand-copy { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  }
+
+  @media (max-width: 520px) {
+    .sidebar-item { grid-template-columns: 24px; padding: 0 8px; }
+    .sidebar-item > span:not(.sidebar-icon-wrap) { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+    .sidebar-item .sidebar-icon-wrap { position: static; width: 24px; height: 28px; overflow: visible; clip: auto; }
   }
 </style>

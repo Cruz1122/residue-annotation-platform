@@ -4,7 +4,7 @@
 
 .artifact-download-link {
   width: 100%;
-  min-height: 38px;
+  min-height: 40px;
   padding: 0 10px;
   border: 1px solid var(--line);
   border-radius: 2px;
@@ -34,6 +34,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-weight: 700;
 }
 
 .artifact-download-type {

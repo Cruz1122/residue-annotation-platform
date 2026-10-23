@@ -2,7 +2,7 @@
   position: relative;
   --viewer-panel-reserve: calc(var(--ann-w) + 32px);
   width: 100%;
-  height: calc(100svh - 28px);
+  height: calc(100svh - var(--app-inset));
   min-height: 560px;
   overflow: hidden;
   border: 1px solid var(--line-strong);
@@ -20,8 +20,7 @@
 .viewer-shell .msp-logo,
 .viewer-shell .msp-layout-standard-outside,
 .viewer-shell .msp-toast-container { display: none !important; }
-.viewer-boot { position: absolute; inset: 0; z-index: 4; display: grid; place-items: center; pointer-events: none; color: var(--muted); font-size: 12px; font-weight: 500; }
-.viewer-boot.error { color: #991b1b; }
+.viewer-boot-state { position: absolute; inset: 0; z-index: 4; min-height: 0; pointer-events: none; }
 .viewer-top-stack {
   position: absolute;
   z-index: 10;
@@ -136,10 +135,7 @@
 .analysis-artifacts .authenticated-artifact { display: block; }
 .analysis-artifacts .artifact-download-link { width: 100%; }
 .analysis-no-data { padding: 12px 2px 4px; color: var(--muted); font-size: 10px; }
-.bioemu-mock { padding: 12px 0 2px; }
-.bioemu-mock > div { display: flex; align-items: center; justify-content: space-between; color: var(--muted); font-size: 10px; font-weight: 600; }
-.bioemu-mock input { width: 100%; margin: 9px 0 7px; accent-color: var(--green); }
-.bioemu-mock small { display: block; color: var(--muted); font-size: 9px; line-height: 1.4; }
+.ensemble-evidence .analysis-evidence-row:first-child { padding-top: 4px; }
 .viewer-annotation-list { margin: 0; padding: 0; }
 .viewer-annotation-group { margin: 14px 0 2px; padding: 0 0 6px; border-bottom: 1px solid var(--line-strong); color: var(--ink); font-size: 9px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; }
 .viewer-annotation-row { min-height: 44px; padding: 9px 0; border-bottom: 1px solid var(--line); display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 12px; align-items: center; }
@@ -151,7 +147,7 @@
 
 @media (max-width: 1180px) { :root { --ann-w: 320px; } }
 @media (max-width: 900px) {
-  .viewer-shell { --viewer-panel-reserve: 0px; height: calc(100svh - 20px); }
+  .viewer-shell { --viewer-panel-reserve: 0px; height: calc(100svh - var(--app-inset)); }
   .viewer-top-stack { left: 10px; right: 10px; top: 10px; }
   .viewer-annotations { width: min(360px, calc(100% - 20px)); top: auto; left: 10px; right: 10px; bottom: 10px; height: 36%; }
   .viewer-annotations.is-collapsed { width: 54px; left: auto; }
@@ -165,10 +161,6 @@
   background: transparent; color: inherit; font: inherit; font-size: 10px; font-weight: 700; cursor: pointer;
 }
 .viewer-chain-switch button.active { background: var(--ink); color: #fff; }
-.viewer-message { display: grid; place-items: center; padding: 24px; color: var(--muted); }
-.viewer-boot { gap: 8px; text-align: center; align-content: center; }
-.viewer-boot > .icon-slot { width: 38px; height: 38px; }
-.viewer-boot strong, .viewer-boot span { display: block; max-width: 360px; }
 .viewer-accessibility-note { position: absolute; z-index: 8; left: 16px; bottom: 16px; max-width: min(420px, calc(100% - 32px)); margin: 0; padding: 9px 11px; border: 1px solid var(--line-strong); background: rgba(255,255,255,.92); color: var(--muted); font-size: 10px; line-height: 1.4; }
 .viewer-load-wipe {
   position: absolute; inset: 0; z-index: 40; display: grid; place-items: center;

@@ -61,6 +61,7 @@ def list_runs(
         .options(
             selectinload(Run.configuration),
             selectinload(Run.preparation),
+            selectinload(Run.run_artifacts),
             selectinload(Run.stages)
             .selectinload(RunStage.stage_result)
             .selectinload(StageResult.artifacts),

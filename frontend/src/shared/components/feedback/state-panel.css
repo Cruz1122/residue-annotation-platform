@@ -1,0 +1,122 @@
+.state-panel {
+  width: 100%;
+  min-height: clamp(240px, 40svh, 420px);
+  padding: 32px 20px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.state-panel-fill {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.state-panel-compact {
+  min-height: 0;
+  padding: 28px 20px;
+}
+
+.state-panel-icon {
+  width: 44px;
+  height: 44px;
+  color: var(--muted);
+}
+
+.state-panel-compact .state-panel-icon {
+  width: 34px;
+  height: 34px;
+}
+
+.state-panel-loading .state-panel-icon,
+.state-panel-waiting .state-panel-icon,
+.state-panel-success .state-panel-icon {
+  color: var(--green-dark);
+}
+
+.state-panel-loading .lucide-icon {
+  animation: state-panel-spin .9s linear infinite;
+}
+
+.state-panel-error .state-panel-icon,
+.state-panel-error .state-panel-title {
+  color: var(--danger);
+}
+
+.state-panel-warning .state-panel-icon,
+.state-panel-warning .state-panel-title {
+  color: var(--warning);
+}
+
+.state-panel-copy {
+  display: grid;
+  justify-items: center;
+  gap: 7px;
+}
+
+.state-panel-copy p { margin: 0; }
+
+.state-panel-eyebrow {
+  color: var(--green-dark);
+  font-size: 9px;
+  font-weight: 750;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+
+.state-panel-title {
+  max-width: 44ch;
+  color: var(--ink);
+  font-size: clamp(15px, 1.4vw, 18px);
+  font-weight: 680;
+  line-height: 1.4;
+}
+
+.state-panel-description {
+  max-width: 56ch;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.state-panel-meta {
+  margin-top: 3px !important;
+  font: 9px/1.5 var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.state-panel-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+
+.state-panel-actions > :where(a, button) {
+  min-height: 40px;
+  padding: 0 16px;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  background: #fff;
+  color: var(--ink);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  font-size: 11px;
+  font-weight: 700;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.state-panel-actions > :where(a, button):hover {
+  border-color: var(--green-dark);
+  background: var(--green-soft);
+}
+
+@keyframes state-panel-spin {
+  to { transform: rotate(360deg); }
+}

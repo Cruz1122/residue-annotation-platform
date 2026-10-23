@@ -52,6 +52,10 @@ class ArtifactRead(BaseModel):
     size: int
     sha256: str
     download_url: str
+    display_name: str
+    format_label: str
+    download_format: str
+    download_filename: str
 
 
 class StageRead(BaseModel):
@@ -149,6 +153,7 @@ class RunRead(BaseModel):
     error_message: str | None = None
     configuration: RunConfigurationRead | None = None
     preparation: RunPreparationRead | None = None
+    run_artifacts: list[ArtifactRead] = Field(default_factory=list)
     created_at: datetime | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None

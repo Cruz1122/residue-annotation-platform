@@ -240,6 +240,7 @@ def test_remote_gpp_pdb_run_is_cpu_only_and_generates_canonical_fasta(
     configuration = created.json()["configuration"]
     assert configuration["selected_stage_ids"] == [
         "protein_identity",
+        "clinvar",
         "variant_predictors",
         "pharmacogenomics",
         "uniprot_features",

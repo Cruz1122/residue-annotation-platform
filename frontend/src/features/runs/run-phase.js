@@ -1,3 +1,5 @@
+import { runFailureMessage } from '../../shared/lib/error-presentation.ts';
+
 const STATUS_TEXT = {
   pending: 'Pendiente',
   ready: 'Listo',
@@ -12,48 +14,52 @@ const STATUS_TEXT = {
   disabled: 'Desactivado',
 };
 
+function phase(label, detail, tone, presentation = 'banner') {
+  return { label, detail, tone, presentation };
+}
+
 export function runPhase(run) {
   const stages = run?.stages ?? [];
   const preparationStatus = run?.preparation?.status;
   const preflightRunning = stages.some((stage) => stage.preflight_status === 'running');
   const submitting = stages.some((stage) => stage.status === 'queued' && !stage.slurm_job_id);
   if (run?.status === 'failed' || (run?.error_message && run?.status !== 'pending')) {
-    return { label: 'Corrida fallida', detail: run.error_message ?? 'Existe un error publicado en la corrida.', tone: 'failed' };
+    return phase('Corrida fallida', runFailureMessage(run.error_code, run.error_message), 'failed');
   }
   if (run?.status === 'cancel_requested') {
-    return { label: 'Cancelación en curso', detail: 'El worker está cerrando los stages activos.', tone: 'waiting' };
+    return phase('Cancelación en curso', 'El worker está cerrando los stages activos.', 'waiting');
   }
   if (run?.status === 'cancelled') {
-    return { label: 'Corrida cancelada', detail: 'La configuración y los resultados publicados siguen disponibles.', tone: 'waiting' };
+    return phase('Corrida cancelada', 'La configuración y los resultados publicados siguen disponibles.', 'waiting');
   }
   if (run?.status === 'success') {
-    return { label: 'Corrida completada', detail: 'Los resultados publicados están disponibles.', tone: 'success' };
+    return phase('Corrida completada', 'Los resultados publicados están disponibles.', 'success');
   }
   if (run?.status === 'running' || stages.some((stage) => stage.status === 'running')) {
-    return { label: 'Corrida en ejecución', detail: 'Hay stages activos en el pipeline.', tone: 'running' };
+    return phase('Corrida en ejecución', 'Hay stages activos en el pipeline.', 'running');
   }
   if (preflightRunning) {
-    return { label: 'Validación de prerrequisitos', detail: 'Se comprueban secuencia, estructura y configuración.', tone: 'waiting' };
+    return phase('Validación de prerrequisitos', 'Se comprueban secuencia, estructura y configuración.', 'waiting', 'overlay');
   }
   if (submitting) {
-    return { label: 'Envío al ejecutor', detail: 'El worker está confirmando la ejecución del stage.', tone: 'waiting' };
+    return phase('Envío al ejecutor', 'El worker está confirmando la ejecución del stage.', 'waiting', 'overlay');
   }
   if (stages.some((stage) => stage.status === 'queued')) {
-    return { label: 'Esperando recursos de cómputo', detail: 'El job está en cola de Slurm.', tone: 'waiting' };
+    return phase('Esperando recursos de cómputo', 'El job está en cola de Slurm.', 'waiting', 'overlay');
   }
   if (preparationStatus === 'blocked') {
-    return { label: 'Preparación pendiente', detail: run.preparation?.error_message ?? 'Falta un prerrequisito operativo.', tone: 'failed' };
+    return phase('Preparación pendiente', runFailureMessage(run.preparation?.error_code, run.preparation?.error_message), 'warning', 'overlay');
   }
   if (preparationStatus === 'failed') {
-    return { label: 'Preparación fallida', detail: run.preparation?.error_message ?? 'La validación previa falló.', tone: 'failed' };
+    return phase('Preparación fallida', runFailureMessage(run.preparation?.error_code, run.preparation?.error_message), 'failed', 'overlay');
   }
   if (preparationStatus === 'running') {
-    return { label: 'Preparando datos científicos', detail: 'Se validan los prerrequisitos antes del envío.', tone: 'waiting' };
+    return phase('Preparando datos científicos', 'Se validan los prerrequisitos antes del envío.', 'waiting', 'overlay');
   }
   if (run?.status === 'pending') {
-    return { label: 'Corrida pendiente', detail: 'La configuración está confirmada y espera al worker.', tone: 'waiting' };
+    return phase('Corrida pendiente', 'La configuración está confirmada y espera al worker.', 'waiting', 'overlay');
   }
-  return { label: STATUS_TEXT[run?.status] ?? run?.status ?? 'Estado desconocido', detail: '', tone: 'waiting' };
+  return phase(STATUS_TEXT[run?.status] ?? run?.status ?? 'Estado desconocido', '', 'waiting', 'overlay');
 }
 
 export function formatWaitTime(milliseconds) {

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'preact/hooks';
 import { getRun, subscribeRunEvents } from '@shared/api/client';
+import StatePanel from '@shared/components/feedback/StatePanel.jsx';
 import { runFailureMessage, userErrorMessage } from '@shared/lib/error-presentation';
 import '@features/stages/styles/info.css';
 
@@ -137,10 +138,10 @@ export default function InformationView({ proteinId }) {
   const configuration = run?.configuration ?? {};
 
   if (state === 'missing-run') {
-    return <section class="info-view info-message"><h1>No hay una corrida seleccionada</h1><p>Selecciona una corrida persistida para consultar sus datos.</p><a class="protein-open" href={`/proteins/${encodeURIComponent(proteinId)}/progress/`}>Ver progreso</a></section>;
+    return <section class="info-view"><StatePanel kind="empty" fill icon="workflow" title="No hay una corrida seleccionada" description="Selecciona una corrida persistida para consultar sus datos."><a class="protein-open" href={`/proteins/${encodeURIComponent(proteinId)}/progress/`}>Ver progreso</a></StatePanel></section>;
   }
-  if (state === 'loading') return <section class="info-view info-message"><p>Cargando datos de la corrida…</p></section>;
-  if (state === 'error' && !run) return <section class="info-view info-message" role="alert"><h1>No se pudo cargar la corrida</h1><p>{error}</p></section>;
+  if (state === 'loading') return <section class="info-view"><StatePanel kind="loading" fill title="Cargando datos de la corrida" description="Consultando configuración, entradas y estado." /></section>;
+  if (state === 'error' && !run) return <section class="info-view"><StatePanel kind="error" fill title="No se pudo cargar la corrida" description={error} /></section>;
   if (!run) return null;
 
   return (
