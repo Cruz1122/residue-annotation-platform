@@ -6,6 +6,7 @@ import StatePanel from '@shared/components/feedback/StatePanel.jsx';
 import { getAnnotations, getArtifactBlob, getArtifactObjectUrl, getProtein, getRun, getUploadObjectUrl, subscribeRunEvents } from '@shared/api/client';
 import { userErrorMessage } from '@shared/lib/error-presentation';
 import { firstDetailValue, loadAnalysisArtifactDetails, presentationRowsFromArtifacts, recordsForPosition, summarizeArtifactRecord } from '@features/annotations/analysis-artifacts.js';
+import { acquireStructureUrl } from '@features/annotations/structure-url-cache.js';
 import {
   CONSERVATION_SCALE,
   CONSERVATION_REFERENCE_URL,
@@ -860,7 +861,7 @@ export default function ProteinViewer({ proteinId, analysis = 'topology' }) {
     if (!structureRequest || !hostRef.current) return undefined;
     let disposed = false;
     let subscription;
-    let structureObjectUrl = '';
+    const structureLease = acquireStructureUrl(structureRequest.id, structureRequest.loadUrl);
 
     async function loadViewer() {
       try {
@@ -868,9 +869,8 @@ export default function ProteinViewer({ proteinId, analysis = 'topology' }) {
           import('molstar/lib/apps/viewer/app'),
           import('molstar/lib/mol-model/structure'),
           import('molstar/lib/mol-data/int'),
-          structureRequest.loadUrl(),
+          structureLease.promise,
         ]);
-        structureObjectUrl = objectUrl;
         if (disposed || !hostRef.current) return;
         structureLibRef.current = structureLib;
         orderedSetRef.current = orderedSetMod.OrderedSet;
@@ -990,9 +990,9 @@ export default function ProteinViewer({ proteinId, analysis = 'topology' }) {
       structureRef.current = null;
       residueLociRef.current = new Map();
       rangeLociRef.current = new Map();
-      if (structureObjectUrl.startsWith('blob:')) URL.revokeObjectURL(structureObjectUrl);
+      structureLease.release();
     };
-  }, [structureRequest]);
+  }, [structureRequest?.format, structureRequest?.id, structureRequest?.label]);
 
   useEffect(() => {
     if (!structureRef.current) return;

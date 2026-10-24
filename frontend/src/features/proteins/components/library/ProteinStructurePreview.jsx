@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { getArtifactObjectUrl } from '@shared/api/client';
 import { artifactDisplayName } from '@features/artifacts/artifact-display.js';
+import { acquireStructureUrl } from '@features/annotations/structure-url-cache.js';
 import 'molstar/build/viewer/molstar.css';
 
 function isStructureArtifact(artifact) {
@@ -39,15 +40,14 @@ export default function ProteinStructurePreview({ run, label }) {
     }
 
     let disposed = false;
-    let objectUrl = '';
+    const structureLease = acquireStructureUrl(structure.id, () => getArtifactObjectUrl(structure.id));
 
     async function loadPreview() {
       try {
         const [{ Viewer }, loadedUrl] = await Promise.all([
           import('molstar/lib/apps/viewer/app'),
-          getArtifactObjectUrl(structure.id),
+          structureLease.promise,
         ]);
-        objectUrl = loadedUrl;
         if (disposed || !hostRef.current) return;
         const viewer = await Viewer.create(hostRef.current, {
           layoutIsExpanded: false,
@@ -81,9 +81,9 @@ export default function ProteinStructurePreview({ run, label }) {
       disposed = true;
       viewerRef.current?.dispose?.();
       viewerRef.current = null;
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      structureLease.release();
     };
-  }, [structure]);
+  }, [structure?.format, structure?.id, structure?.label]);
 
   return (
     <div class="protein-structure-preview" aria-label={`Vista 3D de ${label}`}>

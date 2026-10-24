@@ -12,7 +12,7 @@ from pathlib import Path, PurePosixPath
 from uuid import uuid4
 
 from app.core.config import Settings
-from app.infrastructure.hpc.archive import ArchiveError, BoundedTarWriter
+from app.infrastructure.hpc.archive import ArchiveError, BoundedTarWriter, BoundedZipWriter
 from app.infrastructure.hpc.base import (
     HPCConfigurationError,
     HPCRequestTooLargeError,
@@ -379,12 +379,17 @@ class NativeSlurmClient:
         local_path: Path,
         max_bytes: int,
         max_entries: int,
+        *,
+        archive_format: str = "tar",
     ) -> tuple[int, str]:
         """Archive a confined native GPFS directory with bounded traversal."""
 
         if max_bytes < 1 or max_entries < 1:
             raise ValueError("archive limits must be positive")
-        writer: BoundedTarWriter | None = None
+        if archive_format not in {"tar", "zip"}:
+            raise ValueError("archive_format must be tar or zip")
+        writer: BoundedTarWriter | BoundedZipWriter | None = None
+        writer_type = BoundedZipWriter if archive_format == "zip" else BoundedTarWriter
         root_fd: int | None = None
         try:
             root = self._root_path()
@@ -394,7 +399,7 @@ class NativeSlurmClient:
                 raise RuntimeError("native HPC result is not a directory")
 
             archive_root = directory.name
-            writer = BoundedTarWriter(
+            writer = writer_type(
                 local_path,
                 max_bytes=max_bytes,
                 max_entries=max_entries,

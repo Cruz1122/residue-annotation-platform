@@ -23,7 +23,9 @@ const workspaceItems: NavigationItem[] = [
 const pipelineItems: NavigationItem[] = proteinId ? [
   { id: 'progress', label: 'Progreso', icon: 'workflow', iconKind: 'ui', href: `/proteins/${proteinId}/progress/` },
   { id: 'info', label: 'Información', icon: 'info', iconKind: 'ui', href: `/proteins/${proteinId}/info/` },
+  { id: 'comparison', label: 'Comparar análisis', icon: 'layers-3', iconKind: 'ui', href: `/proteins/${proteinId}/comparison/` },
   { id: 'topology', label: 'Topología', icon: 'membrane_topology', iconKind: 'stage', href: `/proteins/${proteinId}/topology/` },
+  { id: 'bioemu', label: 'Conformeros BioEmu', icon: 'activity', iconKind: 'ui', href: `/proteins/${proteinId}/bioemu/` },
   { id: 'frustration', label: 'Frustración', icon: 'structural_frustration', iconKind: 'stage', href: `/proteins/${proteinId}/frustration/` },
   { id: 'conservation', label: 'Conservación evolutiva', icon: 'evolutionary_conservation', iconKind: 'stage', href: `/proteins/${proteinId}/conservation/` },
   { id: 'functional', label: 'Región funcional', icon: 'functional_region_evidence', iconKind: 'stage', href: `/proteins/${proteinId}/functional-regions/` },
@@ -57,6 +59,7 @@ const groups = mode === 'library'
               href={item.href}
               aria-current={active === item.id ? 'page' : undefined}
               title={item.label}
+              data-variant-navigation={item.id === 'ddg' ? true : undefined}
             >
               <span class="sidebar-icon-wrap"><Icon name={item.icon} kind={item.iconKind ?? 'ui'} class="sidebar-icon" /></span>
               <span>{item.label}</span>

@@ -27,6 +27,7 @@ from app.features.artifacts.storage import ArtifactPathError, ArtifactStore
 from app.features.runs.cache import (
     expected_artifact_types_for_stage,
     find_verified_cache_hit,
+    optional_artifact_types_for_stage,
     planned_stage_cache_identity,
 )
 from app.features.runs.manifest import (
@@ -1082,15 +1083,21 @@ class SSHStageExecutor:
         expected_artifact_names = {
             str(artifact_type) for artifact_type in STAGE_BY_ID[stage.stage_id].produced_artifacts
         }
+        optional_artifact_names = optional_artifact_types_for_stage(stage.stage_id)
         if "annotations" in manifest_artifact_names:
             raise RemoteStageExecutionError(
                 "remote manifest reserves annotations for the annotations field"
             )
-        if manifest_artifact_names != expected_artifact_names:
+        if not expected_artifact_names.issubset(manifest_artifact_names) or not (
+            manifest_artifact_names - expected_artifact_names
+        ).issubset(optional_artifact_names):
             raise RemoteStageExecutionError(
                 "remote manifest does not satisfy the local stage artifact contract"
             )
         expected_artifact_types = expected_artifact_types_for_stage(stage.stage_id)
+        published_artifact_types = expected_artifact_types | manifest_artifact_names.difference(
+            expected_artifact_names
+        )
         reusable = self._find_reusable_result(
             session,
             stage,
@@ -1240,7 +1247,7 @@ class SSHStageExecutor:
                         _remote_operational_block(provenance).get("cache_payload", {}),
                         self.root,
                     ),
-                    "required_artifacts": sorted(expected_artifact_types),
+                    "required_artifacts": sorted(published_artifact_types),
                 },
                 owner_id=stage.run.owner_id,
                 project_id=stage.run.project_id,
@@ -1287,11 +1294,13 @@ class SSHStageExecutor:
                 remote_path = self._remote_child(remote_base, str(entry["path"]))
                 storage_name = artifact_storage_names[name]
                 directory_artifact = _is_directory_artifact(entry)
+                archive_format = "zip" if name == "variant_dir" else "tar"
                 storage_key, size, digest = self._download_remote_file(
                     store,
                     remote_path,
                     f"{storage_prefix}/{storage_name}",
                     entry,
+                    archive_format=archive_format,
                 )
                 stored_keys.append(storage_key)
                 result.artifacts.append(
@@ -1302,7 +1311,9 @@ class SSHStageExecutor:
                         sha256=digest,
                         size=size,
                         media_type=(
-                            "application/x-tar"
+                            "application/zip"
+                            if directory_artifact and archive_format == "zip"
+                            else "application/x-tar"
                             if directory_artifact
                             else _media_type_for_path(str(entry["path"]))
                         ),
@@ -1482,9 +1493,13 @@ class SSHStageExecutor:
         remote_path: str,
         storage_key: str,
         expected: dict[str, Any],
+        *,
+        archive_format: str = "tar",
     ) -> tuple[str, int, str]:
         """Stream a remote file into the store and verify manifest integrity."""
 
+        if archive_format not in {"tar", "zip"}:
+            raise RemoteStageExecutionError("unsupported directory artifact archive format")
         target = store.resolve(storage_key)
         target.parent.mkdir(parents=True, exist_ok=True)
         temporary = target.parent / f".remote-{uuid4().hex}.tmp"
@@ -1495,6 +1510,7 @@ class SSHStageExecutor:
                     temporary,
                     self.settings.hpc_max_result_bytes,
                     self.settings.hpc_max_artifact_entries,
+                    archive_format=archive_format,
                 )
             else:
                 size, digest = self.client.download_to(
@@ -1615,7 +1631,7 @@ def _artifact_storage_names(
         path = str(entry["path"])
         candidate = _safe_artifact_name(name, path)
         if _is_directory_artifact(entry):
-            candidate = f"{candidate}.tar"
+            candidate = f"{candidate}.zip" if name == "variant_dir" else f"{candidate}.tar"
         candidates[name] = candidate
         candidate_counts[candidate] = candidate_counts.get(candidate, 0) + 1
 

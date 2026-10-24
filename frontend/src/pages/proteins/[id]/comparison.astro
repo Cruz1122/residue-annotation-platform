@@ -1,0 +1,7 @@
+---
+import AppLayout from '../../../layouts/AppLayout.astro';
+import AnalysisComparison from '@features/annotations/components/comparison/AnalysisComparison.jsx';
+---
+<AppLayout title="Comparación de análisis · Residue Annotation" active="comparison" proteinId={Astro.params.id}>
+  <AnalysisComparison client:only="preact" proteinId={Astro.params.id} />
+</AppLayout>

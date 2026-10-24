@@ -12,6 +12,8 @@ import {
 } from '@shared/api/client';
 import { userErrorMessage } from '@shared/lib/error-presentation';
 import { loadAnalysisArtifactDetails } from '@features/annotations/analysis-artifacts.js';
+import { acquireStructureUrl } from '@features/annotations/structure-url-cache.js';
+import MetricSelect from '@features/annotations/components/shared/MetricSelect.jsx';
 import {
   classifyFrustrAISeqIndex,
   classifyFrustratometerValue,
@@ -882,111 +884,6 @@ function SequenceStrip({
   );
 }
 
-function MetricSelect({ id, label, options, value, onChange }) {
-  const rootRef = useRef(null);
-  const triggerRef = useRef(null);
-  const optionRefs = useRef([]);
-  const [open, setOpen] = useState(false);
-  const [activeIndex, setActiveIndex] = useState(() => Math.max(0, options.findIndex((option) => option.value === value)));
-  const selected = options.find((option) => option.value === value) ?? options[0];
-
-  useEffect(() => {
-    setActiveIndex(Math.max(0, options.findIndex((option) => option.value === value)));
-  }, [options, value]);
-
-  useEffect(() => {
-    if (!open) return undefined;
-    const handleOutside = (event) => {
-      if (!rootRef.current?.contains(event.target)) setOpen(false);
-    };
-    document.addEventListener('pointerdown', handleOutside);
-    return () => document.removeEventListener('pointerdown', handleOutside);
-  }, [open]);
-
-  useEffect(() => {
-    if (open) optionRefs.current[activeIndex]?.focus();
-  }, [activeIndex, open]);
-
-  const openAt = (index) => {
-    setActiveIndex(index);
-    setOpen(true);
-  };
-  const choose = (option) => {
-    onChange(option.value);
-    setOpen(false);
-    requestAnimationFrame(() => triggerRef.current?.focus());
-  };
-  const handleTriggerKeyDown = (event) => {
-    if (event.key === 'ArrowDown' || event.key === 'ArrowUp' || event.key === 'Enter' || event.key === ' ') {
-      event.preventDefault();
-      const selectedIndex = Math.max(0, options.findIndex((option) => option.value === value));
-      openAt(event.key === 'ArrowUp' ? Math.max(0, selectedIndex - 1) : selectedIndex);
-    }
-  };
-  const handleOptionKeyDown = (event, index) => {
-    if (event.key === 'Escape') {
-      event.preventDefault();
-      setOpen(false);
-      triggerRef.current?.focus();
-      return;
-    }
-    if (event.key === 'Enter' || event.key === ' ') {
-      event.preventDefault();
-      choose(options[index]);
-      return;
-    }
-    const navigation = {
-      ArrowDown: Math.min(options.length - 1, index + 1),
-      ArrowUp: Math.max(0, index - 1),
-      Home: 0,
-      End: options.length - 1,
-    };
-    if (navigation[event.key] !== undefined) {
-      event.preventDefault();
-      setActiveIndex(navigation[event.key]);
-    }
-  };
-
-  return (
-    <div class="frustration-method-select" ref={rootRef}>
-      <button
-        ref={triggerRef}
-        type="button"
-        class="frustration-select-trigger"
-        aria-label={label}
-        aria-haspopup="listbox"
-        aria-expanded={open}
-        aria-controls={`${id}-options`}
-        onClick={() => setOpen((current) => !current)}
-        onKeyDown={handleTriggerKeyDown}
-      >
-        <span>{selected.label}</span>
-        <span aria-hidden="true">⌄</span>
-      </button>
-      {open && (
-        <div id={`${id}-options`} class="frustration-select-options" role="listbox" aria-label={label}>
-          {options.map((option, index) => (
-            <button
-              ref={(node) => { optionRefs.current[index] = node; }}
-              key={option.value}
-              type="button"
-              role="option"
-              aria-selected={option.value === value}
-              class={option.value === value ? 'is-selected' : ''}
-              onClick={() => choose(option)}
-              onFocus={() => setActiveIndex(index)}
-              onKeyDown={(event) => handleOptionKeyDown(event, index)}
-            >
-              <span>{option.label}</span>
-              {option.value === value && <span aria-hidden="true">✓</span>}
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
 function MethodCard({
   title,
   methodKind,
@@ -1398,18 +1295,16 @@ export default function FrustrationComparison({ proteinId }) {
   const structureRequest = useMemo(() => structureSource(run), [run]);
   useEffect(() => {
     let active = true;
-    let objectUrl = '';
     setStructureUrl('');
     setStructureLoadState(structureRequest ? 'loading' : 'unavailable');
     if (!structureRequest) return () => { active = false; };
-    structureRequest.loadUrl()
+    const lease = acquireStructureUrl(structureRequest.id, structureRequest.loadUrl);
+    lease.promise
       .then((url) => {
-        objectUrl = url;
         if (active) {
           setStructureUrl(url);
           setStructureLoadState('ready');
         }
-        else URL.revokeObjectURL(url);
       })
       .catch(() => {
         if (active) {
@@ -1419,7 +1314,7 @@ export default function FrustrationComparison({ proteinId }) {
       });
     return () => {
       active = false;
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      lease.release();
     };
   }, [structureRequest?.id]);
 

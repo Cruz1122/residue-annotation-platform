@@ -51,6 +51,7 @@ const FALLBACK_NAMES = {
   rosetta_metadata: 'Metadatos de Rosetta',
   variant_annotations: 'Resultados de ΔΔG por variante',
   ddg_replicates: 'Réplicas de ΔΔG',
+  variant_dir: 'Resultados completos de variantes',
   variant_set: 'Conjunto de variantes (JSON)',
   dssp_per_residue: 'Estructura secundaria por residuo',
   sasa_per_residue: 'Área accesible al solvente por residuo',
@@ -86,10 +87,22 @@ function fallbackName(value) {
     || 'Archivo científico';
 }
 
+function safeDisplayLabel(value) {
+  return String(value ?? '')
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(/[\\/]+/g, ' · ')
+    .replace(/^\.+/, '')
+    .replace(/[<>]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 160)
+    || 'Archivo científico';
+}
+
 export function artifactDisplayName(artifact) {
-  if (artifact?.display_name) return artifact.display_name;
+  if (artifact?.display_name) return safeDisplayLabel(artifact.display_name);
   const type = String(artifact?.artifact_type ?? '').trim();
-  return FALLBACK_NAMES[type] ?? fallbackName(type);
+  return safeDisplayLabel(FALLBACK_NAMES[type] ?? fallbackName(type));
 }
 
 export function artifactFormatLabel(artifact) {
@@ -102,6 +115,7 @@ export function artifactFormatLabel(artifact) {
   if (mediaType.includes('plain')) return 'Texto';
   if (mediaType.includes('gzip')) return 'GZIP';
   if (mediaType.includes('tar')) return 'TAR';
+  if (mediaType.includes('zip')) return 'ZIP';
   if (mediaType.includes('tab-separated') || mediaType.includes('csv')) return 'Excel (.xlsx)';
   return 'Archivo científico';
 }
@@ -144,10 +158,11 @@ function mediaTypeExtension(mediaType) {
         : normalized.includes('cif') ? '.cif'
           : normalized.includes('tab-separated') ? '.tsv'
             : normalized.includes('csv') ? '.csv'
-              : normalized.includes('plain') ? '.txt'
-                : normalized.includes('gzip') ? '.gz'
-                  : normalized.includes('tar') ? '.tar'
-                    : null;
+                  : normalized.includes('plain') ? '.txt'
+                    : normalized.includes('gzip') ? '.gz'
+                      : normalized.includes('tar') ? '.tar'
+                        : normalized.includes('zip') ? '.zip'
+                        : null;
 }
 
 export function sanitizeArtifactFilename(value, artifact = {}) {

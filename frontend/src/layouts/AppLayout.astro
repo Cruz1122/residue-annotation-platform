@@ -19,6 +19,9 @@ const {
     </main>
   </div>
   <script>
+    import { getRun } from '@shared/api/client';
+    import { hasConfiguredVariants } from '@features/runs/run-capabilities.js';
+
     function keepRunQuery() {
       const run = new URLSearchParams(window.location.search).get('run');
       if (!run) return;
@@ -30,10 +33,39 @@ const {
         link.setAttribute('href', `${url.pathname}${url.search}`);
       }
     }
+
+    async function updateVariantNavigation() {
+      const link = document.querySelector('[data-variant-navigation]');
+      if (!(link instanceof HTMLAnchorElement)) return;
+      const runId = new URLSearchParams(window.location.search).get('run');
+      if (!runId) {
+        link.hidden = false;
+        link.removeAttribute('aria-hidden');
+        return;
+      }
+      try {
+        const run = await getRun(runId);
+        const currentRunId = new URLSearchParams(window.location.search).get('run');
+        if (currentRunId !== runId) return;
+        const hidden = !hasConfiguredVariants(run);
+        link.hidden = hidden;
+        link.toggleAttribute('aria-hidden', hidden);
+      } catch {
+        // Keep the navigation visible if the run cannot be checked; the page
+        // itself will still explain when no variants were published.
+        link.hidden = false;
+        link.removeAttribute('aria-hidden');
+      }
+    }
+
     keepRunQuery();
+    void updateVariantNavigation();
     if (!document.documentElement.dataset.rapKeepRun) {
       document.documentElement.dataset.rapKeepRun = '1';
-      document.addEventListener('astro:page-load', keepRunQuery);
+      document.addEventListener('astro:page-load', () => {
+        keepRunQuery();
+        void updateVariantNavigation();
+      });
     }
   </script>
 </BaseLayout>

@@ -169,6 +169,18 @@ def test_artifact_presentation_sanitizes_original_extension_and_media_type():
     assert safe_download_media_type("text/plain\r\nX-Injected: yes") == "application/octet-stream"
 
 
+def test_variant_archive_presentation_is_a_safe_zip_download():
+    presentation = artifact_presentation(
+        "variant_dir",
+        "application/zip",
+        "remote/variant_dir/rosetta.zip",
+    )
+
+    assert presentation.format_label == "ZIP"
+    assert presentation.download_format == "original"
+    assert presentation.download_filename == "resultados-completos-de-variantes.zip"
+
+
 def test_tabular_artifact_download_defaults_to_readable_excel(client, session, tmp_path):
     content = (
         b"aa_position\taa_ref\taa_alt\tddg_value\tcadd_phred_mean\tp_tm_alpha"

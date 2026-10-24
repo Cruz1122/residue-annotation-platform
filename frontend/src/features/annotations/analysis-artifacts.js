@@ -8,7 +8,7 @@ export const ANALYSIS_DETAIL_ARTIFACTS = {
   frustration: ['frustratometer_conformers', 'frustratometer_per_residue', 'frustration_per_residue', 'frustraiseq_per_residue', 'metadata', 'closure', 'frames_index'],
   conservation: ['evolution_per_residue', 'metadata'],
   functional: ['ldlc_statin_evidence', 'functional_features_long', 'summary'],
-  ddg: ['variant_annotations', 'provenance', 'rosetta_metadata'],
+  ddg: ['variant_annotations', 'ddg_replicates', 'provenance', 'rosetta_metadata', 'variant_set'],
   contacts: ['contact_residue_summary', 'contacts_long', 'provenance'],
 };
 

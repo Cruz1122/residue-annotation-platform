@@ -82,7 +82,9 @@ The default entry limit is `10000`. Lower it for a constrained deployment when
 the stage contracts permit it; increasing it does not make an unapproved
 scientific output safe to publish. Directory artifacts have no producer-side
 file hash in the observed `stage-result-v1` contract, so the backend records a
-local archive hash and marks the artifact media type as `application/x-tar`.
+local archive hash. The `variant_dir` artifact uses `application/zip`; other
+directory artifacts keep `application/x-tar` for compatibility with their
+existing consumers.
 External annotation paths are rejected until MN5 supplies the same bound
 integrity record for them; ordinary annotation tables must remain inside the
 stage result directory. The result tree must be immutable after `DONE`; SFTP

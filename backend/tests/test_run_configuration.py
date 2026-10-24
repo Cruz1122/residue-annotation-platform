@@ -16,6 +16,7 @@ from app.features.runs.worker_service import (
     plan_stage_cache,
     refresh_ready_states,
 )
+from app.features.stages.registry import STAGE_BY_ID
 from app.main import app
 from sqlalchemy import select
 
@@ -385,6 +386,86 @@ def test_verified_cache_hit_is_linked_before_execution(client, session, tmp_path
     assert linked.cache_key == cache_key
     assert linked.reuse_reason["source_stage_result_id"] == result.id
     assert linked.reuse_reason["factors"] == factors
+
+
+def test_bioemu_verified_cache_hit_accepts_optional_samples_xtc(client, session, tmp_path: Path):
+    protein_id = _protein(client)
+    created = client.post("/api/v1/runs", json={"protein_id": protein_id})
+    assert created.status_code == 201
+    run = session.get(Run, created.json()["id"])
+    assert run is not None
+    stage = next(item for item in run.stages if item.stage_id == "conformational_ensemble")
+    requirement = "msa_cache:af3-msa-v1"
+    preparation = run.preparation
+    assert preparation is not None
+    preparation.status = "success"
+    preparation.required_requirements = [requirement]
+    preparation.satisfied_requirements = [requirement]
+    preparation.snapshots = {requirement: {"sha256": "verified-snapshot"}}
+    cache_key, factors = planned_stage_cache_identity(
+        stage,
+        run.configuration,
+        {
+            dependency: f"verified:{dependency}"
+            for dependency in STAGE_BY_ID[stage.stage_id].dependencies
+        },
+    )
+    stage.cache_key = cache_key
+    stage.cache_factors = factors
+
+    settings = Settings(
+        app_env="test",
+        database_url="sqlite://",
+        artifact_root=tmp_path / "artifacts",
+    )
+    store = ArtifactStore(settings)
+    artifact_types = expected_artifact_types_for_stage(stage.stage_id) | {"samples_xtc"}
+    result = StageResult(
+        protein_id=run.protein_id,
+        stage_id=stage.stage_id,
+        cache_key=cache_key,
+        status="success",
+        provenance={
+            "source": "mn5-slurm",
+            "remote_provenance_verified": True,
+            "cache_key": cache_key,
+            "cache_factors": factors,
+            "required_artifacts": sorted(artifact_types),
+        },
+        owner_id=run.owner_id,
+        project_id=run.project_id,
+    )
+    session.add(result)
+    session.flush()
+    for artifact_type in artifact_types:
+        storage_key = f"remote/bioemu-cache/{artifact_type}.bin"
+        payload = artifact_type.encode()
+        artifact_path = store.resolve(storage_key)
+        artifact_path.parent.mkdir(parents=True, exist_ok=True)
+        artifact_path.write_bytes(payload)
+        session.add(
+            Artifact(
+                stage_result_id=result.id,
+                artifact_type=artifact_type,
+                storage_backend="filesystem",
+                storage_key=storage_key,
+                sha256=hashlib.sha256(payload).hexdigest(),
+                size=len(payload),
+            )
+        )
+    session.commit()
+
+    assert (
+        find_verified_cache_hit(
+            session,
+            stage,
+            cache_key,
+            store,
+            require_provenance=True,
+            expected_artifact_types=expected_artifact_types_for_stage(stage.stage_id),
+        )
+        is result
+    )
 
 
 def test_cache_identity_changes_when_confirmed_scientific_inputs_change(client, session):

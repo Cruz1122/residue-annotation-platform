@@ -18,7 +18,7 @@ from paramiko.ssh_exception import (
 )
 
 from app.core.config import Settings
-from app.infrastructure.hpc.archive import ArchiveError, BoundedTarWriter
+from app.infrastructure.hpc.archive import ArchiveError, BoundedTarWriter, BoundedZipWriter
 from app.infrastructure.hpc.base import (
     HPCConfigurationError,
     HPCRequestTooLargeError,
@@ -497,14 +497,19 @@ class SSHSlurmClient:
         local_path: Path,
         max_bytes: int,
         max_entries: int,
+        *,
+        archive_format: str = "tar",
     ) -> tuple[int, str]:
         """Archive a confined remote directory without using a remote shell."""
 
         path = _remote_path_under(self.settings.hpc_remote_root, remote_path)
         if max_bytes < 1 or max_entries < 1:
             raise ValueError("archive limits must be positive")
+        if archive_format not in {"tar", "zip"}:
+            raise ValueError("archive_format must be tar or zip")
         client = self._connect()
-        writer: BoundedTarWriter | None = None
+        writer: BoundedTarWriter | BoundedZipWriter | None = None
+        writer_type = BoundedZipWriter if archive_format == "zip" else BoundedTarWriter
         try:
             try:
                 sftp = client.open_sftp()
@@ -517,7 +522,7 @@ class SSHSlurmClient:
                         raise RuntimeError("remote result is not a directory")
 
                     archive_root = PurePosixPath(path).name
-                    writer = BoundedTarWriter(
+                    writer = writer_type(
                         local_path,
                         max_bytes=max_bytes,
                         max_entries=max_entries,

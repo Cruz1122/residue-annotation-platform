@@ -1,7 +1,7 @@
 ---
 import AppLayout from '../../../layouts/AppLayout.astro';
-import ProteinViewer from '@features/annotations/components/viewer/ProteinViewer.jsx';
+import VariantComparison from '@features/annotations/components/variant/VariantComparison.jsx';
 ---
 <AppLayout title="ΔΔG de variante · Residue Annotation" active="ddg" proteinId={Astro.params.id}>
-  <ProteinViewer client:only="preact" proteinId={Astro.params.id} analysis="ddg" />
+  <VariantComparison client:only="preact" proteinId={Astro.params.id} />
 </AppLayout>

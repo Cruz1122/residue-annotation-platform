@@ -444,6 +444,7 @@ def _original_suffix(storage_key: str, media_type: str) -> str:
         "chemical/x-cif": ".cif",
         "application/gzip": ".gz",
         "application/x-tar": ".tar",
+        "application/zip": ".zip",
     }.get(media)
     if media_suffix:
         return media_suffix
@@ -489,6 +490,7 @@ def artifact_presentation(
         "application/octet-stream": "Binario científico",
         "application/gzip": "GZIP",
         "application/x-tar": "TAR",
+        "application/zip": "ZIP",
     }.get(str(media_type or "").lower(), "Archivo científico")
     return ArtifactPresentation(
         display_name=display_name,

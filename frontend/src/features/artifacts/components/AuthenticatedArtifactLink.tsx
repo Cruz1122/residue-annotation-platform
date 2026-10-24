@@ -51,6 +51,8 @@ export default function AuthenticatedArtifactLink({
       const anchor = document.createElement('a');
       anchor.href = objectUrl;
       anchor.download = artifactName;
+      anchor.rel = 'noopener noreferrer';
+      anchor.referrerPolicy = 'no-referrer';
       anchor.click();
       window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
       setState('idle');

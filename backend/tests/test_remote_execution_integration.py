@@ -16,6 +16,7 @@ from app.features.runs.remote_executor import (
     RemoteStageExecutionError,
     SSHStageExecutor,
     _expected_remote_provenance_binding,
+    _artifact_storage_names,
     _validate_legacy_remote_cache_contract,
     _validated_local_cache_plan,
 )
@@ -38,6 +39,18 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 SEQUENCE = "ACDEFGHIKLMNPQRSTVWY"
+
+
+def test_variant_directory_storage_name_uses_zip_without_changing_other_directory_artifacts():
+    names = _artifact_storage_names(
+        {
+            "variant_dir": {"path": "variant_structures", "size": None, "sha256": None},
+            "ensemble_dir": {"path": "ensemble", "size": None, "sha256": None},
+        },
+        annotations_present=False,
+    )
+
+    assert names == {"variant_dir": "variant_structures.zip", "ensemble_dir": "ensemble.tar"}
 
 
 def _artifact_entries(stage_id: str, payload: bytes) -> dict[str, dict[str, object]]:
@@ -221,15 +234,45 @@ class FakeDirectoryArtifactRemote(FakeArtifactOnlyRemote):
         local_path: Path,
         max_bytes: int,
         max_entries: int,
+        *,
+        archive_format: str = "tar",
     ) -> tuple[int, str]:
         assert remote_path.endswith(
             "/results/conformational_ensemble/conformational_ensemble_final_dir"
         )
+        assert archive_format == "tar"
         payload = b"deterministic-directory-archive"
         assert len(payload) <= max_bytes
         local_path.parent.mkdir(parents=True, exist_ok=True)
         local_path.write_bytes(payload)
         return len(payload), hashlib.sha256(payload).hexdigest()
+
+
+class FakeBioEmuTrajectoryRemote(FakeDirectoryArtifactRemote):
+    def __init__(self, run_id: str):
+        super().__init__(run_id)
+        self.trajectory = b"published-xtc-bytes"
+
+    def read_text(self, remote_path: str, max_bytes: int) -> str:
+        if remote_path.endswith("result_manifest.json"):
+            manifest = json.loads(super().read_text(remote_path, max_bytes))
+            manifest["artifacts"]["samples_xtc"] = {
+                "path": "final/samples.xtc",
+                "external": False,
+                "sha256": hashlib.sha256(self.trajectory).hexdigest(),
+                "size": len(self.trajectory),
+            }
+            return json.dumps(manifest)
+        return super().read_text(remote_path, max_bytes)
+
+    def download_to(self, remote_path: str, local_path: Path, max_bytes: int) -> tuple[int, str]:
+        if remote_path.endswith("/final/samples.xtc"):
+            payload = self.trajectory
+            assert len(payload) <= max_bytes
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+            local_path.write_bytes(payload)
+            return len(payload), hashlib.sha256(payload).hexdigest()
+        return super().download_to(remote_path, local_path, max_bytes)
 
 
 class FakeCollidingArtifactRemote(FakeCompletedRemote):
@@ -822,6 +865,47 @@ def test_artifact_only_remote_stage_ingests_without_annotations(client, session,
     assert artifact.storage_key.endswith("/conformational_ensemble_final_dir.tar")
     assert result.provenance["remote_directory_artifacts"] == ["conformational_ensemble_final_dir"]
     assert not result.provenance["remote_provenance"].get("annotations")
+
+
+def test_bioemu_remote_result_accepts_optional_samples_xtc(client, session, tmp_path: Path):
+    protein = client.post(
+        "/api/v1/proteins",
+        json={"sequence": SEQUENCE, "aliases": [{"source": "uniprot", "identifier": "P00001"}]},
+    )
+    assert protein.status_code == 201
+    created_run = client.post(
+        "/api/v1/runs",
+        json={"protein_id": protein.json()["id"]},
+    )
+    assert created_run.status_code == 201
+
+    run = session.get(Run, created_run.json()["id"])
+    assert run is not None
+    stage = next(item for item in run.stages if item.stage_id == "conformational_ensemble")
+    settings = Settings(
+        app_env="test",
+        database_url="sqlite://",
+        artifact_root=tmp_path / "artifacts",
+        hpc_remote_root="/gpfs/test",
+    )
+    executor = SSHStageExecutor.__new__(SSHStageExecutor)
+    executor.settings = settings
+    remote = FakeBioEmuTrajectoryRemote(run.id)
+    executor.client = remote
+    _prepare_remote(remote, stage)
+
+    result_id, reused = executor._ingest_result(session, stage)
+    session.commit()
+
+    assert reused is False
+    result = session.get(StageResult, result_id)
+    assert result is not None
+    artifacts = {artifact.artifact_type: artifact for artifact in result.artifacts}
+    assert set(artifacts) == expected_artifact_types_for_stage(stage.stage_id) | {"samples_xtc"}
+    trajectory = artifacts["samples_xtc"]
+    assert trajectory.media_type == "application/octet-stream"
+    assert (settings.artifact_root / trajectory.storage_key).read_bytes() == remote.trajectory
+    assert "samples_xtc" in result.provenance["required_artifacts"]
 
 
 def test_remote_artifacts_with_same_basename_get_distinct_storage_keys(

@@ -11,6 +11,7 @@ import {
 } from '@shared/api/client';
 import { userErrorMessage } from '@shared/lib/error-presentation';
 import { loadAnalysisArtifactDetails } from '@features/annotations/analysis-artifacts.js';
+import { acquireStructureUrl } from '@features/annotations/structure-url-cache.js';
 import {
   formatScaleNumber,
   hexToColorInt,
@@ -1292,24 +1293,21 @@ export default function ArpeggioView({ proteinId }) {
 
   useEffect(() => {
     let active = true;
-    let objectUrl = '';
     setStructureUrl('');
     setStructureLoadState(structureRequest ? 'loading' : 'unavailable');
     if (!structureRequest) return () => { active = false; };
-    structureRequest.loadUrl().then((url) => {
-      objectUrl = url;
+    const lease = acquireStructureUrl(structureRequest.id, structureRequest.loadUrl);
+    lease.promise.then((url) => {
       if (active) {
         setStructureUrl(url);
         setStructureLoadState('ready');
-      } else {
-        URL.revokeObjectURL(url);
       }
     }).catch(() => {
       if (active) setStructureLoadState('error');
     });
     return () => {
       active = false;
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      lease.release();
     };
   }, [structureRequest?.id]);
 

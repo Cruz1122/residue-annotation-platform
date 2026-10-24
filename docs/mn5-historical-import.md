@@ -128,6 +128,38 @@ igual que `selected_variants.tsv`. Cada DDG ofrece su propia tabla final. Las
 vistas de topología, frustración y DDG consumen las filas y artefactos reales;
 no hay fixtures científicos ni tarjetas de resultado simuladas.
 
+## Publicación de conformeros BioEmu
+
+En la corrida P02649 importada inicialmente, el catálogo contiene el `topology.pdb`,
+metadatos que reportan 207 conformeros y los arrays de coordenadas Cα, pero no un
+`samples.xtc` en el directorio final. La importación histórica v1 omitió
+`conformational_ensemble_final_dir` porque era un directorio; por eso la vista
+muestra el PDB relajado y mantiene desactivada la reproducción.
+
+Una inspección de solo lectura por SFTP a MN5 el 2026-10-24 confirmó la diferencia
+entre la salida final y la caché de muestreo. `final/` contiene `topology.pdb`,
+`ensemble_aligned_ca.npy`, `ensemble_flat_ca.npy`, `frames_index.tsv` y
+`conformational_ensemble_final_metadata.json`; no contiene `samples.xtc`. Los
+metadatos reportan BioEmu v1.2, 207 conformeros retenidos de 1.250 muestras, 317
+residuos y coordenadas en ångström. `frames_index.tsv` mapea cada uno de los 207
+conformeros a un par `round`/`xtc_frame` y no publica métricas por conformero.
+
+El manifiesto marca `ensemble_cache` como externo. En esa caché existen cinco
+archivos reales `round0/samples.xtc` a `round4/samples.xtc` (511.100–573.780 bytes),
+cuyos frames son la fuente del índice final. Esos archivos no forman parte de los
+artefactos publicados por la etapa ni del TAR local. Por tanto, BioEmu sí generó
+XTC para esta corrida, pero la etapa no publicó un XTC único con los 207 frames
+retenidos. La compatibilidad de los XTC binarios con el PDB no se validó mediante
+su lectura en esta inspección.
+
+La importación v2 conserva el directorio `final` como TAR acotado y permite
+reconciliarlo en una corrida ya importada cuando el snapshot de origen lo contiene.
+Ese TAR sigue sin hacer reproducible P02649 mientras no incluya un XTC. La solución
+de publicación debe producir un XTC consolidado seleccionando los frames reales
+indicados por `frames_index.tsv`, o exponer los cinco XTC junto con ese índice para
+que el consumidor recupere el orden correcto. No se deben convertir los arrays Cα
+en un XTC ni presentar uno de los cinco archivos parciales como el ensemble final.
+
 Las filas de anotación y toda la relación científica viven en PostgreSQL. Los
 bytes de los archivos publicados siguen el contrato de almacenamiento de la
 plataforma: se conservan en el `ArtifactStore` local/volumen persistente y
@@ -148,20 +180,38 @@ Antes de insertar se verificaron, entre otras, estas invariantes:
 - Hash y tamaño de las exportaciones finales.
 - Integridad de cada archivo regular que se transfirió.
 
-El adaptador aplica un límite deliberado de 2,000,000 bytes por artefacto
-histórico. Se excluyen directorios, caches externas y archivos regulares que
-superan ese límite; el caso observado es el árbol grande de
-`structural_contacts/arpeggio_json`. La exclusión no se oculta: cada
-`StageResult.provenance.import_validation` conserva `skipped_artifacts`, el
-límite, el número de artefactos copiados y las filas importadas. La tabla final
-de cada corrida y los archivos necesarios para las vistas sí quedaron
-publicados.
+El adaptador aplica un límite deliberado de 2,000,000 bytes por archivo
+regular histórico. Los directorios se excluyen por defecto para no publicar
+caches o árboles no controlados, con una excepción explícita para
+`variant_dir`: cuando el snapshot local contiene ese directorio, se archiva
+como un ZIP determinista y acotado de hasta 64 MiB y 10,000 entradas. El
+archivo conserva el tipo de artefacto `variant_dir`, se sirve como descarga
+autenticada y permite a la interfaz recuperar los PDB/mmCIF publicados por
+variante sin fabricar estructuras. Los symlinks, entradas no regulares y
+nombres inseguros hacen fallar la importación; no se siguen ni se incluyen en
+el ZIP. Para `conformational_ensemble`, el directorio `final` se conserva como
+TAR determinista y acotado. La vista solo habilita la reproducción cuando el
+artefacto publicado contiene un XTC real compatible con la topología. La caché
+externa de P02649 no se incorpora automáticamente en ese TAR; requiere una salida
+consolidada publicada por el pipeline o un contrato explícito para los XTC por
+ronda y su índice.
+
+El caso observado de árbol grande de `structural_contacts/arpeggio_json` sigue
+fuera del límite y no se publica. La exclusión no se oculta: cada
+`StageResult.provenance.import_validation` conserva `skipped_artifacts`, los
+límites de archivos y directorios, el número de artefactos copiados y las
+filas importadas. Si el snapshot histórico no contiene `variant_dir`, se
+registra `directory_not_available` y la vista mantiene únicamente las
+estructuras realmente publicadas.
 
 La importación es idempotente por cuenta, proyecto y job remoto. Una segunda
-invocación completa devuelve `already_imported` con los IDs existentes; una
-importación parcial se detiene con error y no mezcla corridas ni crea nuevos
-artefactos. La base impone además `uq_runs_owner_project_remote_job`, y la
-copia de cada archivo se crea con `O_EXCL`: dos importadores concurrentes no
+invocación completa devuelve `already_imported` con los IDs existentes; si se
+le entrega un snapshot que contiene el directorio final de BioEmu o los tres
+`variant_dir` que faltaban, la misma orden ejecuta una reconciliación acotada y
+devuelve `reconciled`, sin crear corridas duplicadas.
+Una importación parcial se detiene con error y no mezcla corridas ni crea
+nuevos artefactos. La base impone además `uq_runs_owner_project_remote_job`, y
+la copia de cada archivo se crea con `O_EXCL`: dos importadores concurrentes no
 pueden sobrescribir el archivo del otro. Si PostgreSQL reporta la colisión, el
 adaptador hace rollback, verifica el conjunto completo de jobs y reconcilia la
 respuesta como `already_imported` sólo cuando los cuatro runs están presentes.

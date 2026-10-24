@@ -18,13 +18,19 @@ if TYPE_CHECKING:
 
 
 def expected_artifact_types_for_stage(stage_id: str) -> set[str]:
-    """Return the complete local artifact contract for one registry stage."""
+    """Return the required local artifact types for one registry stage."""
 
     definition = STAGE_BY_ID[stage_id]
     expected = {str(artifact_type) for artifact_type in definition.produced_artifacts}
     if definition.produced_annotations:
         expected.add("annotations")
     return expected
+
+
+def optional_artifact_types_for_stage(stage_id: str) -> set[str]:
+    """Return registry-declared artifact types that older results may omit."""
+
+    return {str(artifact_type) for artifact_type in STAGE_BY_ID[stage_id].optional_artifacts}
 
 
 def canonical_cache_key(
@@ -252,8 +258,14 @@ def find_verified_cache_hit(
             declared_types = {str(artifact_type) for artifact_type in required_artifacts}
             if declared_types != available_types:
                 continue
-            if expected_artifact_types is not None and available_types != expected_artifact_types:
-                continue
+            if expected_artifact_types is not None:
+                allowed_types = expected_artifact_types | optional_artifact_types_for_stage(
+                    stage.stage_id
+                )
+                if not expected_artifact_types.issubset(available_types):
+                    continue
+                if not available_types.issubset(allowed_types):
+                    continue
         elif isinstance(required_artifacts, list):
             if not set(map(str, required_artifacts)).issubset(available_types):
                 continue

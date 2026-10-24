@@ -1,0 +1,146 @@
+.bioemu-sequence-residue { transition: background 100ms ease, box-shadow 100ms ease; }
+.bioemu-sequence-residue:hover { background: #dbe4e5; }
+.bioemu-sequence-residue:disabled { cursor: default; }
+
+.bioemu-icon-button:focus-visible,
+.bioemu-loop-button:focus-visible,
+.bioemu-controls button:focus-visible,
+.bioemu-controls input:focus-visible {
+  outline: 2px solid #3973cd;
+  outline-offset: 2px;
+}
+
+.bioemu-visual-card { min-width: 0; }
+
+.bioemu-viewer-region {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 240px;
+  background: var(--surface);
+}
+
+.bioemu-structure-viewport { position: absolute; inset: 0; }
+.bioemu-structure-viewport .msp-traj-controls { display: none !important; }
+
+.bioemu-viewport-error {
+  position: absolute;
+  z-index: 7;
+  top: 54px;
+  right: 11px;
+  bottom: auto;
+  left: 11px;
+  min-height: 54px;
+  padding: 9px 11px;
+  border: 1px solid color-mix(in srgb, var(--danger) 25%, white);
+  border-radius: 5px;
+  background: rgba(255, 255, 255, .96);
+  box-shadow: 0 3px 12px rgba(17, 33, 38, .1);
+}
+
+.bioemu-controls {
+  flex: 0 0 auto;
+  padding: 10px 12px 11px;
+  border-top: 1px solid var(--line);
+  display: grid;
+  gap: 9px;
+  color: var(--ink);
+}
+
+.bioemu-playback-row,
+.bioemu-playback-actions,
+.bioemu-options-row,
+.bioemu-speed-control,
+.bioemu-loop-button { display: flex; align-items: center; }
+.bioemu-playback-row { min-width: 0; justify-content: center; }
+.bioemu-playback-actions { justify-content: center; gap: 5px; }
+
+.bioemu-icon-button {
+  width: 34px;
+  height: 34px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--panel);
+  color: var(--ink);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.bioemu-icon-button:hover:not(:disabled),
+.bioemu-loop-button:hover:not(:disabled) { border-color: #739b8f; }
+.bioemu-icon-button:disabled,
+.bioemu-loop-button:disabled { opacity: .45; cursor: not-allowed; }
+.bioemu-icon-button .icon-slot,
+.bioemu-loop-button .icon-slot { width: 14px; height: 14px; }
+.bioemu-play-toggle { border-color: var(--line-strong); color: var(--green-dark); }
+.bioemu-play-toggle[aria-pressed='true'] { background: #e7f0eb; border-color: #6b9584; }
+
+.bioemu-slider-row { min-width: 0; display: flex; align-items: center; }
+.bioemu-slider-row input[type='range'] { width: 100%; margin: 0; accent-color: var(--green-dark); cursor: pointer; }
+.bioemu-slider-row input[type='range']:disabled { cursor: not-allowed; }
+
+.bioemu-options-row { justify-content: center; gap: 12px; flex-wrap: wrap; }
+.bioemu-speed-control { gap: 7px; color: var(--muted); font-size: 10px; }
+.bioemu-speed-control > span { white-space: nowrap; }
+.bioemu-speed-control .frustration-method-select { min-width: 0; }
+.bioemu-speed-control .frustration-select-trigger {
+  min-width: 156px;
+  height: 32px;
+  border-radius: 5px;
+  color: var(--ink);
+  font-size: 10px;
+}
+.bioemu-speed-control .frustration-select-options {
+  top: auto;
+  right: auto;
+  bottom: calc(100% + 5px);
+  left: 0;
+  min-width: 100%;
+}
+
+.bioemu-loop-button {
+  min-height: 32px;
+  padding: 5px 10px;
+  gap: 7px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--panel);
+  color: var(--ink);
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
+}
+.bioemu-loop-button.is-active { border-color: #6b9584; background: #e7f0eb; color: var(--green-dark); }
+.bioemu-loop-button .icon-slot { width: 13px; height: 13px; }
+.bioemu-visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+
+.bioemu-panel { min-width: 0; }
+.bioemu-conformer-mark { width: 37px; height: 37px; display: grid; place-items: center; color: var(--ink); }
+.bioemu-conformer-mark .icon-slot { width: 22px; height: 22px; }
+.bioemu-conformer-title { min-width: 0; display: flex; align-items: center; gap: 6px; }
+.bioemu-conformer-title > strong { min-width: 0; }
+.bioemu-conformer-counter { color: var(--ink) !important; font: 650 13px var(--font-mono) !important; white-space: nowrap; }
+.bioemu-conformer-counter.is-unavailable { color: var(--muted) !important; }
+.bioemu-sampling-info { display: inline-flex; flex: 0 0 auto; color: var(--muted); cursor: help; }
+.bioemu-sampling-info .icon-slot { width: 13px; height: 13px; }
+
+.bioemu-published-metric {
+  margin-top: 6px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #f8faf9;
+}
+
+.bioemu-metric-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 9px; }
+.bioemu-metric-heading strong { color: var(--ink); font-size: 10px; }
+.bioemu-metric-heading b { font: 700 13px var(--font-mono); }
+.bioemu-published-metric p { margin: 7px 0; color: var(--muted); font-size: 10px; line-height: 1.45; }
+.bioemu-published-metric a { display: inline-block; margin-top: 4px; color: #3074c7; font-size: 10px; text-decoration: underline; text-underline-offset: 2px; }
+
+@media (max-width: 680px) {
+  .bioemu-options-row { gap: 9px; }
+  .bioemu-speed-control { flex-wrap: wrap; justify-content: center; }
+}

@@ -7,10 +7,11 @@ import subprocess
 import tarfile
 from pathlib import Path
 from types import SimpleNamespace
+from zipfile import ZipFile
 
 import pytest
 from app.core.config import Settings
-from app.infrastructure.hpc.archive import ArchiveError, BoundedTarWriter
+from app.infrastructure.hpc.archive import ArchiveError, BoundedTarWriter, BoundedZipWriter
 from app.infrastructure.hpc.base import (
     HPCConfigurationError,
     HPCRequestTooLargeError,
@@ -1012,6 +1013,40 @@ def test_bounded_tar_writer_is_deterministic_and_enforces_limits(tmp_path):
     limited.abort()
 
     invalid = BoundedTarWriter(tmp_path / "invalid.tar", max_bytes=32_768, max_entries=4)
+    with pytest.raises(ArchiveError, match="unsafe archive path"):
+        invalid.add_file("bundle//escape", source=io.BytesIO(b"x"), size=1)
+    invalid.abort()
+
+
+def test_bounded_zip_writer_is_deterministic_and_enforces_limits(tmp_path):
+    archive = tmp_path / "artifacts" / "bundle.zip"
+    writer = BoundedZipWriter(archive, max_bytes=32_768, max_entries=4)
+    writer.add_directory("bundle")
+    writer.add_file("bundle/result.txt", source=io.BytesIO(b"result"), size=6)
+    size, digest = writer.close()
+
+    assert size == archive.stat().st_size
+    assert len(digest) == 64
+    with ZipFile(archive, "r") as stream:
+        assert stream.namelist() == ["bundle/", "bundle/result.txt"]
+        assert stream.read("bundle/result.txt") == b"result"
+
+    second_archive = tmp_path / "artifacts" / "bundle-second.zip"
+    second = BoundedZipWriter(second_archive, max_bytes=32_768, max_entries=4)
+    second.add_directory("bundle")
+    second.add_file("bundle/result.txt", source=io.BytesIO(b"result"), size=6)
+    second_size, second_digest = second.close()
+    assert second_size == size
+    assert second_digest == digest
+    assert second_archive.read_bytes() == archive.read_bytes()
+
+    limited = BoundedZipWriter(tmp_path / "limited.zip", max_bytes=4_096, max_entries=1)
+    limited.add_directory("bundle")
+    with pytest.raises(ArchiveError, match="too many entries"):
+        limited.add_file("bundle/result.txt", source=io.BytesIO(b"x"), size=1)
+    limited.abort()
+
+    invalid = BoundedZipWriter(tmp_path / "invalid.zip", max_bytes=32_768, max_entries=4)
     with pytest.raises(ArchiveError, match="unsafe archive path"):
         invalid.add_file("bundle//escape", source=io.BytesIO(b"x"), size=1)
     invalid.abort()

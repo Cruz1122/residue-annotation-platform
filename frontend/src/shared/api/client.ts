@@ -481,13 +481,35 @@ export function getAnnotations(runId: string, limit?: number, offset = 0): Promi
 export async function getArtifactBlob(
   artifactId: string,
   exportFormat: 'original' | 'xlsx' = 'original',
+  options: { signal?: AbortSignal; onProgress?: (progress: { loaded: number; total: number | null; complete?: boolean }) => void } = {},
 ): Promise<Blob> {
   // The artifact endpoint may negotiate a spreadsheet for tabular files when
   // the format is omitted. Analysis views need the published TSV/CSV bytes so
   // their parsers must request the original representation explicitly.
   const query = `?format=${exportFormat}`;
-  const response = await fetchResponse(`/artifacts/${encodeURIComponent(artifactId)}/content${query}`);
-  return await response.blob();
+  const response = await fetchResponse(`/artifacts/${encodeURIComponent(artifactId)}/content${query}`, {
+    signal: options.signal,
+  });
+  if (!options.onProgress || !response.body) return await response.blob();
+
+  const rawLength = Number(response.headers.get('content-length'));
+  const total = Number.isFinite(rawLength) && rawLength >= 0 ? rawLength : null;
+  const reader = response.body.getReader();
+  const chunks: Uint8Array<ArrayBuffer>[] = [];
+  let loaded = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(new Uint8Array(value.buffer as ArrayBuffer, value.byteOffset, value.byteLength));
+      loaded += value.byteLength;
+      options.onProgress({ loaded, total });
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  options.onProgress({ loaded, total, complete: true });
+  return new Blob(chunks, { type: response.headers.get('content-type') ?? '' });
 }
 
 export async function getArtifactObjectUrl(

@@ -832,6 +832,7 @@ def test_remote_download_verifies_integrity_and_publishes_atomically(tmp_path: P
     )
 
     assert store.resolve(key).read_bytes() == payload
+    assert store.resolve(key).stat().st_mode & 0o777 == 0o640
     assert (size, published_digest) == (len(payload), digest)
 
     with pytest.raises(RemoteStageExecutionError):

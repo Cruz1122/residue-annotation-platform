@@ -39,6 +39,13 @@ test('normalizes unknown backend names instead of exposing snake case', () => {
   );
 });
 
+test('sanitizes artifact labels before rendering them in the scientific panel', () => {
+  assert.equal(
+    artifactDisplayName({ display_name: '../Resultados\n<internos>' }),
+    '· Resultados internos',
+  );
+});
+
 test('sanitizes artifact download names and derives a safe extension', () => {
   const artifact = {
     artifact_type: 'metadata',
@@ -48,4 +55,16 @@ test('sanitizes artifact download names and derives a safe extension', () => {
 
   assert.equal(artifactDownloadFilename(artifact), 'resultados-script.json');
   assert.doesNotMatch(artifactDownloadFilename(artifact), /[\\/\u0000-\u001f\u007f\"]/);
+});
+
+test('keeps a published variant directory as a safe ZIP download', () => {
+  const artifact = {
+    artifact_type: 'variant_dir',
+    media_type: 'application/zip',
+    download_filename: '../../rosetta-results.zip',
+  };
+
+  assert.equal(artifactDisplayName(artifact), 'Resultados completos de variantes');
+  assert.equal(artifactFormatLabel(artifact), 'ZIP');
+  assert.equal(artifactDownloadFilename(artifact), 'rosetta-results.zip');
 });

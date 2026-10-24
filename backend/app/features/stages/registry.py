@@ -17,6 +17,7 @@ class StageDefinition:
     required_annotations: tuple[str, ...] = CANONICAL_ANNOTATION_INPUTS
     produced_annotations: tuple[str, ...] = ()
     produced_artifacts: tuple[str, ...] = ()
+    optional_artifacts: tuple[str, ...] = ()
     consumed_artifacts: tuple[tuple[str, str], ...] = ()
     stage_version: str = "1"
     technical_requirements: tuple[str, ...] = ()
@@ -47,6 +48,7 @@ class StageDefinition:
         value["required_annotations"] = list(self.required_annotations)
         value["produced_annotations"] = list(self.produced_annotations)
         value["produced_artifacts"] = list(self.produced_artifacts)
+        value["optional_artifacts"] = list(self.optional_artifacts)
         value["consumed_artifacts"] = [
             {"producer": producer, "key": key} for producer, key in self.consumed_artifacts
         ]
@@ -199,6 +201,7 @@ STAGE_DEFINITIONS: tuple[StageDefinition, ...] = (
             "msa_manifest",
             "log",
         ),
+        optional_artifacts=("samples_xtc",),
         technical_requirements=("msa_cache:af3-msa-v1",),
         description="Generate and filter a reference conformational ensemble.",
     ),
@@ -486,6 +489,12 @@ def validate_stage_registry() -> None:
             raise ValueError(f"stage {stage.id} repeats a produced annotation")
         if len(stage.produced_artifacts) != len(set(stage.produced_artifacts)):
             raise ValueError(f"stage {stage.id} repeats a produced artifact")
+        if len(stage.optional_artifacts) != len(set(stage.optional_artifacts)):
+            raise ValueError(f"stage {stage.id} repeats an optional artifact")
+        if set(stage.produced_artifacts).intersection(stage.optional_artifacts):
+            raise ValueError(f"stage {stage.id} marks a required artifact as optional")
+        if any(not name.strip() for name in stage.optional_artifacts):
+            raise ValueError(f"stage {stage.id} has an empty optional artifact")
         missing = set(stage.dependencies).difference(STAGE_BY_ID)
         if missing:
             raise ValueError(f"stage {stage.id} references unknown dependencies: {sorted(missing)}")

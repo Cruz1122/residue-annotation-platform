@@ -4,6 +4,7 @@ import hashlib
 import tarfile
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO
+from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 
 class ArchiveError(RuntimeError):
@@ -111,6 +112,88 @@ class BoundedTarWriter:
         self.path.unlink(missing_ok=True)
 
     def __enter__(self) -> BoundedTarWriter:
+        return self
+
+    def __exit__(self, exc_type, _exc, _traceback) -> None:
+        if exc_type is not None:
+            self.abort()
+            return
+        try:
+            self.close()
+        except Exception:
+            self.abort()
+            raise
+
+
+class BoundedZipWriter:
+    """Write a deterministic, bounded ZIP archive from verified entries."""
+
+    def __init__(self, path: Path, *, max_bytes: int, max_entries: int):
+        if max_bytes < 1 or max_entries < 1:
+            raise ValueError("archive limits must be positive")
+        self.path = path
+        self.max_bytes = max_bytes
+        self.max_entries = max_entries
+        self._raw_bytes = 0
+        self._entries = 0
+        self._closed = False
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._zip = ZipFile(self.path, mode="w", compression=ZIP_DEFLATED, allowZip64=False)
+
+    def _reserve(self, size: int) -> None:
+        if size < 0:
+            raise ArchiveError("remote artifact has an invalid size")
+        if self._entries >= self.max_entries:
+            raise ArchiveError("remote artifact contains too many entries")
+        if self._raw_bytes + size > self.max_bytes:
+            raise ArchiveError("remote artifact exceeds the configured size limit")
+        self._entries += 1
+        self._raw_bytes += size
+
+    @staticmethod
+    def _info(name: str, *, directory: bool, size: int = 0) -> ZipInfo:
+        _validate_archive_name(name)
+        info = ZipInfo(f"{name}/" if directory else name, date_time=(1980, 1, 1, 0, 0, 0))
+        info.create_system = 3
+        info.compress_type = ZIP_DEFLATED
+        info.file_size = size
+        info.external_attr = ((0o40700 if directory else 0o100600) << 16) | (0x10 if directory else 0)
+        return info
+
+    def add_directory(self, name: str) -> None:
+        self._reserve(0)
+        self._zip.writestr(self._info(name, directory=True), b"")
+
+    def add_file(self, name: str, source: BinaryIO, size: int) -> None:
+        self._reserve(size)
+        reader = _SizedReader(source, size)
+        with self._zip.open(self._info(name, directory=False, size=size), mode="w") as target:
+            while chunk := reader.read(1024 * 1024):
+                target.write(chunk)
+        if reader.remaining:
+            raise ArchiveError("remote artifact changed while it was being read")
+
+    def close(self) -> tuple[int, str]:
+        if self._closed:
+            raise RuntimeError("archive is already closed")
+        self._zip.close()
+        self._closed = True
+        size = self.path.stat().st_size
+        if size > self.max_bytes:
+            raise ArchiveError("remote artifact archive exceeds the configured size limit")
+        digest = hashlib.sha256()
+        with self.path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return size, digest.hexdigest()
+
+    def abort(self) -> None:
+        if not self._closed:
+            self._zip.close()
+            self._closed = True
+        self.path.unlink(missing_ok=True)
+
+    def __enter__(self) -> BoundedZipWriter:
         return self
 
     def __exit__(self, exc_type, _exc, _traceback) -> None:

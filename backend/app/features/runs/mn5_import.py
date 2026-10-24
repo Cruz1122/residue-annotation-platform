@@ -18,6 +18,8 @@ import mimetypes
 import os
 import re
 import shutil
+import stat
+import tempfile
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -30,7 +32,7 @@ from app.core.config import Settings, get_settings
 from app.core.db import SessionLocal
 from app.features.annotations.models import ANNOTATION_TABLES
 from app.features.annotations.service import insert_annotation_rows
-from app.features.artifacts.storage import ArtifactStore
+from app.features.artifacts.storage import ArtifactIntegrityError, ArtifactPathError, ArtifactStore
 from app.features.auth.models import User
 from app.features.auth.service import normalize_email, record_audit
 from app.features.proteins.models import Protein, ProteinIdentifier, ProteinProjectAccess
@@ -45,6 +47,7 @@ from app.features.runs.models import (
 )
 from app.features.runs.state import RunStageStatus, RunStatus
 from app.features.stages.registry import STAGE_BY_ID, STAGE_DEFINITIONS
+from app.infrastructure.hpc.archive import ArchiveError, BoundedTarWriter, BoundedZipWriter
 
 
 class Mn5ImportError(ValueError):
@@ -57,7 +60,9 @@ SEQUENCE_SHA256 = "eddd8b84fbb094df0b4067ca1d0b9b137ddaee4f8b3a548fcff5152e92a4d
 SCIENTIFIC_PROTEIN_ID = "P02649"
 SCIENTIFIC_GENE = "APOE"
 MAX_IMPORTED_ARTIFACT_BYTES = 2_000_000
-IMPORT_CONTRACT_VERSION = "mn5-historical-import-v1"
+MAX_IMPORTED_DIRECTORY_BYTES = 64 * 1024 * 1024
+MAX_IMPORTED_DIRECTORY_ENTRIES = 10_000
+IMPORT_CONTRACT_VERSION = "mn5-historical-import-v2"
 
 CORE_REMOTE_RUN_ID = "P02649_eddd8b84fbb0_20261018T210041779016Z"
 CORE_REMOTE_JOB_ID = "47442432"
@@ -124,6 +129,26 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _require_artifact_integrity(store: ArtifactStore, artifact: Artifact) -> None:
+    """Ensure an already imported artifact still matches its stored metadata."""
+
+    try:
+        stream = store.open_verified(
+            artifact.storage_key,
+            size=artifact.size,
+            sha256=artifact.sha256,
+        )
+        stream.close()
+    except ArtifactIntegrityError as exc:
+        raise Mn5ImportError(
+            f"el artefacto importado no conserva su integridad: {artifact.storage_key}"
+        ) from exc
+    except (OSError, ArtifactPathError) as exc:
+        raise Mn5ImportError(
+            f"el artefacto importado no está disponible: {artifact.storage_key}"
+        ) from exc
 
 
 def _portable(value: object, remote_root: str) -> object:
@@ -354,10 +379,87 @@ def _artifact_source(stage_dir: Path, relative_path: object) -> Path:
     candidate = Path(relative_path)
     if candidate.is_absolute() or ".." in candidate.parts:
         raise Mn5ImportError("artefacto con ruta insegura")
-    resolved = (stage_dir / candidate).resolve()
+    unresolved = stage_dir / candidate
+    current = stage_dir
+    for part in candidate.parts:
+        current /= part
+        if current.is_symlink():
+            raise Mn5ImportError("artefacto con componente symlink no permitido")
+    resolved = unresolved.resolve()
     if not resolved.is_relative_to(stage_dir.resolve()):
         raise Mn5ImportError("artefacto fuera del directorio del stage")
     return resolved
+
+
+def _archive_local_directory(
+    source: Path,
+    destination: Path,
+    *,
+    archive_format: str = "zip",
+    max_bytes: int = MAX_IMPORTED_DIRECTORY_BYTES,
+    max_entries: int = MAX_IMPORTED_DIRECTORY_ENTRIES,
+) -> tuple[int, str]:
+    """Create a bounded, deterministic TAR or ZIP for a published directory artifact."""
+
+    source = source.absolute()
+    if source.is_symlink() or not source.is_dir():
+        raise Mn5ImportError(f"el artefacto de directorio no es una carpeta regular: {source}")
+    archive_root = source.name
+    writer = None
+    try:
+        writer_class = {"tar": BoundedTarWriter, "zip": BoundedZipWriter}.get(archive_format)
+        if writer_class is None:
+            raise Mn5ImportError(
+                f"formato de archivo de directorio no compatible: {archive_format}"
+            )
+        writer = writer_class(
+            destination,
+            max_bytes=max_bytes,
+            max_entries=max_entries,
+        )
+        writer.add_directory(archive_root)
+
+        def walk(current: Path, archive_directory: str) -> None:
+            entries = sorted(current.iterdir(), key=lambda item: item.name)
+            if len(entries) > max_entries:
+                raise ArchiveError("local artifact contains too many entries")
+            for path in entries:
+                name = path.name
+                info = path.lstat()
+                if stat.S_ISLNK(info.st_mode):
+                    raise Mn5ImportError(f"el directorio contiene un symlink: {path.name}")
+                archive_child = f"{archive_directory}/{name}"
+                if stat.S_ISDIR(info.st_mode):
+                    writer.add_directory(archive_child)
+                    walk(path, archive_child)
+                    continue
+                if not stat.S_ISREG(info.st_mode):
+                    raise Mn5ImportError(
+                        f"el directorio contiene una entrada no regular: {path.name}"
+                    )
+                file_descriptor = os.open(
+                    path,
+                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                )
+                try:
+                    opened_size = os.fstat(file_descriptor).st_size
+                    with os.fdopen(file_descriptor, "rb", closefd=False) as stream:
+                        writer.add_file(archive_child, stream, opened_size)
+                    if os.fstat(file_descriptor).st_size != opened_size:
+                        raise Mn5ImportError(f"el archivo cambió durante el archivado: {path.name}")
+                finally:
+                    os.close(file_descriptor)
+
+        walk(source, archive_root)
+        return writer.close()
+    except Mn5ImportError:
+        if writer is not None:
+            writer.abort()
+        raise
+    except (ArchiveError, OSError) as exc:
+        if writer is not None:
+            writer.abort()
+        raise Mn5ImportError(f"no se pudo archivar el directorio {source.name}") from exc
 
 
 def _artifact_descriptor(
@@ -395,6 +497,57 @@ def _artifact_descriptor(
             )
             continue
         if size is None:
+            if artifact_type == "variant_dir":
+                source = _artifact_source(stage_dir, remote_path)
+                if not source.exists():
+                    skipped.append(
+                        {
+                            "artifact_type": artifact_type,
+                            "reason": "directory_not_available",
+                            "path": remote_path,
+                        }
+                    )
+                    continue
+                if not source.is_dir():
+                    raise Mn5ImportError(f"variant_dir no es un directorio: {remote_path}")
+                descriptors.append(
+                    {
+                        "artifact_type": str(artifact_type),
+                        "path": source,
+                        "kind": "directory",
+                        "archive_format": "zip",
+                        "archive_filename": f"{source.name}.zip",
+                    }
+                )
+                continue
+            if (
+                payload.get("stage_id") == "conformational_ensemble"
+                and artifact_type == "conformational_ensemble_final_dir"
+            ):
+                source = _artifact_source(stage_dir, remote_path)
+                if not source.exists():
+                    skipped.append(
+                        {
+                            "artifact_type": artifact_type,
+                            "reason": "directory_not_available",
+                            "path": remote_path,
+                        }
+                    )
+                    continue
+                if not source.is_dir():
+                    raise Mn5ImportError(
+                        f"conformational_ensemble_final_dir no es un directorio: {remote_path}"
+                    )
+                descriptors.append(
+                    {
+                        "artifact_type": str(artifact_type),
+                        "path": source,
+                        "kind": "directory",
+                        "archive_format": "tar",
+                        "archive_filename": f"{source.name}.tar",
+                    }
+                )
+                continue
             skipped.append(
                 {
                     "artifact_type": artifact_type,
@@ -481,23 +634,51 @@ def _copy_stage_artifact(
 ) -> Artifact:
     source = Path(descriptor["path"])
     artifact_type = str(descriptor["artifact_type"])
+    is_directory = descriptor.get("kind") == "directory"
+    filename = str(descriptor.get("archive_filename") if is_directory else source.name)
+    archive_format = str(descriptor.get("archive_format", "zip"))
     storage_key = _artifact_storage_key(
         sequence_sha256,
         stage_result.stage_id,
         stage_result.cache_key,
         artifact_type,
-        source.name,
+        filename,
     )
     existing = session.scalar(select(Artifact).where(Artifact.storage_key == storage_key))
-    expected_size = int(descriptor["size"])
-    expected_sha256 = str(descriptor["sha256"])
+    temporary: Path | None = None
+    if is_directory:
+        destination = store.resolve(storage_key)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary_fd, temporary_name = tempfile.mkstemp(
+            prefix=".historical-directory-",
+            suffix=".tmp",
+            dir=destination.parent,
+        )
+        os.close(temporary_fd)
+        temporary = Path(temporary_name)
+        try:
+            expected_size, expected_sha256 = _archive_local_directory(
+                source,
+                temporary,
+                archive_format=archive_format,
+            )
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
+    else:
+        expected_size = int(descriptor["size"])
+        expected_sha256 = str(descriptor["sha256"])
     if existing is not None:
         if (
             existing.stage_result_id != stage_result.id
             or existing.size != expected_size
             or existing.sha256 != expected_sha256
         ):
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
             raise Mn5ImportError(f"colisión de artefacto histórico: {storage_key}")
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
         return existing
     destination = store.resolve(storage_key)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -508,18 +689,25 @@ def _copy_stage_artifact(
         storage_key=storage_key,
         sha256=expected_sha256,
         size=expected_size,
-        media_type=_media_type(source),
+        media_type=(
+            "application/x-tar" if is_directory and archive_format == "tar"
+            else "application/zip" if is_directory
+            else _media_type(source)
+        ),
     )
     session.add(artifact)
     session.flush()
     try:
-        _copy_file_exclusive(source, destination)
+        _copy_file_exclusive(temporary if temporary is not None else source, destination)
         created_storage_keys.append(storage_key)
     except FileExistsError:
         if destination.stat().st_size != expected_size or _sha256(destination) != expected_sha256:
             raise Mn5ImportError(
                 f"el archivo existente no conserva la integridad de {source.name}"
             ) from None
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
     return artifact
 
 
@@ -617,8 +805,11 @@ def _ensure_stage_result(
         "annotation_rows": len(rows),
         "skipped_artifacts": skipped,
         "bounded_artifact_limit_bytes": MAX_IMPORTED_ARTIFACT_BYTES,
+        "bounded_directory_limit_bytes": MAX_IMPORTED_DIRECTORY_BYTES,
+        "bounded_directory_entry_limit": MAX_IMPORTED_DIRECTORY_ENTRIES,
     }
     stage_provenance = dict(stage_result.provenance or {})
+    stage_provenance["import_contract_version"] = IMPORT_CONTRACT_VERSION
     stage_provenance["import_validation"] = import_validation
     stage_result.provenance = stage_provenance
     session.flush()
@@ -1106,6 +1297,8 @@ def _create_historical_run(
             "remote_job_id": remote_job_id,
             "stage_status": "success",
             "bounded_artifact_limit_bytes": MAX_IMPORTED_ARTIFACT_BYTES,
+            "bounded_directory_limit_bytes": MAX_IMPORTED_DIRECTORY_BYTES,
+            "bounded_directory_entry_limit": MAX_IMPORTED_DIRECTORY_ENTRIES,
         },
         preparation_key=hashlib.sha256(remote_run_id.encode("utf-8")).hexdigest(),
         attempt_count=1,
@@ -1238,6 +1431,251 @@ def _historical_import_result(
     raise Mn5ImportError("hay una importación MN5 parcial para esta cuenta; no se modifica")
 
 
+def _historical_variant_directories_available(source_root: Path, direct_root: Path) -> bool:
+    """Check whether a complete local snapshot can repair the three DDG runs."""
+
+    context_run_ids = [CORE_REMOTE_RUN_ID, *(str(spec["remote_run_id"]) for spec in DDG_RUNS)]
+    if any(
+        not (direct_root / "runs" / remote_run_id / "run_context.json").is_file()
+        for remote_run_id in context_run_ids
+    ):
+        return False
+    for spec in DDG_RUNS:
+        try:
+            stage_dir = _stage_directory(source_root, "variant_ddg", str(spec["cache_key"]))
+        except Mn5ImportError:
+            return False
+        manifest_path = stage_dir / "result_manifest.json"
+        if not manifest_path.is_file():
+            return False
+        manifest = _load_json(manifest_path)
+        artifacts = manifest.get("artifacts")
+        if not isinstance(artifacts, dict):
+            return False
+        entry = artifacts.get("variant_dir")
+        if (
+            not isinstance(entry, dict)
+            or entry.get("external") is True
+            or entry.get("size") is not None
+        ):
+            return False
+        source = _artifact_source(stage_dir, entry.get("path"))
+        if source.is_symlink() or not source.is_dir():
+            return False
+    return True
+
+
+def _historical_bioemu_directory_available(source_root: Path, direct_root: Path) -> bool:
+    """Check whether the imported core run can recover its published BioEmu directory."""
+
+    if not (direct_root / "runs" / CORE_REMOTE_RUN_ID / "run_context.json").is_file():
+        return False
+    try:
+        stage_dir = _stage_directory(
+            source_root,
+            "conformational_ensemble",
+            CORE_STAGE_KEYS["conformational_ensemble"],
+        )
+        manifest = _load_json(stage_dir / "result_manifest.json")
+        entry = manifest.get("artifacts", {}).get("conformational_ensemble_final_dir")
+        if (
+            not isinstance(entry, dict)
+            or entry.get("external") is True
+            or entry.get("size") is not None
+        ):
+            return False
+        source = _artifact_source(stage_dir, entry.get("path"))
+        return source.is_dir() and not source.is_symlink()
+    except (Mn5ImportError, AttributeError):
+        return False
+
+
+def _reconcile_existing_bioemu_artifact(
+    session: Session,
+    user: User,
+    *,
+    existing_result: dict[str, object],
+    source_root: Path,
+    direct_root: Path,
+    settings: Settings,
+) -> dict[str, object]:
+    """Attach the omitted BioEmu final directory to an already imported core run."""
+
+    run_ids = existing_result.get("run_ids")
+    if not isinstance(run_ids, list) or not run_ids:
+        raise Mn5ImportError("la importación existente no tiene corridas para reconciliar")
+    core_run = session.get(Run, str(run_ids[0]))
+    if core_run is None:
+        raise Mn5ImportError("no se encontró la corrida CPU histórica para reconciliar")
+    context = _remote_context(direct_root, CORE_REMOTE_RUN_ID)
+    sequence = str(context.get("sequence") or "")
+    if not sequence:
+        raise Mn5ImportError("el snapshot de reparación no contiene la secuencia canónica")
+    payload = _stage_payload(
+        source_root,
+        "conformational_ensemble",
+        CORE_STAGE_KEYS["conformational_ensemble"],
+        settings.hpc_remote_root.rstrip("/"),
+        expected_job_id=CORE_REMOTE_JOB_ID,
+    )
+    stage_result = session.scalar(
+        select(StageResult).where(
+            StageResult.protein_id == core_run.protein_id,
+            StageResult.stage_id == "conformational_ensemble",
+            StageResult.cache_key == CORE_STAGE_KEYS["conformational_ensemble"],
+            StageResult.project_id == user.project_id,
+        )
+    )
+    if stage_result is None:
+        raise Mn5ImportError("falta StageResult histórico de BioEmu para reconciliar")
+
+    store = ArtifactStore(settings)
+    existing_artifact = session.scalar(
+        select(Artifact).where(
+            Artifact.stage_result_id == stage_result.id,
+            Artifact.artifact_type == "conformational_ensemble_final_dir",
+        )
+    )
+    if existing_artifact is not None:
+        _require_artifact_integrity(store, existing_artifact)
+        return existing_result
+
+    created_storage_keys: list[str] = []
+    try:
+        _, detail = _ensure_stage_result(
+            session,
+            store,
+            payload,
+            sequence=sequence,
+            sequence_sha256=SEQUENCE_SHA256,
+            owner_id=user.id,
+            project_id=user.project_id,
+            protein_id=core_run.protein_id,
+            remote_run_id=CORE_REMOTE_RUN_ID,
+            created_storage_keys=created_storage_keys,
+        )
+        record_audit(
+            session,
+            action="reconcile_mn5_bioemu_artifacts",
+            actor_user_id=user.id,
+            resource_type="run",
+            resource_id=core_run.id,
+            client_ip=None,
+            details={
+                "source": "mn5",
+                "remote_run_id": CORE_REMOTE_RUN_ID,
+                "remote_job_id": CORE_REMOTE_JOB_ID,
+                "conformational_ensemble_final_dir_reconciled": True,
+            },
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+        for storage_key in created_storage_keys:
+            try:
+                store.resolve(storage_key).unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
+    return {
+        **existing_result,
+        "status": "reconciled",
+        "bioemu_artifacts_reconciled": True,
+        "bioemu_import_details": detail,
+    }
+
+
+def _reconcile_existing_variant_artifacts(
+    session: Session,
+    user: User,
+    *,
+    existing_result: dict[str, object],
+    source_root: Path,
+    direct_root: Path,
+    settings: Settings,
+) -> dict[str, object]:
+    """Attach published variant directories without creating duplicate runs."""
+
+    run_ids = existing_result.get("run_ids")
+    if not isinstance(run_ids, list) or not run_ids:
+        raise Mn5ImportError("la importación existente no tiene corridas para reconciliar")
+    first_run = session.get(Run, str(run_ids[0]))
+    if first_run is None:
+        raise Mn5ImportError("no se encontró la corrida histórica para reconciliar")
+    core_context = _remote_context(direct_root, CORE_REMOTE_RUN_ID)
+    sequence = str(core_context.get("sequence") or "")
+    if not sequence:
+        raise Mn5ImportError("el snapshot de reparación no contiene la secuencia canónica")
+    remote_root = settings.hpc_remote_root.rstrip("/")
+    store = ArtifactStore(settings)
+    created_storage_keys: list[str] = []
+    details: dict[str, dict[str, object]] = {}
+    try:
+        for spec in DDG_RUNS:
+            remote_run_id = str(spec["remote_run_id"])
+            context = _remote_context(direct_root, remote_run_id)
+            payloads = _expected_stage_payloads(
+                source_root,
+                context,
+                EXPECTED_DDG_STAGE_IDS,
+                expected_job_id=str(spec["remote_job_id"]),
+                remote_root=remote_root,
+            )
+            if payloads["variant_ddg"]["cache_key"] != spec["cache_key"]:
+                raise Mn5ImportError(f"hash DDG inesperado para {spec['variant']}")
+            stage_result = session.scalar(
+                select(StageResult).where(
+                    StageResult.protein_id == first_run.protein_id,
+                    StageResult.stage_id == "variant_ddg",
+                    StageResult.cache_key == str(spec["cache_key"]),
+                    StageResult.project_id == user.project_id,
+                )
+            )
+            if stage_result is None:
+                raise Mn5ImportError(f"falta StageResult histórico para {spec['variant']}")
+            _, detail = _ensure_stage_result(
+                session,
+                store,
+                payloads["variant_ddg"],
+                sequence=sequence,
+                sequence_sha256=SEQUENCE_SHA256,
+                owner_id=user.id,
+                project_id=user.project_id,
+                protein_id=first_run.protein_id,
+                remote_run_id=remote_run_id,
+                created_storage_keys=created_storage_keys,
+            )
+            details[str(spec["variant"])] = detail
+        record_audit(
+            session,
+            action="reconcile_mn5_variant_artifacts",
+            actor_user_id=user.id,
+            resource_type="run",
+            resource_id=first_run.id,
+            client_ip=None,
+            details={
+                "source": "mn5",
+                "remote_job_ids": [str(spec["remote_job_id"]) for spec in DDG_RUNS],
+                "variant_dir_reconciled": True,
+            },
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+        for storage_key in created_storage_keys:
+            try:
+                store.resolve(storage_key).unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
+    return {
+        **existing_result,
+        "status": "reconciled",
+        "variant_artifacts_reconciled": len(details),
+        "variant_import_details": details,
+    }
+
+
 def import_mn5_results(
     session: Session,
     *,
@@ -1258,6 +1696,24 @@ def import_mn5_results(
     all_jobs = [CORE_REMOTE_JOB_ID, *(str(spec["remote_job_id"]) for spec in DDG_RUNS)]
     existing_result = _historical_import_result(session, user, all_jobs)
     if existing_result is not None:
+        if _historical_bioemu_directory_available(source_root, direct_root):
+            existing_result = _reconcile_existing_bioemu_artifact(
+                session,
+                user,
+                existing_result=existing_result,
+                source_root=source_root,
+                direct_root=direct_root,
+                settings=settings,
+            )
+        if _historical_variant_directories_available(source_root, direct_root):
+            return _reconcile_existing_variant_artifacts(
+                session,
+                user,
+                existing_result=existing_result,
+                source_root=source_root,
+                direct_root=direct_root,
+                settings=settings,
+            )
         return existing_result
     contexts = {CORE_REMOTE_RUN_ID: _remote_context(direct_root, CORE_REMOTE_RUN_ID)}
     for spec in DDG_RUNS:
@@ -1398,6 +1854,8 @@ def import_mn5_results(
         "core_stage_results": len(core_results),
         "variant_stage_results": len(DDG_RUNS),
         "bounded_artifact_limit_bytes": MAX_IMPORTED_ARTIFACT_BYTES,
+        "bounded_directory_limit_bytes": MAX_IMPORTED_DIRECTORY_BYTES,
+        "bounded_directory_entry_limit": MAX_IMPORTED_DIRECTORY_ENTRIES,
     }
 
 

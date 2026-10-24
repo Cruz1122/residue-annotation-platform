@@ -1,0 +1,7 @@
+---
+import AppLayout from '../../../layouts/AppLayout.astro';
+import BioEmuView from '@features/annotations/components/bioemu/BioEmuView.jsx';
+---
+<AppLayout title="Conformeros BioEmu" active="bioemu" proteinId={Astro.params.id}>
+  <BioEmuView client:only="preact" proteinId={Astro.params.id} />
+</AppLayout>
