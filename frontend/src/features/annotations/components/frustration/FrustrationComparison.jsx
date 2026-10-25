@@ -466,6 +466,7 @@ function ComparisonStructurePanel({
   canonicalByStructure,
   selectedPosition,
   selectedResidueLabel,
+  focusSelectionOnCamera,
   onPick,
   cameraSyncRef,
   cameraSyncEnabled,
@@ -624,7 +625,7 @@ function ComparisonStructurePanel({
         const boundingSphere = canvas3d?.boundingSphereVisible ?? canvas3d?.boundingSphere;
         canvas3d?.requestResize?.();
         if (canvas3d?.camera && boundingSphere?.radius > 0) {
-          canvas3d.camera.focus(boundingSphere.center, boundingSphere.radius * 0.25, 180);
+          canvas3d.camera.focus(boundingSphere.center, boundingSphere.radius * 0.8, 180);
         }
 
         const registry = viewer.plugin.representation.structure.themes.colorThemeRegistry;
@@ -755,17 +756,19 @@ function ComparisonStructurePanel({
             end_auth_seq_id: Number(residueNumber),
             pdbx_PDB_ins_code: insertionCode || undefined,
           },
-          action: ['select', 'focus'],
-          focusOptions: RESIDUE_FOCUS_OPTIONS,
+          action: focusSelectionOnCamera ? ['select', 'focus'] : ['select'],
+          ...(focusSelectionOnCamera ? { focusOptions: RESIDUE_FOCUS_OPTIONS } : {}),
         });
-        requestCameraSyncAfterAction(cameraSyncRef, panelId, RESIDUE_FOCUS_OPTIONS.durationMs + 120);
+        if (focusSelectionOnCamera) {
+          requestCameraSyncAfterAction(cameraSyncRef, panelId, RESIDUE_FOCUS_OPTIONS.durationMs + 120);
+        }
       } catch {
         // Selection is an enhancement; the sequence and table remain usable.
       }
     };
     const focusTimer = window.setTimeout(focusResidue, 80);
     return () => window.clearTimeout(focusTimer);
-  }, [selectedPosition, structureByCanonical, viewerState]);
+  }, [focusSelectionOnCamera, selectedPosition, structureByCanonical, viewerState]);
 
   return (
     <div
@@ -880,6 +883,7 @@ function MethodCard({
   structureProps,
   selectedPosition,
   onPick,
+  focusSelectionOnCamera,
   structureUrl,
   structurePending,
   structureError,
@@ -917,6 +921,7 @@ function MethodCard({
         canonicalByStructure={structureProps.byStructure}
         selectedPosition={selectedPosition}
         selectedResidueLabel={selectedResidueLabel}
+        focusSelectionOnCamera={focusSelectionOnCamera}
         onPick={onPick}
         cameraSyncRef={cameraSyncRef}
         cameraSyncEnabled={cameraSyncEnabled}
@@ -1141,6 +1146,7 @@ export default function FrustrationComparison({ proteinId }) {
   const [structureMethod, setStructureMethod] = useState(METHOD_OPTIONS.structure[0].value);
   const [sequenceMethod, setSequenceMethod] = useState(METHOD_OPTIONS.sequence[0].value);
   const [selectedPosition, setSelectedPosition] = useState(null);
+  const [focusSelectionOnCamera, setFocusSelectionOnCamera] = useState(false);
   const [cameraSyncEnabled, setCameraSyncEnabled] = useState(true);
   const cameraSyncRef = useRef({
     enabled: true,
@@ -1154,6 +1160,7 @@ export default function FrustrationComparison({ proteinId }) {
   const selectionInitializedRef = useRef(false);
 
   const toggleSelectedPosition = (position) => {
+    setFocusSelectionOnCamera(true);
     setSelectedPosition((current) => (current === position ? null : position));
   };
 
@@ -1367,6 +1374,7 @@ export default function FrustrationComparison({ proteinId }) {
 
   useEffect(() => {
     selectionInitializedRef.current = false;
+    setFocusSelectionOnCamera(false);
     setSelectedPosition(null);
   }, [proteinId, runId]);
 
@@ -1415,6 +1423,7 @@ export default function FrustrationComparison({ proteinId }) {
             onMethodChange={setStructureMethod}
             structureProps={structureProps}
             selectedPosition={selectedPosition}
+            focusSelectionOnCamera={focusSelectionOnCamera}
             onPick={toggleSelectedPosition}
             structureUrl={structureUrl}
             structurePending={structureLoadState === 'loading'}
@@ -1432,6 +1441,7 @@ export default function FrustrationComparison({ proteinId }) {
             onMethodChange={setSequenceMethod}
             structureProps={sequenceProps}
             selectedPosition={selectedPosition}
+            focusSelectionOnCamera={focusSelectionOnCamera}
             onPick={toggleSelectedPosition}
             structureUrl={structureUrl}
             structurePending={structureLoadState === 'loading'}

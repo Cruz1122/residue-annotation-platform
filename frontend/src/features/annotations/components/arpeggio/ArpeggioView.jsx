@@ -562,6 +562,7 @@ function ArpeggioStructure({
   selectedPosition,
   selectedLabel,
   selectedStructureKey,
+  focusSelectionOnCamera,
   roleColorByKey,
   overlayContacts,
   mapping,
@@ -910,15 +911,15 @@ function ArpeggioStructure({
         viewer.plugin.managers.interactivity.lociSelects.deselectAll();
         viewer.structureInteractivity({
           elements: { items },
-          action: ['focus'],
-          focusOptions: FOCUS_OPTIONS,
+          action: focusSelectionOnCamera ? ['focus'] : ['select'],
+          ...(focusSelectionOnCamera ? { focusOptions: FOCUS_OPTIONS } : {}),
         });
       } catch {
         // Selection/focus is an enhancement; the overlay remains usable.
       }
     }, 80);
     return () => window.clearTimeout(timer);
-  }, [selectedPosition, selectedStructureKey, overlayContacts, viewerState]);
+  }, [focusSelectionOnCamera, selectedPosition, selectedStructureKey, overlayContacts, viewerState]);
 
   return (
     <div class="frustration-structure-viewport arpeggio-structure-viewport" role="group" aria-label="Estructura molecular ARPEGGIO">
@@ -1144,6 +1145,7 @@ export default function ArpeggioView({ proteinId }) {
   const [state, setState] = useState('loading');
   const [error, setError] = useState('');
   const [selectedPosition, setSelectedPosition] = useState(null);
+  const [focusSelectionOnCamera, setFocusSelectionOnCamera] = useState(false);
   const [selectedTypes, setSelectedTypes] = useState(null);
   const [metric, setMetric] = useState('contacts');
   const selectionInitializedRef = useRef(false);
@@ -1294,6 +1296,7 @@ export default function ArpeggioView({ proteinId }) {
 
   useEffect(() => {
     selectionInitializedRef.current = false;
+    setFocusSelectionOnCamera(false);
     setSelectedPosition(null);
     setSelectedTypes(null);
     setMetric('contacts');
@@ -1312,7 +1315,13 @@ export default function ArpeggioView({ proteinId }) {
     setSelectedPosition(model.autoSelectPosition);
   }, [model.autoSelectPosition, model.hasPublishedRows, selectedPosition]);
 
+  const selectPosition = (position) => {
+    setFocusSelectionOnCamera(true);
+    setSelectedPosition(position);
+  };
+
   const toggleSelectedPosition = (position) => {
+    setFocusSelectionOnCamera(true);
     setSelectedPosition((current) => (current === position ? null : position));
   };
 
@@ -1400,6 +1409,7 @@ export default function ArpeggioView({ proteinId }) {
             selectedPosition={selectedPosition}
             selectedLabel={selectedLabel}
             selectedStructureKey={selectedStructureKey}
+            focusSelectionOnCamera={focusSelectionOnCamera}
             roleColorByKey={roleColorByKey}
             overlayContacts={overlayContacts}
             mapping={mapping}
@@ -1414,7 +1424,7 @@ export default function ArpeggioView({ proteinId }) {
           selectedTypes={model.selectedTypes}
           onToggleType={toggleType}
           onSelectAllTypes={selectAllTypes}
-          onSelectPartner={setSelectedPosition}
+          onSelectPartner={selectPosition}
           coverageTruncated={coverageTruncated}
         />
       </div>

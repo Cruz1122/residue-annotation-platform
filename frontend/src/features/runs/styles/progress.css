@@ -129,20 +129,19 @@
   stroke: #afb5b9;
   stroke-width: 1.9;
   stroke-linecap: round;
-  stroke-linejoin: miter;
+  stroke-linejoin: round;
   opacity: .86;
   transition: stroke 320ms ease, opacity 320ms ease;
   vector-effect: non-scaling-stroke;
   pointer-events: stroke;
   cursor: pointer;
 }
-.pipeline-edge-hit-area,
-.pipeline-portal-bridge-hit-area {
+.pipeline-edge-hit-area {
   fill: none;
   stroke: rgba(0,0,0,.001);
   stroke-width: 14;
   stroke-linecap: round;
-  stroke-linejoin: miter;
+  stroke-linejoin: round;
   pointer-events: stroke;
   cursor: pointer;
 }
@@ -162,57 +161,8 @@
 .pipeline-edge.edge-skipped { stroke: #8b9298; stroke-dasharray: 5 5; opacity: .77; }
 .pipeline-edge.edge-cancelled { stroke: #8b9298; stroke-dasharray: 5 5; opacity: .77; }
 .pipeline-edge.edge-disabled { stroke: #cbd0d3; stroke-dasharray: 4 6; opacity: .44; }
-.pipeline-edge--portal {
-  stroke: var(--portal-accent, #7a8589) !important;
-  stroke-width: 1.25;
-  stroke-linecap: butt;
-  stroke-linejoin: miter;
-  stroke-dasharray: 2 8;
-  opacity: .36;
-}
-.pipeline-edge--portal.pipeline-edge--active {
-  stroke-width: 2.4 !important;
-  stroke-dasharray: 7 5;
-  opacity: .92 !important;
-}
-.pipeline-portal-dot {
-  fill: var(--portal-accent, #afb5b9);
-  stroke: #fff;
-  stroke-width: 2;
-  opacity: .9;
-  pointer-events: none;
-  transition: fill 320ms ease, opacity 320ms ease;
-  vector-effect: non-scaling-stroke;
-}
-.pipeline-portal-marker { pointer-events: auto; cursor: crosshair; }
-.pipeline-portal-marker .pipeline-portal-dot { pointer-events: visiblePainted; }
-.pipeline-portal-marker .pipeline-portal-dot { transition: r 140ms ease, stroke-width 140ms ease, opacity 320ms ease; }
-.pipeline-portal-marker.is-active .pipeline-portal-dot { stroke-width: 2.6; }
-.pipeline-portal-dot.edge-pending { stroke: #afb5b9; opacity: .72; }
-.pipeline-portal-dot.edge-running { stroke: #24282b; animation: pipeline-portal-pulse 850ms ease-in-out infinite alternate; }
-.pipeline-portal-dot.edge-success { stroke: #51ab75; }
-.pipeline-portal-dot.edge-failed { stroke: #d34a4a; }
-.pipeline-portal-dot.edge-blocked { stroke: #c48642; opacity: .85; }
-.pipeline-portal-dot.edge-skipped,
-.pipeline-portal-dot.edge-cancelled { stroke: #8b9298; opacity: .77; }
-.pipeline-portal-dot.edge-disabled { stroke: #cbd0d3; opacity: .44; }
-.pipeline-portal-bridge {
-  fill: none;
-  stroke: var(--portal-accent, #7a8589);
-  stroke-width: 1.25;
-  stroke-linecap: butt;
-  stroke-linejoin: miter;
-  stroke-dasharray: 2 8;
-  opacity: .23;
-  pointer-events: stroke;
-  cursor: pointer;
-  transition: stroke-width 160ms ease, opacity 160ms ease;
-  vector-effect: non-scaling-stroke;
-}
-.pipeline-portal-bridge.is-active { stroke-width: 2.4; stroke-dasharray: 7 5; opacity: .92; }
 .pipeline-edge--active { stroke-width: 3 !important; opacity: 1 !important; filter: drop-shadow(0 0 2px rgba(39,89,59,.35)); }
 @keyframes pipeline-flow { to { stroke-dashoffset: -26; } }
-@keyframes pipeline-portal-pulse { from { opacity: .64; } to { opacity: 1; } }
 
 .pipeline-node {
   position: absolute;
@@ -343,6 +293,5 @@
   .pipeline-edge,
   .pipeline-node { transition: none; }
   .pipeline-edge.edge-running,
-  .pipeline-portal-dot.edge-running,
   .stage-status-spin { animation: none !important; }
 }

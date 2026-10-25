@@ -7,9 +7,10 @@ import { presentRunStages } from '@features/runs/stage-visibility.js';
 import { runPhase } from '@features/runs/run-phase.js';
 import { runFailureMessage, userErrorMessage } from '@shared/lib/error-presentation';
 import {
-  buildEdges, compactStageLayout, PIPELINE_NODE, stagesForPipelineLayout,
+  buildEdges, compactStageLayout, PIPELINE_NODE,
 } from '@features/runs/pipeline-layout.js';
 import { stagePresentation } from '@features/runs/stage-presentation.js';
+import { stageHref } from '@features/runs/stage-routes.js';
 import '@features/runs/styles/progress.css';
 
 const STATUS_ICON = {
@@ -112,28 +113,6 @@ function rememberRun(runId) {
     next.searchParams.set('run', runId);
     link.setAttribute('href', `${next.pathname}${next.search}`);
   }
-}
-
-const STAGE_ANALYSIS_ROUTES = {
-  membrane_topology: 'topology',
-  evolutionary_conservation: 'conservation',
-  functional_region_evidence: 'scientific-evidence',
-  uniprot_features: 'scientific-evidence',
-  experimental_variant_evidence: 'scientific-evidence',
-  pharmacogenomics: 'scientific-evidence',
-  variant_predictors: 'scientific-evidence',
-  clinvar: 'scientific-evidence',
-  variant_ddg: 'variant-ddg',
-  structural_contacts: 'arpeggio',
-  structural_frustration: 'frustration',
-  sequence_frustration: 'frustration',
-  ensemble_frustration: 'frustration',
-};
-
-function stageHref(proteinId, runId, stageId) {
-  const route = STAGE_ANALYSIS_ROUTES[stageId];
-  const path = route ? `/${route}/` : '/info/';
-  return `/proteins/${encodeURIComponent(proteinId)}${path}?run=${encodeURIComponent(runId)}`;
 }
 
 export default function PipelineProgress({ proteinId }) {
@@ -274,16 +253,13 @@ export default function PipelineProgress({ proteinId }) {
       return run.stages;
     }
   }, [run]);
-  const usesAf3 = stages.some((stage) => (
-    stage.id === 'structure_modeling' && !['skipped', 'disabled'].includes(stage.status)
-  ));
   const graphStages = useMemo(() => {
     const selectedIds = new Set(run?.configuration?.selected_stage_ids ?? []);
     const visibleStages = selectedIds.size
       ? stages.filter((stage) => selectedIds.has(stage.id) || stage.id === 'protein_identity')
       : stages.filter((stage) => stage.status !== 'disabled');
-    return stagesForPipelineLayout(visibleStages, usesAf3);
-  }, [run, stages, usesAf3]);
+    return presentRunStages(visibleStages);
+  }, [run, stages]);
   const layout = useMemo(() => compactStageLayout(graphStages), [graphStages]);
   const edges = useMemo(() => buildEdges(graphStages, layout.positions), [graphStages, layout]);
   const phase = runPhase(run);
@@ -394,7 +370,7 @@ export default function PipelineProgress({ proteinId }) {
         event.preventDefault();
         setZoomAround(zoom * (event.deltaY < 0 ? 1.12 : .88), { clientX: event.clientX, clientY: event.clientY });
       }} onPointerDown={(event) => {
-        if (event.button !== 0 || event.target.closest?.('.pipeline-node, .pipeline-portal-marker, .progress-zoom, .cancel-run')) return;
+        if (event.button !== 0 || event.target.closest?.('.pipeline-node, .progress-zoom, .cancel-run')) return;
         const viewport = viewportRef.current;
         if (!viewport) return;
         panRef.current = { id: event.pointerId, x: event.clientX, y: event.clientY, left: viewport.scrollLeft, top: viewport.scrollTop };
@@ -412,18 +388,14 @@ export default function PipelineProgress({ proteinId }) {
             <svg class="pipeline-edges" viewBox={`0 0 ${layout.width} ${layout.height}`} aria-hidden="true">
               <defs>
                 {['pending', 'running', 'success', 'failed', 'blocked', 'skipped', 'cancelled', 'disabled'].map((status) => (
-                  <marker key={status} id={`pipeline-arrow-${status}`} class={`pipeline-arrow edge-${status}`} viewBox="0 0 10 10" refX="8.6" refY="5" markerWidth="7" markerHeight="7" markerUnits="userSpaceOnUse" orient="auto">
-                    <path d="M 1 1 L 9 5 L 1 9 Z" />
+                  <marker key={status} id={`pipeline-arrow-${status}`} class={`pipeline-arrow edge-${status}`} viewBox="0 0 14 14" refX="13" refY="7" markerWidth="13" markerHeight="13" markerUnits="userSpaceOnUse" orient="auto">
+                    <path d="M 1 1 L 13 7 L 1 13 Z" />
                   </marker>
                 ))}
               </defs>
               {edges.flatMap((edge) => {
                 const target = stages.find((stage) => stage.id === edge.to);
                 const status = target ? edgeStatus(target) : 'pending';
-                const source = stages.find((stage) => stage.id === edge.from);
-                const sourceLabel = source ? stagePresentation(source, run.configuration).label : edge.from;
-                const targetLabel = target ? stagePresentation(target, run.configuration).label : edge.to;
-                const segments = edge.segments ?? [{ role: 'direct', d: edge.d }];
                 const edgeActive = activeEdgeId === edge.id
                   || activeNodeId === edge.from
                   || activeNodeId === edge.to;
@@ -432,62 +404,20 @@ export default function PipelineProgress({ proteinId }) {
                   onPointerEnter: () => setActiveEdgeId(edge.id),
                   onPointerLeave: () => setActiveEdgeId((current) => current === edge.id ? null : current),
                 };
-                const paths = segments.flatMap((segment) => [
-                    <path
-                      key={`${edge.id ?? `${edge.from}-${edge.to}`}-${segment.role}-hit`}
-                      class="pipeline-edge-hit-area"
-                      d={segment.d}
-                      {...edgeInteraction}
-                    />,
-                    <path
-                      key={`${edge.id ?? `${edge.from}-${edge.to}`}-${segment.role}`}
-                      class={`pipeline-edge edge-${status}${edge.portal ? ' pipeline-edge--portal' : ''}${edgeActive ? ' pipeline-edge--active' : ''}`}
-                      d={segment.d}
-                      marker-end={`url(#pipeline-arrow-${status})`}
-                      style={edge.portal ? { '--portal-accent': edge.portal.accent } : undefined}
-                      {...edgeInteraction}
-                    />
-                ]);
-                if (!edge.portal) return paths;
-                const portalTitle = `Conexión indirecta: ${sourceLabel} → ${targetLabel}`;
-                const marker = (side, point) => (
-                  <g
-                    key={`${edge.portal.id}-${side}`}
-                    class={`pipeline-portal-marker edge-${status}${edgeActive ? ' is-active' : ''}`}
-                    data-portal-id={edge.portal.id}
-                    data-portal-side={side}
-                    data-edge-id={edge.id}
-                    style={{ '--portal-accent': edge.portal.accent }}
-                    onPointerEnter={() => setActiveEdgeId(edge.id)}
-                    onPointerLeave={() => setActiveEdgeId((current) => current === edge.id ? null : current)}
-                    onPointerDown={(event) => event.stopPropagation()}
-                  >
-                    <title>{portalTitle}</title>
-                    <circle
-                      class={`pipeline-portal-dot edge-${status}`}
-                      cx={point.x}
-                      cy={point.y}
-                      r={edgeActive ? '6' : '4'}
-                    />
-                  </g>
-                );
                 return [
                   <path
-                    key={`${edge.portal.id}-bridge-hit`}
-                    class="pipeline-portal-bridge-hit-area"
-                    d={edge.portal.bridge}
+                    key={`${edge.id}-hit`}
+                    class="pipeline-edge-hit-area"
+                    d={edge.d}
                     {...edgeInteraction}
                   />,
                   <path
-                    key={`${edge.portal.id}-bridge`}
-                    class={`pipeline-portal-bridge${edgeActive ? ' is-active' : ''}`}
-                    d={edge.portal.bridge}
-                    style={{ '--portal-accent': edge.portal.accent }}
+                    key={edge.id}
+                    class={`pipeline-edge edge-${status}${edgeActive ? ' pipeline-edge--active' : ''}`}
+                    d={edge.d}
+                    marker-end={`url(#pipeline-arrow-${status})`}
                     {...edgeInteraction}
                   />,
-                  ...paths,
-                  marker('source', edge.portal.source),
-                  marker('target', edge.portal.target),
                 ];
               })}
             </svg>

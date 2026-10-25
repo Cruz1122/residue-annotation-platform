@@ -199,6 +199,7 @@ function TopologyStructure({
   selectedStart,
   selectedEnd,
   selectedResidueLabel,
+  focusSelectionOnCamera,
   onPick,
   showMembrane,
   membraneState,
@@ -396,13 +397,13 @@ function TopologyStructure({
       try {
         viewer.structureInteractivity({
           elements: { items },
-          action: ['select', 'focus'],
-          focusOptions: FOCUS_OPTIONS,
+          action: focusSelectionOnCamera ? ['select', 'focus'] : ['select'],
+          ...(focusSelectionOnCamera ? { focusOptions: FOCUS_OPTIONS } : {}),
         });
       } catch { /* Selection is an enhancement. */ }
     }, 80);
     return () => window.clearTimeout(timer);
-  }, [selectedStart, selectedEnd, structureByCanonical, viewerState]);
+  }, [focusSelectionOnCamera, selectedStart, selectedEnd, structureByCanonical, viewerState]);
 
   return (
     <div class="frustration-structure-viewport topology-structure-viewport" role="group" aria-label="Estructura molecular coloreada por topología TMbed">
@@ -550,18 +551,25 @@ export default function TopologyView({ proteinId }) {
   const [state, setState] = useState('loading');
   const [error, setError] = useState('');
   const [selection, setSelection] = useState(null);
+  const [focusSelectionOnCamera, setFocusSelectionOnCamera] = useState(false);
   const [membraneState, setMembraneState] = useState('not_applicable');
   const [membraneVisible, setMembraneVisible] = useState(true);
   const selectionInitializedRef = useRef(false);
   const selectedPosition = selection?.start ?? null;
   const selectedEnd = selection?.end ?? null;
 
-  const toggleSelectedPosition = (position) => setSelection((current) => (
-    current?.start === position && current?.end === position ? null : { start: position, end: position }
-  ));
-  const selectRange = (start, end) => setSelection((current) => (
-    current?.start === start && current?.end === end ? null : { start, end }
-  ));
+  const toggleSelectedPosition = (position) => {
+    setFocusSelectionOnCamera(true);
+    setSelection((current) => (
+      current?.start === position && current?.end === position ? null : { start: position, end: position }
+    ));
+  };
+  const selectRange = (start, end) => {
+    setFocusSelectionOnCamera(true);
+    setSelection((current) => (
+      current?.start === start && current?.end === end ? null : { start, end }
+    ));
+  };
 
   useEffect(() => {
     let active = true;
@@ -644,6 +652,7 @@ export default function TopologyView({ proteinId }) {
 
   useEffect(() => {
     selectionInitializedRef.current = false;
+    setFocusSelectionOnCamera(false);
     setSelection(null);
     setMembraneVisible(true);
   }, [proteinId, runId]);
@@ -693,6 +702,7 @@ export default function TopologyView({ proteinId }) {
             selectedStart={selectedPosition}
             selectedEnd={selectedEnd}
             selectedResidueLabel={selectedResidueLabel}
+            focusSelectionOnCamera={focusSelectionOnCamera}
             onPick={toggleSelectedPosition}
             showMembrane={showMembrane}
             membraneState={membraneState}

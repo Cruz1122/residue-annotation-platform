@@ -1,7 +1,4 @@
 ---
-import AppLayout from '../../../layouts/AppLayout.astro';
-import ProteinViewer from '@features/annotations/components/viewer/ProteinViewer.jsx';
+const proteinId = encodeURIComponent(Astro.params.id ?? '');
+return Astro.redirect(`/proteins/${proteinId}/info/${Astro.url.search}`, 302);
 ---
-<AppLayout title="Topología · Residue Annotation" active="topology" proteinId={Astro.params.id}>
-  <ProteinViewer client:only="preact" proteinId={Astro.params.id} analysis="topology" />
-</AppLayout>
