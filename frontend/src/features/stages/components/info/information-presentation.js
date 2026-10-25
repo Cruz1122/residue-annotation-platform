@@ -1,3 +1,5 @@
+import { structureFormat } from '../../../annotations/structure-format.js';
+
 const RELAXED_ARTIFACT_TYPES = [
   'rosettamp_relaxed_pdb',
   'foldx_relaxed_pdb',
@@ -9,12 +11,6 @@ const STRUCTURE_GENERATION_STAGE_IDS = new Set([
 ]);
 
 const ACTIVE_STAGE_STATUSES = new Set(['pending', 'ready', 'queued', 'running']);
-
-function structureFormat(name, mediaType) {
-  const sourceName = String(name ?? '').toLowerCase();
-  const media = String(mediaType ?? '').toLowerCase();
-  return /\.(cif|mmcif)$/.test(sourceName) || media.includes('cif') ? 'mmcif' : 'pdb';
-}
 
 function allArtifacts(run) {
   const byId = new Map();
@@ -34,7 +30,7 @@ function artifactOption(artifact, kind, label, format) {
     source: 'artifact',
     kind,
     label,
-    format: format ?? structureFormat(artifact.artifact_type, artifact.media_type),
+    format: format ?? structureFormat(artifact),
     sha256: artifact.sha256 ?? '',
   };
 }
@@ -48,7 +44,7 @@ export function structureOptionsForRun(run) {
     ?? uploads[0];
 
   if (selectedUpload) {
-    const format = structureFormat(selectedUpload.original_filename, selectedUpload.media_type);
+    const format = structureFormat(selectedUpload);
     const fileName = String(selectedUpload.original_filename ?? '').trim();
     options.push({
       value: `upload:${selectedUpload.id}`,

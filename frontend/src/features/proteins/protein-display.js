@@ -71,11 +71,32 @@ export function proteinDisplayName(protein) {
   return cleanProteinIdentifier(preferredAlias?.identifier) || 'Proteína sin nombre';
 }
 
-export function proteinSearchValues(protein) {
+export function proteinAccession(protein, run = null) {
+  const configuredAccession = String(run?.configuration?.scientific_accession ?? '').trim();
+  if (configuredAccession) return configuredAccession;
+
+  const aliases = protein?.aliases ?? [];
+  const accessionAlias = aliases.find((alias) =>
+    ['uniprot', 'uniprot_accession', 'accession'].includes(alias.source?.toLowerCase()));
+  const accessionFromHeader = (identifier) => identifier?.match(/(?:^|[>\s])(?:sp|tr)\|([^|]+)\|/i)?.[1] ?? '';
+  if (accessionAlias?.identifier?.trim()) {
+    return accessionFromHeader(accessionAlias.identifier) || accessionAlias.identifier.trim();
+  }
+
+  const fastaHeader = aliases.find((alias) => alias.source?.toLowerCase() === 'fasta_header')?.identifier?.trim();
+  const accession = accessionFromHeader(fastaHeader);
+  if (accession) return accession;
+
+  return 'Accession no disponible';
+}
+
+export function proteinSearchValues(protein, run = null) {
+  const accession = proteinAccession(protein, run);
   return [
     protein?.id,
     protein?.sequence_sha256,
     proteinDisplayName(protein),
+    accession !== 'Accession no disponible' ? accession : '',
     ...(protein?.aliases ?? []).flatMap((alias) => [alias.identifier, cleanProteinIdentifier(alias.identifier)]),
   ].filter(Boolean);
 }

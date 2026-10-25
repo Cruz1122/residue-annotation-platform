@@ -14,6 +14,7 @@ import {
   scientificEvidenceRows,
 } from '@features/annotations/scientific-evidence-presentation.js';
 import { acquireStructureUrl } from '@features/annotations/structure-url-cache.js';
+import { isStructureArtifact, structureFormat } from '@features/annotations/structure-format.js';
 import { getZoomOptimizedCanvas3dProps } from '@features/annotations/zoom-rendering.js';
 import {
   CONSERVATION_SCALE,
@@ -73,30 +74,17 @@ function publishedField(row, key) {
   return unit ? `${value} ${unit}` : value;
 }
 
-function structureFormat(name, mediaType) {
-  const lowerName = String(name ?? '').toLowerCase();
-  const media = String(mediaType ?? '').toLowerCase();
-  if (/\.(cif|mmcif)$/.test(lowerName) || media.includes('cif')) return 'mmcif';
-  return 'pdb';
-}
-
-function isStructure(name, mediaType) {
-  const lowerName = String(name ?? '').toLowerCase();
-  const media = String(mediaType ?? '').toLowerCase();
-  return /\.(pdb|cif|mmcif)$/.test(lowerName) || media.includes('pdb') || media.includes('cif');
-}
-
 function structureSource(run) {
   const artifacts = (run?.stages ?? []).flatMap((stage) => stage.artifacts ?? []);
   const preferredTypes = ['selected_reference_pdb', 'model_cif'];
   const artifact = preferredTypes
     .map((type) => artifacts.find((item) => item.artifact_type === type))
-    .find(Boolean) ?? artifacts.find((item) => isStructure(item.artifact_type, item.media_type));
+    .find(Boolean) ?? artifacts.find(isStructureArtifact);
   if (artifact) {
     return {
       id: artifact.id,
       label: artifactDisplayName(artifact),
-      format: structureFormat(artifact.artifact_type, artifact.media_type),
+      format: structureFormat(artifact),
       loadUrl: () => getArtifactObjectUrl(artifact.id),
     };
   }
@@ -105,7 +93,7 @@ function structureSource(run) {
   return {
     id: upload.id,
     label: upload.original_filename,
-    format: structureFormat(upload.original_filename, upload.media_type),
+    format: structureFormat(upload),
     loadUrl: () => getUploadObjectUrl(upload.id),
   };
 }

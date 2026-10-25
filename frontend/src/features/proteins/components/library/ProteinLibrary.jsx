@@ -1,16 +1,17 @@
-import { useEffect, useMemo, useState } from 'preact/hooks';
+import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import PackIcon from '@shared/components/icons/PackIcon.jsx';
 import StatePanel from '@shared/components/feedback/StatePanel.jsx';
 import RunHistory from '@features/runs/components/history/RunHistory.jsx';
 import ProteinStructurePreview from '@features/proteins/components/library/ProteinStructurePreview.jsx';
-import { listProteins, listRuns } from '@shared/api/client';
+import { getArtifactBlob, listProteins, listRuns } from '@shared/api/client';
+import { loadInferredVariantCount } from '@features/annotations/analysis-artifacts.js';
 import { userErrorMessage } from '@shared/lib/error-presentation';
 import {
-  proteinDisplayName,
+  proteinAccession,
   proteinProgressHref,
   proteinSearchValues,
-  runActivityText,
   runStatusClass,
+  runStatusLabel,
 } from '@features/proteins/protein-display.js';
 import '@features/proteins/styles/library.css';
 
@@ -25,75 +26,69 @@ async function listAllRuns() {
   }
 }
 
-function runPipelineSummary(run) {
-  const stages = (run?.stages ?? []).filter((stage) => stage.status !== 'disabled');
-  const completed = stages.filter((stage) => ['success', 'reused', 'skipped'].includes(stage.status)).length;
-  return stages.length > 0 ? `${completed}/${stages.length}` : '—';
-}
-
-function ProteinAnalysisDock({ protein, run, now }) {
-  const variants = run?.configuration?.normalized_variants ?? run?.requested_variants ?? [];
-  const outputs = (run?.run_artifacts ?? [])
-    .filter((artifact) => ['final_annotations', 'selected_variants'].includes(artifact.artifact_type));
-
-  return (
-    <section class="protein-analysis-dock" aria-label={`Resumen de la corrida de ${proteinDisplayName(protein)}`}>
-      <div class="protein-analysis-dock-head">
-        <span>Lectura rápida</span>
-        <strong>{runActivityText(run, now)}</strong>
-      </div>
-      <div class="protein-analysis-metrics">
-        <div class="protein-analysis-metric">
-          <span>Variantes bajo estudio</span>
-          <strong>{variants.length || '—'}</strong>
-          {variants.length > 0 ? (
-            <div class="protein-variant-chips" aria-label="Variantes seleccionadas">
-              {variants.map((variant) => <span key={`${variant.aa_ref}${variant.aa_position}${variant.aa_alt}`}>{variant.aa_ref}{variant.aa_position}{variant.aa_alt}</span>)}
-            </div>
-          ) : <small>Sin variantes confirmadas</small>}
-        </div>
-        <div class="protein-analysis-metric">
-          <span>Pipeline publicado</span>
-          <strong>{runPipelineSummary(run)}</strong>
-          <small>{run ? 'stages disponibles' : 'Sin ejecución'}</small>
-        </div>
-        <div class="protein-analysis-metric">
-          <span>Salidas listas</span>
-          <strong>{outputs.length || '—'}</strong>
-          <small>{outputs.length === 1 ? 'exportación disponible' : 'exportaciones disponibles'}</small>
-        </div>
-      </div>
-    </section>
-  );
-}
-
 function ProteinCard({ protein, run, structureRun }) {
-  const label = proteinDisplayName(protein);
-  const [now, setNow] = useState(() => Date.now());
+  const label = proteinAccession(protein, run);
+  const variantCountRef = useRef(null);
+  const [inferredVariantCount, setInferredVariantCount] = useState(null);
+  const variantStage = run?.stages?.find((stage) => stage.id === 'variant_ddg');
+  const variantArtifact = variantStage?.artifacts?.find((artifact) => artifact.artifact_type === 'variant_annotations');
 
   useEffect(() => {
-    if (!run || !['running', 'cancel_requested'].includes(run.status)) return undefined;
-    const timer = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(timer);
-  }, [run?.id, run?.status]);
+    let active = true;
+    let observer;
+
+        if (!['success', 'reused'].includes(variantStage?.status)) {
+      setInferredVariantCount(0);
+      return () => { active = false; };
+    }
+
+    setInferredVariantCount(null);
+    async function loadCount() {
+      try {
+        const count = await loadInferredVariantCount(run, getArtifactBlob);
+        if (active) setInferredVariantCount(count);
+      } catch {
+        if (active) setInferredVariantCount(null);
+      }
+    }
+
+    const element = variantCountRef.current;
+    if (!element || typeof IntersectionObserver === 'undefined') {
+      void loadCount();
+    } else {
+      observer = new IntersectionObserver((entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          observer?.disconnect();
+          void loadCount();
+        }
+      }, { rootMargin: '120px' });
+      observer.observe(element);
+    }
+
+    return () => {
+      active = false;
+      observer?.disconnect();
+    };
+  }, [run?.id, variantArtifact?.id, variantArtifact?.media_type, variantArtifact?.size, variantStage?.status]);
 
   return (
     <article class="protein-card">
       <ProteinStructurePreview run={structureRun} label={label} />
-      <div class="protein-card-title">
-        <div class="protein-accession">{label}</div>
-      </div>
-      <div class="protein-meta">
-        <div class="protein-meta-item"><PackIcon name="activity" kind="ui" /><span>{protein.length.toLocaleString('es-CO')} aa</span></div>
-        <div class={`protein-meta-item protein-run-state protein-run-${runStatusClass(run?.status)}`}>
-          <span class="protein-run-dot" aria-hidden="true" />
-          <span>{runActivityText(run, now)}</span>
+      <div class="protein-card-content">
+        <h2 class="protein-accession">{label}</h2>
+        <div class="protein-meta">
+          <div class="protein-meta-item"><PackIcon name="activity" kind="ui" /><span>{protein.length.toLocaleString('es-CO')} aa</span></div>
+          <div ref={variantCountRef} class="protein-meta-item protein-variant-count" aria-live="polite">
+            {inferredVariantCount ?? '—'} {inferredVariantCount === 1 ? 'variante inferida' : 'variantes inferidas'}
+          </div>
+          <div class={`protein-meta-item protein-run-state protein-run-${runStatusClass(run?.status)}`}>
+            <span class="protein-run-dot" aria-hidden="true" />
+            <span>{run ? runStatusLabel(run.status) : 'Sin corridas'}</span>
+          </div>
         </div>
       </div>
-      <ProteinAnalysisDock protein={protein} run={run} now={now} />
       <div class="protein-card-actions">
         <a class="protein-open" href={proteinProgressHref(protein, run)}>Abrir análisis</a>
-        <a class="protein-open secondary-open" href="/">Nueva corrida</a>
       </div>
     </article>
   );
@@ -123,13 +118,6 @@ export default function ProteinLibrary() {
     return () => { active = false; };
   }, []);
 
-  const filtered = useMemo(() => {
-    const needle = query.trim().toLowerCase();
-    if (!needle) return proteins;
-    return proteins.filter((protein) => proteinSearchValues(protein)
-      .some((value) => value.toLowerCase().includes(needle)));
-  }, [proteins, query]);
-
   const latestRunByProtein = useMemo(() => {
     const result = new Map();
     for (const run of runs) {
@@ -140,6 +128,13 @@ export default function ProteinLibrary() {
     }
     return result;
   }, [runs]);
+
+  const filtered = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    if (!needle) return proteins;
+    return proteins.filter((protein) => proteinSearchValues(protein, latestRunByProtein.get(protein.id))
+      .some((value) => value.toLowerCase().includes(needle)));
+  }, [proteins, query, latestRunByProtein]);
 
   const latestSuccessfulRunByProtein = useMemo(() => {
     const result = new Map();
@@ -159,15 +154,13 @@ export default function ProteinLibrary() {
     <section class="library-view" aria-label="Mis proteínas">
       <header class="library-head">
         <div>
-          <span class="library-kicker">Espacio de trabajo</span>
-          <h1>Proteínas</h1>
+          <h1>Mis proteínas</h1>
         </div>
-        {state === 'ready' && <span class="library-total">{proteins.length} {proteins.length === 1 ? 'proteína' : 'proteínas'}</span>}
       </header>
       <div class={`proteins-toolbar ${catalogEmpty ? 'is-single' : ''}`.trim()}>
         <label class="protein-search" aria-label="Buscar proteína">
           <PackIcon name="search" kind="ui" />
-          <input type="search" placeholder="Buscar por ID, alias o hash" autoComplete="off" value={query} onInput={(event) => setQuery(event.currentTarget.value)} />
+          <input type="search" placeholder="Buscar por accession o alias" autoComplete="off" value={query} onInput={(event) => setQuery(event.currentTarget.value)} />
         </label>
         {!catalogEmpty && (
           <a class="protein-filter" href="/" aria-label="Registrar proteína" title="Registrar proteína"><PackIcon name="plus" kind="ui" /></a>
@@ -206,7 +199,7 @@ export default function ProteinLibrary() {
               </StatePanel>
             )}
             {!catalogEmpty && filtered.length > 0 && (
-              <div class={`proteins-grid ${filtered.length === 1 ? 'is-single' : ''}`}>
+              <div class="proteins-grid">
                 {filtered.map((protein) => (
                   <ProteinCard
                     key={protein.id}

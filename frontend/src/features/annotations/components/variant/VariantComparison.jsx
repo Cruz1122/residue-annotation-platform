@@ -16,6 +16,7 @@ import {
   loadAnalysisArtifactDetails,
 } from '@features/annotations/analysis-artifacts.js';
 import { captureCameraSnapshot, sameCameraSnapshot } from '@features/annotations/camera-snapshot.js';
+import { isStructureArtifact, structureFormat } from '@features/annotations/structure-format.js';
 import { getZoomOptimizedCanvas3dProps } from '@features/annotations/zoom-rendering.js';
 import {
   AA3,
@@ -63,20 +64,6 @@ const REFERENCE_HIGHLIGHT_COLOR = '#2f6ed7';
 const MUTANT_HIGHLIGHT_COLOR = '#c9362b';
 const INITIAL_STRUCTURE_FOCUS_FACTOR = 0.28;
 
-function structureFormat(name, mediaType) {
-  const normalizedName = String(name ?? '').toLowerCase();
-  const normalizedMedia = String(mediaType ?? '').toLowerCase();
-  return /\.(cif|mmcif)$/.test(normalizedName) || normalizedMedia.includes('cif') ? 'mmcif' : 'pdb';
-}
-
-function isStructure(name, mediaType) {
-  const normalizedName = String(name ?? '').toLowerCase();
-  const normalizedMedia = String(mediaType ?? '').toLowerCase();
-  return /\.(pdb|cif|mmcif)$/.test(normalizedName)
-    || normalizedMedia.includes('pdb')
-    || normalizedMedia.includes('cif');
-}
-
 function allArtifacts(run) {
   const items = [...(run?.run_artifacts ?? []), ...(run?.stages ?? []).flatMap((stage) => stage.artifacts ?? [])];
   const seen = new Set();
@@ -101,7 +88,7 @@ function sourceFromArtifact(artifact, {
     id: artifact.id,
     artifact,
     label: artifactDisplayName(artifact),
-    format: structureFormat(artifact.download_filename ?? artifact.artifact_type, artifact.media_type),
+    format: structureFormat(artifact),
     loadUrl: () => getArtifactObjectUrl(artifact.id),
   };
 }
@@ -113,9 +100,7 @@ function artifactNames(artifact) {
 }
 
 function isConcreteStructureArtifact(artifact) {
-  return isStructure(artifact?.artifact_type, artifact?.media_type)
-    || isStructure(artifact?.display_name, artifact?.media_type)
-    || isStructure(artifact?.download_filename, artifact?.media_type);
+  return isStructureArtifact(artifact);
 }
 
 function isVariantStructureArtifact(artifact) {
@@ -161,7 +146,7 @@ function structureSources(run, variants = []) {
           id: upload.id,
           artifact: null,
           label: upload.original_filename,
-          format: structureFormat(upload.original_filename, upload.media_type),
+          format: structureFormat(upload),
           loadUrl: () => getUploadObjectUrl(upload.id),
         }
       : null;

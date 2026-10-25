@@ -13,6 +13,7 @@ import {
 import { userErrorMessage } from '@shared/lib/error-presentation';
 import { loadAnalysisArtifactDetails } from '@features/annotations/analysis-artifacts.js';
 import { acquireStructureUrl } from '@features/annotations/structure-url-cache.js';
+import { isStructureArtifact, structureFormat } from '@features/annotations/structure-format.js';
 import { getZoomOptimizedCanvas3dProps } from '@features/annotations/zoom-rendering.js';
 import { AA3, AA_NAMES, hexToColorInt, mergeAnnotationRows } from '@features/annotations/viewer-presentation.js';
 import {
@@ -46,29 +47,17 @@ async function getAllAnnotations(runId) {
   return { ...lastResponse, rows, truncated: true };
 }
 
-function structureFormat(name, mediaType) {
-  const normalizedName = String(name ?? '').toLowerCase();
-  const normalizedMedia = String(mediaType ?? '').toLowerCase();
-  return /\.(cif|mmcif)$/.test(normalizedName) || normalizedMedia.includes('cif') ? 'mmcif' : 'pdb';
-}
-
-function isStructure(name, mediaType) {
-  const normalizedName = String(name ?? '').toLowerCase();
-  const normalizedMedia = String(mediaType ?? '').toLowerCase();
-  return /\.(pdb|cif|mmcif)$/.test(normalizedName) || normalizedMedia.includes('pdb') || normalizedMedia.includes('cif');
-}
-
 function structureSource(run) {
   const artifacts = (run?.stages ?? []).flatMap((stage) => stage.artifacts ?? []);
   const preferredTypes = ['selected_reference_pdb', 'rosettamp_relaxed_pdb', 'foldx_relaxed_pdb', 'model_cif'];
   const artifact = preferredTypes
     .map((type) => artifacts.find((item) => item.artifact_type === type))
-    .find(Boolean) ?? artifacts.find((item) => isStructure(item.artifact_type, item.media_type));
+    .find(Boolean) ?? artifacts.find(isStructureArtifact);
   if (artifact) {
     return {
       id: artifact.id,
       label: artifactDisplayName(artifact),
-      format: structureFormat(artifact.artifact_type, artifact.media_type),
+      format: structureFormat(artifact),
       loadUrl: () => getArtifactObjectUrl(artifact.id),
     };
   }
@@ -77,7 +66,7 @@ function structureSource(run) {
   return {
     id: upload.id,
     label: upload.original_filename,
-    format: structureFormat(upload.original_filename, upload.media_type),
+    format: structureFormat(upload),
     loadUrl: () => getUploadObjectUrl(upload.id),
   };
 }

@@ -17,7 +17,6 @@ const STATUS_ICON = {
   pending: 'circle-dot',
   ready: 'circle-dot',
   queued: 'circle-dot',
-  running: 'circle-dot',
   failed: 'circle-x',
   blocked: 'circle-dot',
   skipped: 'circle-dot',
@@ -30,13 +29,13 @@ const STATUS_TEXT = {
   pending: 'Pendiente',
   ready: 'Listo',
   queued: 'En cola',
-  running: 'En ejecución',
+  running: 'Cargando',
   success: 'Completado',
   reused: 'Resultado reutilizado',
-  failed: 'Falló',
-  skipped: 'No aplica',
+  failed: 'Error',
+  skipped: 'Omitido',
   cancelled: 'Cancelado',
-  cancel_requested: 'Cancelación solicitada',
+  cancel_requested: 'Cancelando',
   disabled: 'Desactivado',
   blocked: 'Bloqueado',
 };
@@ -67,32 +66,47 @@ function displayStatus(status) {
 }
 
 function edgeStatus(stage) {
-  return stage.preflight_status === 'blocked' ? 'blocked' : displayStatus(stage.status);
+  if (stage.preflight_status === 'blocked') return 'blocked';
+  if (stage.preflight_status === 'running') return 'running';
+  return displayStatus(stage.status);
 }
 
 function stageVisualStatus(stage) {
-  return stage.preflight_status === 'blocked' ? 'blocked' : displayStatus(stage.status);
+  if (stage.preflight_status === 'blocked') return 'blocked';
+  if (stage.preflight_status === 'running') return 'running';
+  return displayStatus(stage.status);
+}
+
+function stageStatusText(stage) {
+  const status = STATUS_TEXT[stage.status] ?? stage.status ?? 'Desconocido';
+  if (stage.preflight_status === 'blocked') return 'Bloqueado';
+  if (stage.preflight_status === 'running') return 'Preparando';
+  if (stage.status === 'cancel_requested') return 'Cancelando';
+  return status;
 }
 
 function StageRuntime({ stage, now }) {
   if (stage.status === 'disabled') return <span>Desactivado</span>;
-  if (stage.error_message) return <span class="stage-runtime-error">{STATUS_TEXT[stage.status] ?? stage.status} · {runFailureMessage(stage.error_code, stage.error_message)}</span>;
+  if (stage.error_message) return <span class="stage-runtime-error">{stageStatusText(stage)} · {runFailureMessage(stage.error_code, stage.error_message)}</span>;
   if (stage.preflight_status === 'blocked') {
-    return <span>Preparación pendiente · {stage.preflight_error_message ? runFailureMessage(stage.preflight_error_code, stage.preflight_error_message) : 'prerrequisito no disponible'}</span>;
+    return <span>Bloqueado · {stage.preflight_error_message ? runFailureMessage(stage.preflight_error_code, stage.preflight_error_message) : 'prerrequisito no disponible'}</span>;
   }
   if (stage.preflight_status === 'running') return <span>Comprobando prerrequisitos…</span>;
   if (stage.status === 'skipped' && stage.omission_reason) {
-    return <span>No aplica · {OMISSION_REASON_TEXT[stage.omission_reason] ?? stage.omission_reason}</span>;
+    return <span>Omitido · {OMISSION_REASON_TEXT[stage.omission_reason] ?? stage.omission_reason}</span>;
   }
   if (stage.status === 'reused') {
     const source = stage.reuse_reason?.source_stage_result_id ?? stage.stage_result_id;
     return <span>Resultado reutilizado{source ? ` · resultado ${source}` : ''}</span>;
   }
   if (stage.status === 'running' && stage.started_at) {
-    return <span>Lleva {formatElapsed(now - new Date(stage.started_at).getTime())}</span>;
+    return <span>Cargando · lleva {formatElapsed(now - new Date(stage.started_at).getTime())}</span>;
   }
+  if (stage.status === 'running') return <span>Cargando…</span>;
+  if (stage.status === 'failed') return <span>Error</span>;
+  if (stage.status === 'cancelled') return <span>Cancelado</span>;
   if (stage.started_at && stage.finished_at) {
-    return <span>Duró {formatElapsed(new Date(stage.finished_at).getTime() - new Date(stage.started_at).getTime())}</span>;
+    return <span>{stageStatusText(stage)} · duró {formatElapsed(new Date(stage.finished_at).getTime() - new Date(stage.started_at).getTime())}</span>;
   }
   const label = STATUS_TEXT[stage.status] ?? stage.status;
   if (stage.slurm_job_id && (stage.status === 'queued' || stage.status === 'running')) {
@@ -262,6 +276,7 @@ export default function PipelineProgress({ proteinId }) {
   }, [run, stages]);
   const layout = useMemo(() => compactStageLayout(graphStages), [graphStages]);
   const edges = useMemo(() => buildEdges(graphStages, layout.positions), [graphStages, layout]);
+  const graphStagesById = new Map(graphStages.map((stage) => [stage.id, stage]));
   const phase = runPhase(run);
   const activeCount = graphStages.filter((stage) => stage.status !== 'disabled').length;
   const resolvedCount = graphStages.filter((stage) => (
@@ -394,7 +409,7 @@ export default function PipelineProgress({ proteinId }) {
                 ))}
               </defs>
               {edges.flatMap((edge) => {
-                const target = stages.find((stage) => stage.id === edge.to);
+                const target = graphStagesById.get(edge.to);
                 const status = target ? edgeStatus(target) : 'pending';
                 const edgeActive = activeEdgeId === edge.id
                   || activeNodeId === edge.from
@@ -430,14 +445,21 @@ export default function PipelineProgress({ proteinId }) {
                   edge.id === activeEdgeId && (edge.from === stage.id || edge.to === stage.id)
                 )));
               return (
-                <a key={stage.id} class={`pipeline-node pipeline-node--${visualStatus}${nodeHighlighted ? ' pipeline-node--highlighted' : ''}`} data-stage-node={stage.id} style={{ left: `${position.x - PIPELINE_NODE.width / 2}px`, top: `${position.y - PIPELINE_NODE.height / 2}px` }} href={stageHref(proteinId, run.id, stage.id)} title={`Ver información de ${presentation.label}`} aria-label={`${presentation.label} · ${STATUS_TEXT[visualStatus] ?? STATUS_TEXT[stage.status] ?? stage.status}. Abrir sus anotaciones y artefactos`} onPointerEnter={() => { setActiveEdgeId(null); setActiveNodeId(stage.id); }} onPointerLeave={() => setActiveNodeId((current) => current === stage.id ? null : current)} onFocus={() => { setActiveEdgeId(null); setActiveNodeId(stage.id); }} onBlur={() => setActiveNodeId((current) => current === stage.id ? null : current)}>
+                <a key={stage.id} class={`pipeline-node pipeline-node--${visualStatus}${nodeHighlighted ? ' pipeline-node--highlighted' : ''}`} data-stage-node={stage.id} style={{ left: `${position.x - PIPELINE_NODE.width / 2}px`, top: `${position.y - PIPELINE_NODE.height / 2}px` }} href={stageHref(proteinId, run.id, stage.id)} title={`Ver información de ${presentation.label}`} aria-label={`${presentation.label} · ${stageStatusText(stage)}. Abrir sus anotaciones y artefactos`} onPointerEnter={() => { setActiveEdgeId(null); setActiveNodeId(stage.id); }} onPointerLeave={() => setActiveNodeId((current) => current === stage.id ? null : current)} onFocus={() => { setActiveEdgeId(null); setActiveNodeId(stage.id); }} onBlur={() => setActiveNodeId((current) => current === stage.id ? null : current)}>
                   <div class="stage-kind"><StageIcon name={presentation.stageIcon} /></div>
                   <div class="stage-content">
                     <div class="stage-title-row"><strong>{presentation.label}</strong></div>
                     <div class="stage-time">{presentation.estimate}</div>
                     <div class="stage-runtime">{stage.status !== 'disabled' && <PackIcon name="clock" kind="ui" />}<StageRuntime stage={stage} now={now} /></div>
                   </div>
-                  <span class={`stage-status stage-status-${visualStatus}`} title={STATUS_TEXT[visualStatus] ?? STATUS_TEXT[stage.status] ?? stage.status} aria-hidden="true">{STATUS_ICON[visualStatus] && <PackIcon name={STATUS_ICON[visualStatus]} kind="ui" className={visualStatus === 'running' ? 'stage-status-spin' : ''} />}</span>
+                  <span class={`stage-status stage-status-${visualStatus}`} title={stageStatusText(stage)} aria-hidden="true">
+                    {visualStatus === 'running' ? (
+                      <svg class="stage-status-spinner stage-status-spin" viewBox="0 0 24 24" width="44" height="44" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8" />
+                        <path d="M21 3v5h-5" />
+                      </svg>
+                    ) : STATUS_ICON[visualStatus] && <PackIcon name={STATUS_ICON[visualStatus]} kind="ui" />}
+                  </span>
                 </a>
               );
             })}

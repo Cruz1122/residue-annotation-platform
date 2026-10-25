@@ -60,7 +60,7 @@ const expectedStageRoutes = {
   functional_region_evidence: 'scientific-evidence',
   experimental_variant_evidence: 'scientific-evidence',
   membrane_topology: 'topology',
-  ensemble_frustration: 'frustration',
+  ensemble_frustration: 'bioemu',
   structure_modeling: 'info',
   structural_regime: 'info',
   protein_relaxation_energy: 'variant-ddg',
@@ -153,4 +153,5 @@ test('routes every registered pipeline stage to its corresponding analysis view'
   assert.deepEqual(new Set(Object.keys(STAGE_ANALYSIS_ROUTES)), new Set(stages.map(({ id }) => id)));
   assert.equal(stageHref('protein/with spaces', 'run/123', 'clinvar'), '/proteins/protein%2Fwith%20spaces/scientific-evidence/?run=run%2F123');
   assert.equal(stageHref('protein-1', 'run-1', 'protein_identity'), '/proteins/protein-1/info/?run=run-1');
+  assert.equal(stageHref('protein-1', 'run-1', 'ensemble_frustration'), '/proteins/protein-1/bioemu/?run=run-1');
 });

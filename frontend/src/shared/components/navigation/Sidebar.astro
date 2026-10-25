@@ -16,6 +16,11 @@ interface NavigationItem {
   href: string;
 }
 
+interface NavigationGroup {
+  label?: string;
+  items: NavigationItem[];
+}
+
 const workspaceItems: NavigationItem[] = [
   { id: 'library', label: 'Mis proteínas', icon: 'folder', iconKind: 'ui', href: '/proteins/' },
 ];
@@ -33,8 +38,8 @@ const pipelineItems: NavigationItem[] = proteinId ? [
   { id: 'arpeggio', label: 'ARPEGGIO', icon: 'structural_contacts', iconKind: 'stage', href: `/proteins/${proteinId}/arpeggio/` },
 ] : [];
 
-const groups = mode === 'library'
-  ? [{ label: 'Espacio de trabajo', items: workspaceItems }]
+const groups: NavigationGroup[] = mode === 'library'
+  ? [{ items: workspaceItems }]
   : [
       { label: 'Espacio de trabajo', items: workspaceItems },
       { label: 'Análisis activo', items: pipelineItems },
@@ -51,7 +56,7 @@ const groups = mode === 'library'
   <div class="sidebar-items">
     {groups.map((group) => group.items.length > 0 && (
       <section class="sidebar-group" aria-label={group.label}>
-        <p class="sidebar-group-label">{group.label}</p>
+        {group.label && <p class="sidebar-group-label">{group.label}</p>}
         <div class="sidebar-group-items">
           {group.items.map((item) => (
             <a

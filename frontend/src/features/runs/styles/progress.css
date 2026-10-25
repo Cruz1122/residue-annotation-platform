@@ -128,7 +128,7 @@
   fill: none;
   stroke: #afb5b9;
   stroke-width: 1.9;
-  stroke-linecap: round;
+  stroke-linecap: butt;
   stroke-linejoin: round;
   opacity: .86;
   transition: stroke 320ms ease, opacity 320ms ease;
@@ -243,6 +243,7 @@
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
+.stage-runtime > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .stage-runtime > .icon-slot { width: 12px; height: 12px; flex: 0 0 12px; }
 .stage-status {
   position: absolute;
@@ -256,14 +257,16 @@
   pointer-events: none;
 }
 .stage-status .icon-slot { width: 18px; height: 18px; }
+.stage-status-spinner { position: absolute; top: 50%; left: 50%; display: block; width: 44px; height: 44px; margin: -22px 0 0 -22px; overflow: visible; }
+.stage-status-running { width: 22px; height: 22px; color: #171717; }
 .stage-status-success { color: #2b975a; }
 .stage-status-failed { color: #cf4646; }
 .stage-status-blocked { color: #ba7931; }
 .stage-status-skipped,
 .stage-status-cancelled,
 .stage-status-disabled { color: #899195; }
-.stage-status-spin { animation: pipeline-spin 1.4s linear infinite; }
-.pipeline-node--running { background: #fefefd; border-color: #5d6861; }
+.stage-status-spin { transform: scale(.5); transform-box: fill-box; transform-origin: center; animation: pipeline-spin 1.4s linear infinite; }
+.pipeline-node--running { background: #fefefd; border: 2px solid #171717; }
 .pipeline-node--success { border-color: #a5d3b8; }
 .pipeline-node--failed { border-color: #e2acac; }
 .pipeline-node--skipped { border-style: dashed; }
@@ -272,7 +275,10 @@
 .pipeline-node--disabled .stage-kind { background: #f1f2f2; }
 .pipeline-node--disabled:hover,
 .pipeline-node--disabled:focus-visible { opacity: .8; }
-@keyframes pipeline-spin { to { transform: rotate(360deg); } }
+@keyframes pipeline-spin {
+  from { transform: scale(.5) rotate(0deg); }
+  to { transform: scale(.5) rotate(360deg); }
+}
 
 @media (max-width: 700px) {
   .progress-head { min-height: 64px; padding: 10px 12px; }

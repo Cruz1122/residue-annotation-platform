@@ -66,6 +66,20 @@ export function parseAnalysisArtifact(text, mediaType = '') {
   });
 }
 
+export async function loadInferredVariantCount(run, getBlob) {
+  const variantStage = (run?.stages ?? []).find((stage) => stage.id === 'variant_ddg');
+  if (!['success', 'reused'].includes(variantStage?.status)) return 0;
+
+  const artifact = (variantStage.artifacts ?? [])
+    .find((entry) => entry.artifact_type === 'variant_annotations');
+  if (!artifact) return 0;
+  if (!Number.isFinite(artifact.size) || artifact.size > MAX_INLINE_ARTIFACT_BYTES) return null;
+
+  const blob = await getBlob(artifact.id);
+  const text = await readArtifactText(blob, artifact);
+  return parseAnalysisArtifact(text, artifact.media_type).length;
+}
+
 function isGzipArtifact(artifact) {
   const mediaType = String(artifact?.media_type ?? '').toLowerCase();
   const filename = String(artifact?.download_filename ?? '').toLowerCase();

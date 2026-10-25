@@ -356,6 +356,7 @@ export default function BioEmuStructure({
   return (
     <div class="frustration-structure-viewport topology-structure-viewport bioemu-structure-viewport" role="group" aria-label="Estructura relajada y conformeros BioEmu">
       <div ref={hostRef} class="frustration-molstar-host" role="img" aria-label="Representación cartoon de la estructura relajada y del conformero actual" />
+      {viewerState === 'loading' && <StatePanel kind="loading" compact title="Preparando visor molecular" description="Iniciando Mol* y preparando la estructura de referencia." className="frustration-viewport-state" />}
       {viewerState === 'loading-trajectory' && <StatePanel kind="loading" compact title="Cargando trayectoria" description="Preparando los conformeros sobre la estructura de referencia." className="frustration-viewport-state" />}
       {viewerState === 'loading-topology' && <StatePanel kind="loading" compact title="Cargando estructura" description="Preparando la estructura molecular para su visualización." className="frustration-viewport-state" />}
       {viewerState === 'incompatible' && <StatePanel kind="error" compact title="Trayectoria incompatible" description={viewerError} className="bioemu-viewport-error" />}

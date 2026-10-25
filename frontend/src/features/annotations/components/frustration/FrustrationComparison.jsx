@@ -14,6 +14,7 @@ import { userErrorMessage } from '@shared/lib/error-presentation';
 import { loadAnalysisArtifactDetails } from '@features/annotations/analysis-artifacts.js';
 import { annotationResultSignature } from '@features/annotations/annotation-result-signature.js';
 import { acquireStructureUrl } from '@features/annotations/structure-url-cache.js';
+import { isStructureArtifact, structureFormat } from '@features/annotations/structure-format.js';
 import { captureCameraSnapshot, sameCameraSnapshot } from '@features/annotations/camera-snapshot.js';
 import { getZoomOptimizedCanvas3dProps } from '@features/annotations/zoom-rendering.js';
 import {
@@ -103,7 +104,7 @@ async function getAllFrustrationAnnotations(runId) {
   return { ...lastResponse, rows, truncated: true };
 }
 
-const SECONDARY_STRUCTURE_LABELS = {
+const RESIDUE_CONTEXT_LABELS = {
   H: 'En hélice α',
   G: 'En hélice α',
   I: 'En hélice α',
@@ -117,19 +118,9 @@ const SECONDARY_STRUCTURE_LABELS = {
   helix: 'En hélice α',
   sheet: 'En lámina β',
   turn: 'En giro',
+  buried: 'Enterrado',
+  exposed: 'Expuesto',
 };
-
-function structureFormat(name, mediaType) {
-  const lowerName = String(name ?? '').toLowerCase();
-  const media = String(mediaType ?? '').toLowerCase();
-  return /\.(cif|mmcif)$/.test(lowerName) || media.includes('cif') ? 'mmcif' : 'pdb';
-}
-
-function isStructure(name, mediaType) {
-  const lowerName = String(name ?? '').toLowerCase();
-  const media = String(mediaType ?? '').toLowerCase();
-  return /\.(pdb|cif|mmcif)$/.test(lowerName) || media.includes('pdb') || media.includes('cif');
-}
 
 function structureSource(run) {
   const artifacts = (run?.stages ?? []).flatMap((stage) => stage.artifacts ?? []);
@@ -141,12 +132,12 @@ function structureSource(run) {
   ];
   const artifact = preferredTypes
     .map((type) => artifacts.find((item) => item.artifact_type === type))
-    .find(Boolean) ?? artifacts.find((item) => isStructure(item.artifact_type, item.media_type));
+    .find(Boolean) ?? artifacts.find(isStructureArtifact);
   if (artifact) {
     return {
       id: artifact.id,
       label: artifactDisplayName(artifact),
-      format: structureFormat(artifact.artifact_type, artifact.media_type),
+      format: structureFormat(artifact),
       loadUrl: () => getArtifactObjectUrl(artifact.id),
     };
   }
@@ -155,7 +146,7 @@ function structureSource(run) {
   return {
     id: upload.id,
     label: upload.original_filename,
-    format: structureFormat(upload.original_filename, upload.media_type),
+    format: structureFormat(upload),
     loadUrl: () => getUploadObjectUrl(upload.id),
   };
 }
@@ -244,7 +235,7 @@ function formatValue(value) {
 function readLabel(value) {
   const normalized = String(value ?? '').trim();
   if (!normalized || normalized.toUpperCase() === 'NA') return 'Sin dato publicado';
-  return SECONDARY_STRUCTURE_LABELS[normalized] ?? SECONDARY_STRUCTURE_LABELS[normalized.toLowerCase()] ?? normalized;
+  return RESIDUE_CONTEXT_LABELS[normalized] ?? RESIDUE_CONTEXT_LABELS[normalized.toLowerCase()] ?? normalized;
 }
 
 function aaAtPosition(sequence, position) {
@@ -1061,11 +1052,12 @@ function AnnotationPanel({
     ? numericPublishedValue(selectedPosition, 'frustratometer_sd', annotationByPosition, indexedArtifactDetails)
     : null;
   const secondaryStructure = selectedRow?.values?.secondary_structure;
+  const buriedStatus = selectedRow?.values?.buried_status;
   const uniprotDomain = String(selectedRow?.values?.uniprot_domain ?? '').trim();
   const hasUniprotDomain = Boolean(uniprotDomain && uniprotDomain.toUpperCase() !== 'NA');
   const structureLabel = METHOD_OPTIONS.structure.find((option) => option.value === structureMethod)?.shortLabel ?? 'FI';
   const hasPublishedValue = [structuralValue, ensembleMean, ensembleSd, ...sequenceMetricRows.map((metric) => metric.value)].some((value) => finiteAnnotationValue(value) !== null)
-    || Boolean(secondaryStructure);
+    || Boolean(secondaryStructure || buriedStatus);
   const hotspotDescription = hotspotSource === 'frustraiseq'
     ? 'Residuos cuya clase publicada por FrustrAI-Seq es altamente frustrada. Se ordenan por el índice predicho.'
     : `Residuos cuya métrica ${structureLabel} de Frustratometer tiene FI < −1,00. Los valores más negativos aparecen primero.`;
@@ -1097,6 +1089,7 @@ function AnnotationPanel({
               {finiteAnnotationValue(ensembleMean) !== null && <EvidenceRow label="Media del ensemble" value={formatValue(ensembleMean)} />}
               {finiteAnnotationValue(ensembleSd) !== null && <EvidenceRow label="Desviación del ensemble" value={formatValue(ensembleSd)} />}
               {secondaryStructure && <EvidenceRow label="Estructura secundaria" value={readLabel(secondaryStructure)} />}
+              {buriedStatus && <EvidenceRow label="Estado de enterramiento" value={readLabel(buriedStatus)} />}
             </dl>
           ) : (
             <p class="frustration-no-data">{hasSelectedPosition ? 'No hay valores publicados para este residuo.' : 'Selecciona un residuo para ver sus valores.'}</p>

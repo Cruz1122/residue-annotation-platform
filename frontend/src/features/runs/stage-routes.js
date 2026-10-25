@@ -10,7 +10,7 @@ export const STAGE_ANALYSIS_ROUTES = Object.freeze({
   functional_region_evidence: 'scientific-evidence',
   experimental_variant_evidence: 'scientific-evidence',
   membrane_topology: 'topology',
-  ensemble_frustration: 'frustration',
+  ensemble_frustration: 'bioemu',
   structure_modeling: 'info',
   structural_regime: 'info',
   protein_relaxation_energy: 'variant-ddg',

@@ -12,6 +12,7 @@ import {
 import { userErrorMessage } from '@shared/lib/error-presentation';
 import { loadAnalysisArtifactDetails } from '@features/annotations/analysis-artifacts.js';
 import { acquireStructureUrl } from '@features/annotations/structure-url-cache.js';
+import { isStructureArtifact, structureFormat } from '@features/annotations/structure-format.js';
 import { placeArpeggioOverlayLabels } from '@features/annotations/arpeggio-overlay-layout.js';
 import { getZoomOptimizedCanvas3dProps } from '@features/annotations/zoom-rendering.js';
 import {
@@ -63,22 +64,10 @@ async function getAllAnnotations(runId) {
   return { ...lastResponse, rows, truncated: true };
 }
 
-function structureFormat(name, mediaType) {
-  const normalizedName = String(name ?? '').toLowerCase();
-  const normalizedMedia = String(mediaType ?? '').toLowerCase();
-  return /\.(cif|mmcif)$/.test(normalizedName) || normalizedMedia.includes('cif') ? 'mmcif' : 'pdb';
-}
-
-function isStructure(name, mediaType) {
-  const normalizedName = String(name ?? '').toLowerCase();
-  const normalizedMedia = String(mediaType ?? '').toLowerCase();
-  return /\.(pdb|cif|mmcif)$/.test(normalizedName) || normalizedMedia.includes('pdb') || normalizedMedia.includes('cif');
-}
-
 function structureSourceForArpeggio(run, provenance) {
   const artifacts = (run?.stages ?? []).flatMap((stage) => stage.artifacts ?? []);
   const inputSha = String(provenance?.inputs?.foldx_wt_pdb?.sha256 ?? '').trim().toLowerCase();
-  const candidates = artifacts.filter((artifact) => isStructure(artifact.artifact_type, artifact.media_type));
+  const candidates = artifacts.filter(isStructureArtifact);
   const matched = inputSha
     ? candidates.find((artifact) => String(artifact.sha256 ?? '').toLowerCase() === inputSha)
     : null;
@@ -91,7 +80,7 @@ function structureSourceForArpeggio(run, provenance) {
     return {
       id: artifact.id,
       label: artifactDisplayName(artifact),
-      format: structureFormat(artifact.artifact_type, artifact.media_type),
+      format: structureFormat(artifact),
       loadUrl: () => getArtifactObjectUrl(artifact.id),
       referenceMatched: Boolean(matched)
         || (!inputSha && ['selected_reference_pdb', 'foldx_relaxed_pdb', 'rosettamp_relaxed_pdb'].includes(artifact.artifact_type)),
@@ -106,7 +95,7 @@ function structureSourceForArpeggio(run, provenance) {
   return {
     id: upload.id,
     label: upload.original_filename,
-    format: structureFormat(upload.original_filename, upload.media_type),
+    format: structureFormat(upload),
     loadUrl: () => getUploadObjectUrl(upload.id),
     referenceMatched: Boolean(matchedUpload),
   };

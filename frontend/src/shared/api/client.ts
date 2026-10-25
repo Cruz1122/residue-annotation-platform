@@ -8,6 +8,7 @@ import type {
   StageDefinition,
   Upload,
 } from '@shared/types/domain';
+import { createInFlightPromiseCache } from './in-flight-promise-cache.js';
 import {
   clearAuthSession,
   parseAuthTokenPayload,
@@ -131,6 +132,8 @@ function apiUrl(path: string): string {
 }
 
 let refreshPromise: Promise<AuthSession | null> | null = null;
+const inFlightReadRequests = createInFlightPromiseCache();
+const inFlightArtifactBlobs = createInFlightPromiseCache();
 
 async function fetchResponse(path: string, options: RequestOptions = {}): Promise<Response> {
   const {
@@ -193,7 +196,7 @@ async function fetchResponse(path: string, options: RequestOptions = {}): Promis
   return response;
 }
 
-async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+async function requestOnce<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const response = await fetchResponse(path, options);
   if (response.status === 204) return undefined as T;
   const contentType = response.headers.get('content-type') ?? '';
@@ -201,6 +204,26 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
     throw new ApiError('El backend devolvió una respuesta inesperada.', 502);
   }
   return await response.json() as T;
+}
+
+function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+  const method = options.method ?? 'GET';
+  const canShare = method.toUpperCase() === 'GET'
+    && Object.entries(options).every(([key, value]) => (
+      value === undefined || key === 'auth' || key === 'retryAuth'
+    ));
+  if (!canShare) return requestOnce<T>(path, options);
+
+  const auth = options.auth ?? 'required';
+  const session = auth === 'none' ? null : readAuthSession();
+  const key = JSON.stringify([
+    apiUrl(path),
+    auth,
+    options.retryAuth ?? true,
+    session?.user.id ?? '',
+    session?.accessToken ?? '',
+  ]);
+  return inFlightReadRequests.getOrCreate(key, () => requestOnce<T>(path, options)) as Promise<T>;
 }
 
 function requireActionResponse(payload: unknown): ActionResponse {
@@ -478,7 +501,7 @@ export function getAnnotations(runId: string, limit?: number, offset = 0): Promi
   return request<AnnotationResponse>(`/runs/${encodeURIComponent(runId)}/annotations${query ? `?${query}` : ''}`);
 }
 
-export async function getArtifactBlob(
+export function getArtifactBlob(
   artifactId: string,
   exportFormat: 'original' | 'xlsx' = 'original',
   options: { signal?: AbortSignal; onProgress?: (progress: { loaded: number; total: number | null; complete?: boolean }) => void } = {},
@@ -487,29 +510,38 @@ export async function getArtifactBlob(
   // the format is omitted. Analysis views need the published TSV/CSV bytes so
   // their parsers must request the original representation explicitly.
   const query = `?format=${exportFormat}`;
-  const response = await fetchResponse(`/artifacts/${encodeURIComponent(artifactId)}/content${query}`, {
-    signal: options.signal,
-  });
-  if (!options.onProgress || !response.body) return await response.blob();
+  const path = `/artifacts/${encodeURIComponent(artifactId)}/content${query}`;
+  const load = async (): Promise<Blob> => {
+    const response = await fetchResponse(path, { signal: options.signal });
+    if (!options.onProgress || !response.body) return await response.blob();
 
-  const rawLength = Number(response.headers.get('content-length'));
-  const total = Number.isFinite(rawLength) && rawLength >= 0 ? rawLength : null;
-  const reader = response.body.getReader();
-  const chunks: Uint8Array<ArrayBuffer>[] = [];
-  let loaded = 0;
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      chunks.push(new Uint8Array(value.buffer as ArrayBuffer, value.byteOffset, value.byteLength));
-      loaded += value.byteLength;
-      options.onProgress({ loaded, total });
+    const rawLength = Number(response.headers.get('content-length'));
+    const total = Number.isFinite(rawLength) && rawLength >= 0 ? rawLength : null;
+    const reader = response.body.getReader();
+    const chunks: Uint8Array<ArrayBuffer>[] = [];
+    let loaded = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(new Uint8Array(value.buffer as ArrayBuffer, value.byteOffset, value.byteLength));
+        loaded += value.byteLength;
+        options.onProgress({ loaded, total });
+      }
+    } finally {
+      reader.releaseLock();
     }
-  } finally {
-    reader.releaseLock();
-  }
-  options.onProgress({ loaded, total, complete: true });
-  return new Blob(chunks, { type: response.headers.get('content-type') ?? '' });
+    options.onProgress({ loaded, total, complete: true });
+    return new Blob(chunks, { type: response.headers.get('content-type') ?? '' });
+  };
+
+  // Abortable and progress-reporting reads have caller-specific lifetimes, so
+  // only share ordinary reads. This keeps duplicate artifact downloads from
+  // competing views down to one request without coupling cancellation states.
+  if (options.signal || options.onProgress) return load();
+  const session = readAuthSession();
+  const key = JSON.stringify([apiUrl(path), session?.user.id ?? '', session?.accessToken ?? '']);
+  return inFlightArtifactBlobs.getOrCreate(key, load) as Promise<Blob>;
 }
 
 export async function getArtifactObjectUrl(
