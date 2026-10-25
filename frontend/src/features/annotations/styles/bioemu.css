@@ -121,7 +121,8 @@
 .bioemu-conformer-mark .icon-slot { width: 22px; height: 22px; }
 .bioemu-conformer-title { min-width: 0; display: flex; align-items: center; gap: 6px; }
 .bioemu-conformer-title > strong { min-width: 0; }
-.bioemu-conformer-counter { color: var(--ink) !important; font: 650 13px var(--font-mono) !important; white-space: nowrap; }
+.bioemu-conformer-counter { color: var(--ink) !important; font: 700 16px var(--font) !important; white-space: nowrap; }
+.bioemu-conformer-summary .frustration-residue-position { align-self: center; padding-top: 0; }
 .bioemu-conformer-counter.is-unavailable { color: var(--muted) !important; }
 .bioemu-sampling-info { display: inline-flex; flex: 0 0 auto; color: var(--muted); cursor: help; }
 .bioemu-sampling-info .icon-slot { width: 13px; height: 13px; }

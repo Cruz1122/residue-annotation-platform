@@ -4,12 +4,14 @@ import {
   assignCanonicalPositions,
   annotationForResidue,
   canonicalChain,
+  clinvarStatusLabel,
   colorForValues,
   colorOnScale,
   fixedDomainForMode,
   mergeAnnotationRows,
   measurementForMode,
   normalizeValue,
+  normalizeUniprotFeatureLabel,
   publishedModeValue,
   relativeDomain,
   readableValue,
@@ -78,6 +80,32 @@ test('scientific evidence values do not expose backend agreement tokens', () => 
   assert.equal(readableValue('topology_agreement', 'concordant'), 'Concordante');
 });
 
+test('scientific evidence normalizes UniProt feature vocabulary and shared annotation terms', () => {
+  assert.equal(normalizeUniprotFeatureLabel('Signal'), 'Péptido señal');
+  assert.equal(normalizeUniprotFeatureLabel('family'), 'Familia proteica');
+  assert.equal(normalizeUniprotFeatureLabel('Apolipoprotein A1/A4/E'), 'Apolipoproteína A1/A4/E');
+  assert.equal(normalizeUniprotFeatureLabel('Transmembrane helix'), 'Hélice transmembrana');
+  assert.equal(normalizeUniprotFeatureLabel('DNA_binding'), 'Unión a ADN');
+  assert.equal(normalizeUniprotFeatureLabel('C-terminal region'), 'Región C-terminal');
+  assert.equal(normalizeUniprotFeatureLabel('LDL-receptor class A'), 'Receptor LDL clase A');
+  assert.equal(normalizeUniprotFeatureLabel('Signal · family'), 'Péptido señal · Familia proteica');
+  assert.equal(normalizeUniprotFeatureLabel('natural variant'), 'Variante natural');
+  assert.equal(normalizeUniprotFeatureLabel('Non-standard residue'), 'Residuo no canónico');
+  assert.equal(normalizeUniprotFeatureLabel('Non-terminal residue'), 'Residuo no terminal');
+  assert.equal(normalizeUniprotFeatureLabel('Alternative sequence'), 'Secuencia alternativa');
+  assert.equal(normalizeUniprotFeatureLabel('Coiled coil'), 'Hélice superenrollada');
+  assert.equal(normalizeUniprotFeatureLabel('Nucleotide phosphate-binding'), 'Unión a nucleótido fosfato');
+  assert.equal(normalizeUniprotFeatureLabel('beta-propeller'), 'Propela β');
+  assert.equal(normalizeUniprotFeatureLabel('InterPro entry'), 'InterPro entry');
+  assert.equal(readableValue('uniprot_domain', 'EGF-like'), 'Tipo EGF');
+  assert.equal(readableValue('uniprot_domain', 'LDL receptor class A'), 'Receptor LDL clase A');
+});
+
+test('scientific evidence hides unknown ClinVar statuses', () => {
+  assert.equal(clinvarStatusLabel('no_matching_snv_in_local_vcf'), 'Sin variantes coincidentes');
+  assert.equal(clinvarStatusLabel('unknown_pipeline_status'), null);
+});
+
 test('functional colors come from published UniProt feature classes', () => {
   assert.equal(colorForValues('functional', { functional_feature_class: 'highlighted_segment' }, null), '#ee805b');
   assert.equal(colorForValues('functional', { functional_feature_class: 'functional_interest|curated_region' }, null), '#27a8b5');
@@ -135,6 +163,11 @@ test('viewer modes stay pending until structure mapping and published fields exi
     contacts: false,
     conservation: false,
     functional: false,
+    'evidence-curated': false,
+    'evidence-experimental': false,
+    'evidence-computational': false,
+    'evidence-pgx': false,
+    'evidence-clinvar': false,
     ddg: false,
   });
   assert.deepEqual(viewerModeAvailability(rows, { structureAvailable: true, mappingValid: true }), {
@@ -144,8 +177,34 @@ test('viewer modes stay pending until structure mapping and published fields exi
     contacts: false,
     conservation: false,
     functional: false,
+    'evidence-curated': false,
+    'evidence-experimental': false,
+    'evidence-computational': false,
+    'evidence-pgx': false,
+    'evidence-clinvar': false,
     ddg: false,
   });
+});
+
+test('scientific evidence remains available by sequence without a structure mapping', () => {
+  const availability = viewerModeAvailability([
+    { aa_position: 1, values: { functional_feature_class: 'curated_region', curated_evidence_status: 'present' } },
+  ], { allowSequenceOnly: true });
+  assert.equal(availability.functional, true);
+  assert.equal(availability['evidence-curated'], true);
+  assert.equal(availability.topology, false);
+});
+
+test('scientific evidence modes apply their selected residue colours', () => {
+  assert.equal(
+    colorForValues('evidence-curated', { curated_evidence_status: 'present' }, null),
+    VISUALIZATION_MODES['evidence-curated'].colors.present,
+  );
+  assert.equal(
+    colorForValues('evidence-clinvar', { clinvar_evidence_status: 'present' }, null),
+    VISUALIZATION_MODES['evidence-clinvar'].colors.present,
+  );
+  assert.equal(colorForValues('evidence-curated', { curated_evidence_status: 'not_evaluated' }, null), VISUALIZATION_MODES['evidence-curated'].colors.not_evaluated);
 });
 
 test('topology maps native TMbed labels into the four display classes', () => {

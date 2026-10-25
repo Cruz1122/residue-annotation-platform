@@ -77,18 +77,27 @@ export function buildComparisonRibbon(residues, activeCount = 0, {
 
   const slots = Math.max(1, activeCount);
   const groupStride = slots * 2 + 1;
-  const vertices = [];
-  const normals = [];
-  const groups = [];
-  const indices = [];
-  const groupMeta = [];
+  const vertexCount = residues.length * steps * (slots + 1) * 8;
+  const indexCount = residues.length * steps * (slots + 1) * 12;
+  const vertices = new Float32Array(vertexCount * 3);
+  const normals = new Float32Array(vertexCount * 3);
+  const groups = new Float32Array(vertexCount);
+  const indices = new Uint32Array(indexCount);
+  const groupMeta = new Array(residues.length * groupStride);
+  let vertexOffset = 0;
+  let indexOffset = 0;
   let previousNormal = null;
 
   const addVertex = (point, normal, group) => {
-    const index = vertices.length / 3;
-    vertices.push(...point);
-    normals.push(...normal);
-    groups.push(group);
+    const index = vertexOffset / 3;
+    vertices[vertexOffset] = point[0];
+    vertices[vertexOffset + 1] = point[1];
+    vertices[vertexOffset + 2] = point[2];
+    normals[vertexOffset] = normal[0];
+    normals[vertexOffset + 1] = normal[1];
+    normals[vertexOffset + 2] = normal[2];
+    groups[index] = group;
+    vertexOffset += 3;
     return index;
   };
   const addQuad = (p0, p1, p2, p3, normal, group) => {
@@ -96,7 +105,13 @@ export function buildComparisonRibbon(residues, activeCount = 0, {
     const b = addVertex(p1, normal, group);
     const c = addVertex(p2, normal, group);
     const d = addVertex(p3, normal, group);
-    indices.push(a, b, c, b, d, c);
+    indices[indexOffset] = a;
+    indices[indexOffset + 1] = b;
+    indices[indexOffset + 2] = c;
+    indices[indexOffset + 3] = b;
+    indices[indexOffset + 4] = d;
+    indices[indexOffset + 5] = c;
+    indexOffset += 6;
   };
   const facePoint = (ring, lanePosition, depth) => add(
     add(ring.position, multiply(ring.binormal, (lanePosition - 0.5) * width)),
@@ -196,12 +211,15 @@ export function buildComparisonRibbon(residues, activeCount = 0, {
     }
   }
 
+  if (vertexOffset !== vertices.length || indexOffset !== indices.length) {
+    throw new Error('Generated comparison geometry does not match its allocated size.');
+  }
   if (vertices.some((value) => !Number.isFinite(value))) throw new Error('Geometry contains non-finite coordinates.');
   return {
-    vertices: new Float32Array(vertices),
-    normals: new Float32Array(normals),
-    groups: new Float32Array(groups),
-    indices: new Uint32Array(indices),
+    vertices,
+    normals,
+    groups,
+    indices,
     groupMeta,
     residueCount: residues.length,
     slots,

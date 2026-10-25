@@ -44,10 +44,10 @@ function formatBytes(value) {
 
 function SequenceStrip({ chain, selectedPosition, onSelect, selectable }) {
   if (!chain?.residues?.length) {
-    return <StatePanel kind="empty" compact title="Secuencia no disponible" description="topology.pdb no contiene una secuencia de residuos reconocible." />;
+    return <StatePanel kind="empty" compact title="Secuencia no disponible" description="La estructura de referencia no contiene una secuencia de aminoácidos que se pueda mostrar." />;
   }
   return (
-      <div class="frustration-sequence-scroll" role="group" aria-label={`Secuencia del PDB relajado, cadena ${chain.chainId || 'sin identificador'}, ${chain.residues.length} residuos`}>
+      <div class="frustration-sequence-scroll" role="group" aria-label={`Secuencia del PDB relajado, cadena ${chain.chainId || 'sin identificador'}, ${chain.residues.length} residuos`} tabIndex={0}>
         <div class="frustration-sequence-track">
           {chain.residues.map((residue, index) => {
             const position = index + 1;
@@ -160,8 +160,8 @@ export default function BioEmuView({ proteinId }) {
         setRun(runResult);
         const artifacts = resolveBioEmuArtifacts(runResult);
         if (!artifacts.topology && !artifacts.finalDirectory) {
-          setPageError('La corrida no publicó topology.pdb ni un directorio final de BioEmu que pueda contenerlo.');
-          setEmptyTitle('Topología no disponible');
+          setPageError('La corrida no publicó una estructura de referencia ni los datos necesarios para recuperarla.');
+          setEmptyTitle('Estructura de referencia no disponible');
           setLoadState('empty');
           return;
         }
@@ -201,8 +201,8 @@ export default function BioEmuView({ proteinId }) {
           ? topologyResult.value
           : archiveMembers.topology?.blob;
         if (!topologyBlob) {
-          setPageError('El directorio final publicado no contiene un archivo topology.pdb reconocible.');
-          setEmptyTitle('Topología no disponible');
+          setPageError('No se encontró una estructura de referencia válida entre los resultados de la corrida.');
+          setEmptyTitle('Estructura de referencia no disponible');
           setLoadState('empty');
           return;
         }
@@ -298,7 +298,7 @@ export default function BioEmuView({ proteinId }) {
         const [trajectoryResult, metricsResult] = await Promise.allSettled([trajectoryRequest, metricsRequest]);
         if (!isActive()) return;
         if (trajectoryResult.status === 'rejected') {
-          setTrajectoryIssue({ state: 'error', message: userErrorMessage(trajectoryResult.reason, 'No se pudo preparar samples.xtc.') });
+          setTrajectoryIssue({ state: 'error', message: userErrorMessage(trajectoryResult.reason, 'No se pudo preparar la trayectoria de conformeros.') });
           setTrajectoryLoadStatus('error');
           setPhase('Error al cargar');
           setLoadState('ready');
@@ -308,7 +308,7 @@ export default function BioEmuView({ proteinId }) {
         try {
           nextXtcBytes = new Uint8Array(await trajectoryResult.value.arrayBuffer());
         } catch {
-          setTrajectoryIssue({ state: 'error', message: 'No se pudieron preparar los bytes de samples.xtc para Mol*.' });
+          setTrajectoryIssue({ state: 'error', message: 'No se pudieron preparar los datos de la trayectoria de conformeros.' });
           setTrajectoryLoadStatus('error');
           setPhase('Error al cargar');
           return;
@@ -362,8 +362,8 @@ export default function BioEmuView({ proteinId }) {
       onError: (error) => {
         const selectionError = /selección actual dejó de corresponder/i.test(String(error?.message ?? ''));
         handleTrajectoryIssue(selectionError
-          ? { state: 'selection-error', message: 'El residuo seleccionado dejó de corresponder con topology.pdb.' }
-          : { state: 'error', message: 'Mol* no pudo actualizar las coordenadas del conformero. La reproducción se detuvo.' });
+          ? { state: 'selection-error', message: 'El residuo seleccionado no coincide con la posición correspondiente en la estructura de referencia.' }
+          : { state: 'error', message: 'No se pudieron actualizar las coordenadas del conformero. La reproducción se detuvo.' });
       },
       initialIndex: 0,
       speed,
@@ -433,7 +433,7 @@ export default function BioEmuView({ proteinId }) {
     return <section class="frustration-page"><StatePanel kind="empty" fill title={emptyTitle} description={pageError} /></section>;
   }
   if (!structureReady || !pdbText) {
-    return <section class="frustration-page"><StatePanel kind="empty" fill title="Topología no disponible" description={pageError || 'No se encontró topology.pdb para esta corrida.'} /></section>;
+    return <section class="frustration-page"><StatePanel kind="empty" fill title="Estructura de referencia no disponible" description={pageError || 'No se encontró una estructura de referencia para esta corrida.'} /></section>;
   }
 
   const stateLabel = trajectoryIssue?.state === 'selection-error'
@@ -468,7 +468,7 @@ export default function BioEmuView({ proteinId }) {
                 kind="loading"
                 compact
                 title="Cargando trayectoria"
-                description="Descargando samples.xtc una sola vez antes de preparar la estructura molecular."
+                description="Descargando la trayectoria una sola vez antes de preparar la estructura molecular."
                 meta={transferProgress?.total
                   ? `${formatBytes(transferProgress.loaded)} / ${formatBytes(transferProgress.total)}`
                   : transferProgress ? `${formatBytes(transferProgress.loaded)} recibidos` : ''}

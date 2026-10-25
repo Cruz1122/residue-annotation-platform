@@ -15,6 +15,8 @@ import { userErrorMessage } from '@shared/lib/error-presentation';
 import {
   loadAnalysisArtifactDetails,
 } from '@features/annotations/analysis-artifacts.js';
+import { captureCameraSnapshot, sameCameraSnapshot } from '@features/annotations/camera-snapshot.js';
+import { getZoomOptimizedCanvas3dProps } from '@features/annotations/zoom-rendering.js';
 import {
   AA3,
   AA_NAMES,
@@ -25,6 +27,7 @@ import {
 import {
   formatPublishedNumber,
   formatVariantNumber,
+  indexVariantsByPosition,
   isScientistVisibleVariantArtifact,
   mergePublishedVariants,
   publishedDdg,
@@ -54,6 +57,7 @@ const RESIDUE_FOCUS_OPTIONS = {
 };
 const CAMERA_RESET_DURATION_MS = 180;
 const CAMERA_SYNC_ACTION_GUARD_MS = 480;
+const CAMERA_SELECTION_FOCUS_DELAY_MS = 80;
 const STRUCTURE_NEUTRAL_COLOR = '#d2d7dc';
 const REFERENCE_HIGHLIGHT_COLOR = '#2f6ed7';
 const MUTANT_HIGHLIGHT_COLOR = '#c9362b';
@@ -271,17 +275,68 @@ function structureKeyFromLocation(structureLib, location) {
   return structureResidueKey(chain, sequenceId, insertionCode);
 }
 
-function cameraSnapshotSignature(snapshot) {
-  if (!snapshot) return '';
-  return JSON.stringify([
-    snapshot.mode,
-    snapshot.fov,
-    snapshot.radius,
-    snapshot.radiusMax,
-    ...Array.from(snapshot.position ?? []),
-    ...Array.from(snapshot.target ?? []),
-    ...Array.from(snapshot.up ?? []),
+function selectedResidueFocusSphere(structureLib, viewer, items) {
+  const structureEntry = viewer?.plugin?.managers?.structure?.hierarchy?.current?.structures
+    ?.find((entry) => entry?.cell?.obj?.data);
+  const structure = structureEntry?.cell?.obj?.data;
+  const structureElement = structureLib?.StructureElement;
+  if (!structure || !structureElement?.Loci || !items.length) return null;
+  try {
+    const loci = structureElement.Loci.fromSchema(structure, { items });
+    if (structureElement.Loci.isEmpty(loci)) return null;
+    const residueSphere = structureElement.Loci.getBoundingSphere(loci);
+    if (!residueSphere) return null;
+    const center = [0, 0, 0];
+    let alphaCarbonCount = 0;
+    structureElement.Loci.forEachLocation(loci, (location) => {
+      if (String(structureLib.StructureProperties.atom.label_atom_id(location)).trim().toUpperCase() !== 'CA') return;
+      const position = location.unit.conformation.position(location.element, [0, 0, 0]);
+      center[0] += position[0];
+      center[1] += position[1];
+      center[2] += position[2];
+      alphaCarbonCount += 1;
+    });
+    if (!alphaCarbonCount) return residueSphere;
+    return {
+      center: center.map((value) => value / alphaCarbonCount),
+      radius: residueSphere.radius,
+    };
+  } catch {
+    return null;
+  }
+}
+
+const ZERO_CAMERA_OFFSET = Object.freeze([0, 0, 0]);
+
+function translateCameraSnapshot(snapshot, offset) {
+  const [x = 0, y = 0, z = 0] = offset ?? ZERO_CAMERA_OFFSET;
+  if (x === 0 && y === 0 && z === 0) return snapshot;
+  const translate = (vector) => new Float32Array([
+    Number(vector?.[0] ?? 0) + x,
+    Number(vector?.[1] ?? 0) + y,
+    Number(vector?.[2] ?? 0) + z,
   ]);
+  return {
+    ...snapshot,
+    position: translate(snapshot.position),
+    target: translate(snapshot.target),
+  };
+}
+
+function updateCameraSyncOffsets(cameraSyncRef) {
+  const sync = cameraSyncRef.current;
+  const referenceTarget = sync.cameras.get('first')?.getSnapshot?.()?.target;
+  const mutantTarget = sync.cameras.get('second')?.getSnapshot?.()?.target;
+  if (!referenceTarget || !mutantTarget) return;
+  const nextMutantOffset = Array.from(mutantTarget, (value, index) => Number(value) - Number(referenceTarget[index]));
+  const currentMutantOffset = sync.cameraOffsets.get('second') ?? ZERO_CAMERA_OFFSET;
+  const offsetChanged = nextMutantOffset.some((value, index) => Math.abs(value - currentMutantOffset[index]) > 1e-4);
+  sync.cameraOffsets.set('first', ZERO_CAMERA_OFFSET);
+  sync.cameraOffsets.set('second', nextMutantOffset);
+  if (offsetChanged) {
+    sync.lastSnapshot = null;
+    sync.appliedSnapshots.clear();
+  }
 }
 
 function requestCameraSync(cameraSyncRef, sourceId) {
@@ -294,13 +349,22 @@ function requestCameraSync(cameraSyncRef, sourceId) {
     const source = sync.cameras.get(sync.pendingSource);
     if (!sync.enabled || performance.now() < sync.suspendUntil || !source) return;
     const snapshot = source.getSnapshot();
-    const signature = cameraSnapshotSignature(snapshot);
-    if (signature === sync.lastSignature) return;
-    sync.lastSignature = signature;
+    const appliedSnapshot = sync.appliedSnapshots.get(sync.pendingSource);
+    if (appliedSnapshot && sameCameraSnapshot(snapshot, appliedSnapshot)) return;
+    sync.appliedSnapshots.delete(sync.pendingSource);
+    const sourceOffset = sync.cameraOffsets.get(sync.pendingSource) ?? ZERO_CAMERA_OFFSET;
+    const canonicalSnapshot = translateCameraSnapshot(snapshot, sourceOffset.map((value) => -value));
+    if (sameCameraSnapshot(canonicalSnapshot, sync.lastSnapshot)) return;
+    sync.lastSnapshot = captureCameraSnapshot(canonicalSnapshot);
     sync.applying = true;
     try {
       for (const [panelId, camera] of sync.cameras.entries()) {
-        if (panelId !== sync.pendingSource) camera.setState(snapshot, 0);
+        if (panelId === sync.pendingSource) continue;
+        const targetOffset = sync.cameraOffsets.get(panelId) ?? ZERO_CAMERA_OFFSET;
+        camera.setState(translateCameraSnapshot(canonicalSnapshot, targetOffset), 0);
+        // Mol* can constrain the target camera to its own radiusMax. Keep
+        // the actual applied state so its changed event is not echoed back.
+        sync.appliedSnapshots.set(panelId, captureCameraSnapshot(camera.getSnapshot()));
       }
     } finally {
       sync.applying = false;
@@ -311,7 +375,8 @@ function requestCameraSync(cameraSyncRef, sourceId) {
 function suspendCameraSync(cameraSyncRef, durationMs = CAMERA_SYNC_ACTION_GUARD_MS) {
   const sync = cameraSyncRef.current;
   sync.suspendUntil = Math.max(sync.suspendUntil, performance.now() + durationMs);
-  sync.lastSignature = '';
+  sync.lastSnapshot = null;
+  sync.appliedSnapshots.clear();
   if (sync.frame !== null) {
     cancelAnimationFrame(sync.frame);
     sync.frame = null;
@@ -335,7 +400,8 @@ function requestCameraSyncAfterAction(cameraSyncRef, sourceId, delayMs = CAMERA_
       sync.postActionTimers?.add(timer);
       return;
     }
-    sync.lastSignature = '';
+    if (sourceId === 'first') updateCameraSyncOffsets(cameraSyncRef);
+    sync.lastSnapshot = null;
     requestCameraSync(cameraSyncRef, sourceId);
     if (retry < 2) {
       const timer = window.setTimeout(() => {
@@ -526,8 +592,11 @@ function VariantStructurePanel({
         structureLibRef.current = structureLib;
         if (disposed) { disposeViewer(viewer); return; }
         viewer.plugin.canvas3d?.setProps({
+          ...getZoomOptimizedCanvas3dProps(),
           interaction: { maxFps: 60 },
-          camera: { helper: { axes: { name: 'off', params: {} } } },
+          // This panel restores or focuses the camera explicitly after structure loads.
+          // Mol*'s scene-commit auto-reset can otherwise run after camera sync and move it again.
+          camera: { manualReset: true, helper: { axes: { name: 'off', params: {} } } },
           renderer: { selectColor: hexToColorInt(highlightColor) },
           cameraResetDurationMs: 180,
           cameraResetEasing: 'cubic-out',
@@ -587,6 +656,7 @@ function VariantStructurePanel({
       subscription?.unsubscribe?.();
       cameraSubscription?.unsubscribe?.();
       cameraSyncRef.current.cameras.delete(panelId);
+      cameraSyncRef.current.appliedSnapshots.delete(panelId);
       disposeViewer();
       setViewerReady(false);
       hasLoadedStructureRef.current = false;
@@ -627,6 +697,7 @@ function VariantStructurePanel({
     setViewerState('loading');
     setViewerError('');
     cameraSyncRef.current.cameras.delete(panelId);
+    cameraSyncRef.current.appliedSnapshots.delete(panelId);
 
     const load = async () => {
       try {
@@ -678,7 +749,12 @@ function VariantStructurePanel({
         if (!active || revision !== loadRevisionRef.current) return;
         if (canvas3d?.camera) cameraSyncRef.current.cameras.set(panelId, canvas3d.camera);
         setViewerState('ready');
-        requestCameraSyncAfterAction(cameraSyncRef, panelId, CAMERA_SYNC_ACTION_GUARD_MS);
+        // While synced, the reference panel owns camera changes. Loading a new
+        // mutant structure must not push its independently restored camera back
+        // onto the reference panel.
+        const mutantLoadUsesReferenceCamera = cameraSyncEnabledRef.current && panelId === 'second';
+        const syncSourceId = mutantLoadUsesReferenceCamera ? 'first' : panelId;
+        requestCameraSyncAfterAction(cameraSyncRef, syncSourceId, mutantLoadUsesReferenceCamera ? 0 : CAMERA_SYNC_ACTION_GUARD_MS);
       } catch (error) {
         console.error(error);
         if (active && revision === loadRevisionRef.current) {
@@ -698,7 +774,10 @@ function VariantStructurePanel({
 
   useEffect(() => {
     cameraSyncRef.current.enabled = cameraSyncEnabled;
-    if (cameraSyncEnabled && panelId === 'first') requestCameraSync(cameraSyncRef, 'first');
+    if (cameraSyncEnabled && panelId === 'first') {
+      updateCameraSyncOffsets(cameraSyncRef);
+      requestCameraSync(cameraSyncRef, 'first');
+    }
   }, [cameraSyncEnabled, panelId]);
 
   useEffect(() => {
@@ -708,11 +787,15 @@ function VariantStructurePanel({
     if (selectionToken === appliedSelectionTokenRef.current) return;
     if (!Number.isInteger(selectedPosition)) {
       try {
-        suspendCameraSync(cameraSyncRef);
         viewer.plugin.managers.interactivity.lociSelects.deselectAll();
+        if (cameraSyncEnabledRef.current) {
+          suspendCameraSync(cameraSyncRef, CAMERA_RESET_DURATION_MS + 40);
+        }
         viewer.plugin.managers.camera.reset?.(undefined, CAMERA_RESET_DURATION_MS, { easing: 'cubic-out', trajectory: 'linear' });
+        if (!cameraSyncEnabledRef.current || panelId === 'first') {
+          requestCameraSyncAfterAction(cameraSyncRef, panelId, CAMERA_RESET_DURATION_MS + 40);
+        }
         appliedSelectionTokenRef.current = selectionToken;
-        requestCameraSyncAfterAction(cameraSyncRef, panelId);
       } catch { /* camera reset is an enhancement */ }
       return;
     }
@@ -723,17 +806,34 @@ function VariantStructurePanel({
     }
     const focusTimer = window.setTimeout(() => {
       try {
-        suspendCameraSync(cameraSyncRef);
         viewer.plugin.managers.interactivity.lociSelects.deselectAll();
-        viewer.structureInteractivity({
-          elements: { items },
-          action: ['select', 'focus'],
-          focusOptions: RESIDUE_FOCUS_OPTIONS,
-        });
+        viewer.structureInteractivity({ elements: { items }, action: ['select'] });
+        const focusSphere = selectedResidueFocusSphere(structureLibRef.current, viewer, items);
+        if (focusSphere) {
+          viewer.plugin.managers.camera.focusSphere(focusSphere, RESIDUE_FOCUS_OPTIONS);
+        } else {
+          viewer.structureInteractivity({
+            elements: { items },
+            action: ['focus'],
+            focusOptions: RESIDUE_FOCUS_OPTIONS,
+          });
+        }
         appliedSelectionTokenRef.current = selectionToken;
-        requestCameraSyncAfterAction(cameraSyncRef, panelId, CAMERA_SYNC_ACTION_GUARD_MS + 40);
+        if (cameraSyncEnabledRef.current && panelId === 'first') {
+          requestCameraSyncAfterAction(
+            cameraSyncRef,
+            panelId,
+            CAMERA_SELECTION_FOCUS_DELAY_MS + RESIDUE_FOCUS_OPTIONS.durationMs + 40,
+          );
+        }
       } catch { /* selection remains available in the sequence and panel */ }
-    }, 80);
+    }, CAMERA_SELECTION_FOCUS_DELAY_MS);
+    if (cameraSyncEnabledRef.current) {
+      suspendCameraSync(
+        cameraSyncRef,
+        CAMERA_SELECTION_FOCUS_DELAY_MS + RESIDUE_FOCUS_OPTIONS.durationMs + 16,
+      );
+    }
     return () => window.clearTimeout(focusTimer);
   }, [panelId, selectedPosition, selectionRevision, source?.id, structureMapping, structureState, structureUrl, viewerState]);
 
@@ -780,16 +880,15 @@ function VariantStructurePanel({
   );
 }
 
-function SequenceStrip({ sequence, selectedPosition, variants, onSelect }) {
-  const variantPositions = new Set(variants.map((variant) => variant.aa_position));
+function SequenceStrip({ sequence, selectedPosition, variantsByPosition, onSelect }) {
   return (
-    <div class="variant-sequence-scroll" role="group" aria-label="Secuencia canónica; selecciona un residuo para consultar una variante">
+    <div class="variant-sequence-scroll" role="group" aria-label="Secuencia canónica; selecciona un residuo para consultar una variante" tabIndex={0}>
       <div class="variant-sequence-track">
         {[...String(sequence ?? '')].map((aa, index) => {
           const position = index + 1;
           const selected = selectedPosition === position;
-          const hasVariant = variantPositions.has(position);
-          const variant = variants.find((item) => item.aa_position === position);
+          const variant = variantsByPosition.get(position);
+          const hasVariant = Boolean(variant);
           return (
             <button
               key={`${position}-${aa}`}
@@ -1064,8 +1163,10 @@ export default function VariantComparison({ proteinId }) {
     enabled: true,
     applying: false,
     cameras: new Map(),
+    appliedSnapshots: new Map(),
+    cameraOffsets: new Map([['first', ZERO_CAMERA_OFFSET], ['second', ZERO_CAMERA_OFFSET]]),
     frame: null,
-    lastSignature: '',
+    lastSnapshot: null,
     pendingSource: null,
     suspendUntil: 0,
     postActionTimers: new Set(),
@@ -1191,6 +1292,7 @@ export default function VariantComparison({ proteinId }) {
     ...(artifactDetails.variant_set ?? []),
   ], [artifactDetails.variant_set, run?.configuration?.normalized_variants, run?.requested_variants]);
   const variants = useMemo(() => mergePublishedVariants(requestedVariants, detailVariants), [detailVariants, requestedVariants]);
+  const variantsByPosition = useMemo(() => indexVariantsByPosition(variants), [variants]);
   const ddgStage = (run?.stages ?? []).find((stage) => stage.id === 'variant_ddg') ?? null;
   const variantRecord = useMemo(() => variantRecordFor(detailVariants, selectedVariantKey), [detailVariants, selectedVariantKey]);
   const selectedVariant = useMemo(() => {
@@ -1338,15 +1440,13 @@ export default function VariantComparison({ proteinId }) {
 
   const annotationForPanel = selectedVariant?.aa_position ? annotationRows.get(selectedVariant.aa_position) : selectedPositionAnnotation;
   const activeVariant = selectedVariant ?? (selectedPosition ? variants.find((variant) => variant.aa_position === selectedPosition) : null);
-  const displayedVariants = variants.length ? variants : [];
-
   return (
     <section class="variant-page" aria-label="ΔΔG de variante">
       <div class="variant-chain-card">
         <SequenceStrip
           sequence={protein?.sequence}
           selectedPosition={selectedPosition}
-          variants={displayedVariants}
+          variantsByPosition={variantsByPosition}
           onSelect={selectPosition}
         />
       </div>

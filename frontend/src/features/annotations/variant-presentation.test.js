@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   formatVariantNumber,
   formatPublishedNumber,
+  indexVariantsByPosition,
   isScientistVisibleVariantArtifact,
   mergePublishedVariants,
   normalizeVariant,
@@ -32,6 +33,17 @@ test('normalizes only concrete amino-acid substitutions with positive positions'
   assert.equal(normalizeVariant({ variant_id: 'F0L' }), null);
   assert.equal(normalizeVariant({ variant_id: 'F402B' }), null);
   assert.equal(normalizeVariant({ variant_id: 'F402L', aa_position: 'not-a-number' }), null);
+});
+
+test('indexes the first published variant per residue for sequence-strip lookups', () => {
+  const first = { aa_position: 12, variant_id: 'A12V' };
+  const second = { aa_position: 12, variant_id: 'A12G' };
+  const other = { aa_position: 20, variant_id: 'G20D' };
+  const indexed = indexVariantsByPosition([first, second, other, { aa_position: 0 }]);
+  assert.equal(indexed.size, 2);
+  assert.strictEqual(indexed.get(12), first);
+  assert.strictEqual(indexed.get(20), other);
+  assert.equal(indexed.has(0), false);
 });
 
 test('merges requested and published variants without losing the published fields', () => {

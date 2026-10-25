@@ -482,6 +482,9 @@ function sortedPartnerRows(aggregate) {
 export function buildArpeggioModel({
   summaryRows = new Map(),
   contactRows = [],
+  allDetailByPosition: suppliedAllDetailByPosition = null,
+  filteredDetailByPosition: suppliedFilteredDetailByPosition = null,
+  knownObservedTypes = null,
   sequence = '',
   metric = 'contacts',
   selectedTypes = null,
@@ -491,14 +494,14 @@ export function buildArpeggioModel({
   const summaryMap = summaryRows instanceof Map ? summaryRows : new Map();
   const selectedMetric = ARPEGGIO_METRICS[metric] ?? ARPEGGIO_METRICS.contacts;
   const sequenceText = String(sequence ?? '');
-  const observedTypes = observedContactTypes(summaryMap, contactRows);
+  const observedTypes = knownObservedTypes ?? observedContactTypes(summaryMap, contactRows);
   const scaleColors = selectedMetric.value === 'partners' ? ARPEGGIO_PARTNER_SCALE_COLORS : ARPEGGIO_SCALE_COLORS;
   const effectiveSelectedTypes = selectedTypes
     ? new Set([...selectedTypes].filter((type) => observedTypes.includes(type)))
     : new Set(observedTypes);
   const hasDetailRows = contactRows.length > 0;
-  const allDetailByPosition = aggregateContactRows(contactRows, null);
-  const filteredDetailByPosition = aggregateContactRows(contactRows, effectiveSelectedTypes);
+  const allDetailByPosition = suppliedAllDetailByPosition ?? aggregateContactRows(contactRows, null);
+  const filteredDetailByPosition = suppliedFilteredDetailByPosition ?? aggregateContactRows(contactRows, effectiveSelectedTypes);
   let hasConsistentDetail = false;
   for (const row of summaryMap.values()) {
     if (hasDetailRows && detailMatchesSummary(row, allDetailByPosition.get(row.position))) {
@@ -521,7 +524,8 @@ export function buildArpeggioModel({
       : publishedValue;
     if (filteredValue !== null) values.push(filteredValue);
   }
-  const maxValue = values.length ? Math.max(0, ...values) : 0;
+  let maxValue = 0;
+  for (const value of values) maxValue = Math.max(maxValue, value);
   const publishedMetricValues = [...summaryMap.values()]
     .filter((row) => row.published)
     .map((row) => (selectedMetric.value === 'contacts' ? row.totalContacts : row.partnerCount))

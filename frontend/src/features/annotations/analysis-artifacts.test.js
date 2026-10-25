@@ -64,7 +64,7 @@ test('projects real UniProt feature rows into meaningful functional classes', ()
       { aa_position: 2, aa_ref: 'K', feature_type: 'Binding site', feature_name: 'LDL binding', mapping_status: 'exact' },
       { aa_position: 2, aa_ref: 'K', feature_type: 'Region', feature_name: 'Ligand region', mapping_status: 'exact' },
     ],
-  }, 'functional');
+  }, 'scientific-evidence');
   assert.deepEqual(rows, [
     {
       aa_position: 1,
@@ -142,6 +142,23 @@ test('conservation metadata is read only from the conservation stage', async () 
   assert.deepEqual(details.metadata, [{ method: 'ConSurf' }]);
 });
 
+test('loads substitution-level predictor scores only from the predictor stage', async () => {
+  const requested = [];
+  const run = {
+    stages: [
+      { id: 'clinvar', artifacts: [{ id: 'wrong', artifact_type: 'predictor_substitutions', size: 128, media_type: 'text/tab-separated-values' }] },
+      { id: 'variant_predictors', artifacts: [{ id: 'right', artifact_type: 'predictor_substitutions', size: 128, media_type: 'text/tab-separated-values' }] },
+    ],
+  };
+  const details = await loadAnalysisArtifactDetails(run, 'scientific-evidence', async (id) => {
+    requested.push(id);
+    return { text: async () => 'aa_position\taa_ref\taa_alt\talphamissense\tcadd_phred\trevel\n3\tF\tL\t0.7\t30\t0.95\n' };
+  });
+
+  assert.deepEqual(requested, ['right']);
+  assert.deepEqual(details.predictor_substitutions, [{ aa_position: '3', aa_ref: 'F', aa_alt: 'L', alphamissense: '0.7', cadd_phred: '30', revel: '0.95' }]);
+});
+
 test('loads conformational ensemble metadata under a stage-specific key', async () => {
   const requested = [];
   const run = {
@@ -208,6 +225,30 @@ test('loads only structural_contacts provenance for the contacts analysis', asyn
   });
   assert.deepEqual(requested, ['right-provenance']);
   assert.equal(details.provenance[0].parameters.interacting_A, 5);
+});
+
+test('loads scientific evidence artifacts only from their producing stages', async () => {
+  const requested = [];
+  const run = { stages: [
+    { id: 'functional_region_evidence', artifacts: [
+      { id: 'curated', artifact_type: 'ldlc_statin_evidence', size: 10 },
+    ] },
+    { id: 'experimental_variant_evidence', artifacts: [
+      { id: 'mave', artifact_type: 'mavedb_details', size: 10 },
+    ] },
+    { id: 'pharmacogenomics', artifacts: [
+      { id: 'pgx', artifact_type: 'pgx_per_position', size: 10 },
+      { id: 'pgx-alleles', artifact_type: 'pgx_alleles', size: 10 },
+    ] },
+  ] };
+  const details = await loadAnalysisArtifactDetails(run, 'scientific-evidence', async (id) => {
+    requested.push(id);
+    return { text: async () => JSON.stringify([{ aa_position: 1, id }]) };
+  });
+
+  assert.deepEqual(requested.sort(), ['curated', 'mave', 'pgx', 'pgx-alleles']);
+  assert.equal(details.mavedb_details[0].id, 'mave');
+  assert.equal(details.pgx_per_position[0].id, 'pgx');
 });
 
 test('keeps the summary when gzip detail is unreadable', async () => {

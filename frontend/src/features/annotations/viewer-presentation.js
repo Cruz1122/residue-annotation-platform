@@ -1,4 +1,5 @@
 import { formatConservationGrade, normalizeConservationGrade } from './conservation-presentation.js';
+import { SCIENTIFIC_EVIDENCE_MODE_CONFIG } from './scientific-evidence-presentation.js';
 
 export const AA3 = {
   A: 'ALA', R: 'ARG', N: 'ASN', D: 'ASP', C: 'CYS', Q: 'GLN', E: 'GLU', G: 'GLY', H: 'HIS',
@@ -44,14 +45,14 @@ export const ANALYSIS_VIEWS = {
     primaryStageId: 'evolutionary_conservation',
     description: 'Puntajes Rate4Site y grados ConSurf publicados para la secuencia canónica.',
   },
-  functional: {
-    title: 'Regiones funcionales',
-    shortTitle: 'Región funcional',
+  'scientific-evidence': {
+    title: 'Evidencia científica',
+    shortTitle: 'Evidencia científica',
     icon: 'route',
-    mode: 'functional',
-    stageIds: ['functional_region_evidence', 'uniprot_features'],
+    mode: 'evidence-curated',
+    stageIds: ['functional_region_evidence', 'uniprot_features', 'experimental_variant_evidence', 'pharmacogenomics', 'variant_predictors', 'clinvar'],
     primaryStageId: 'functional_region_evidence',
-    description: 'Evidencia curada de pertenencia a regiones funcionales y estado del mapeo canónico.',
+    description: 'Anotaciones de recursos, resultados experimentales, información clínica y predicciones computacionales publicadas para esta corrida.',
   },
   ddg: {
     title: 'ΔΔG de variante',
@@ -129,6 +130,7 @@ export const VISUALIZATION_MODES = {
       unknown: '#e7e8e8',
     },
   },
+  ...SCIENTIFIC_EVIDENCE_MODE_CONFIG,
   ddg: {
     kind: 'continuous',
     field: 'ddg_value',
@@ -189,17 +191,22 @@ export const MODE_INFO = {
   contacts: { title: 'Contactos estructurales', icon: 'network' },
   conservation: { title: 'Conservación evolutiva', icon: 'scan-search' },
   functional: {
-    title: 'Evidencia de región funcional',
+    title: 'Evidencia científica',
     icon: 'route',
     legend: [
-      ['Sin evidencia en el recurso', VISUALIZATION_MODES.functional.colors.false],
-      ['Región funcional curada', VISUALIZATION_MODES.functional.colors.curated_region],
-      ['Región de interés funcional', VISUALIZATION_MODES.functional.colors.functional_interest],
-      ['Segmento funcional destacado', VISUALIZATION_MODES.functional.colors.highlighted_segment],
-      ['Anotación UniProt', VISUALIZATION_MODES.functional.colors.annotation],
+      ['Fuera de regiones LDL-C/estatinas', VISUALIZATION_MODES.functional.colors.false],
+      ['Región UniProtKB/InterPro', VISUALIZATION_MODES.functional.colors.curated_region],
+      ['Sitio anotado', VISUALIZATION_MODES.functional.colors.functional_interest],
+      ['Péptido o segmento procesado', VISUALIZATION_MODES.functional.colors.highlighted_segment],
+      ['Otra característica UniProtKB', VISUALIZATION_MODES.functional.colors.annotation],
       ['Sin dato', VISUALIZATION_MODES.functional.colors.unknown],
     ],
   },
+  ...Object.fromEntries(Object.entries(SCIENTIFIC_EVIDENCE_MODE_CONFIG).map(([mode, config]) => [mode, {
+    title: config.title,
+    icon: config.icon,
+    legend: config.legend,
+  }])),
   ddg: { title: 'ΔΔG de variante', icon: 'zap' },
 };
 
@@ -209,15 +216,133 @@ const VALUE_LABELS = {
   aqueous_folded: 'Soluble plegado', structurally_uncertain: 'Estructura incierta', membrane: 'Membrana',
   helix: 'Hélice', sheet: 'Lámina β', turn: 'Giro', coil: 'Bucle / coil', buried: 'Enterrado', exposed: 'Expuesto',
   highly_frustrated: 'Altamente frustrado', neutral: 'Neutral', minimally_frustrated: 'Mínimamente frustrado',
-  'LDL-receptor class A': 'Receptor LDL clase A', 'EGF-like': 'Tipo EGF', 'Beta-propeller': 'Propela β', 'C-terminal region': 'Región C-terminal',
   true: 'Sí', false: 'No', exact: 'Exacto', not_in_reference: 'Fuera de la referencia',
   ok: 'Válido', success: 'Completado', failed: 'Fallido', skipped: 'Omitido', NA: 'Sin dato',
   reliable: 'Fiable',
   tmbed_only: 'Solo TMbed', uniprot_only: 'Solo UniProt', concordant: 'Concordante',
   discordant: 'Discordante', both: 'Concordante',
-  curated_region: 'Región funcional curada', functional_interest: 'Región de interés funcional',
-  highlighted_segment: 'Segmento funcional destacado', annotation: 'Anotación UniProt',
+  curated_region: 'Región UniProtKB/InterPro', functional_interest: 'Sitio anotado',
+  highlighted_segment: 'Péptido o segmento procesado', annotation: 'Otra característica UniProtKB',
 };
+
+// UniProt feature types use a controlled vocabulary. Feature names can be
+// protein-specific, so normalize common scientific phrases while preserving
+// unrecognized names and accessions verbatim.
+const UNIPROT_FEATURE_TYPE_LABELS = Object.freeze({
+  signal: 'Péptido señal',
+  'signal peptide': 'Péptido señal',
+  'transit peptide': 'Péptido de tránsito',
+  propeptide: 'Propéptido',
+  peptide: 'Péptido',
+  chain: 'Cadena',
+  'alternative sequence': 'Secuencia alternativa',
+  'alternative initiation': 'Inicio alternativo',
+  family: 'Familia proteica',
+  region: 'Región',
+  domain: 'Dominio',
+  repeat: 'Repetición',
+  'coiled-coil': 'Hélice superenrollada',
+  'coiled coil': 'Hélice superenrollada',
+  motif: 'Motivo',
+  'short sequence motif': 'Motivo de secuencia corta',
+  'compositional bias': 'Sesgo composicional',
+  'compositionally biased region': 'Región de sesgo composicional',
+  transmembrane: 'Región transmembrana',
+  'transmembrane helix': 'Hélice transmembrana',
+  intramembrane: 'Región intramembrana',
+  'topological domain': 'Dominio topológico',
+  'binding site': 'Sitio de unión',
+  'active site': 'Sitio activo',
+  'metal binding': 'Unión a metal',
+  'metal ion binding': 'Unión a ion metálico',
+  'nucleotide binding': 'Unión a nucleótido',
+  'nucleotide phosphate binding': 'Unión a nucleótido fosfato',
+  'dna binding': 'Unión a ADN',
+  'rna binding': 'Unión a ARN',
+  'calcium binding': 'Unión a calcio',
+  'disulfide bond': 'Puente disulfuro',
+  'cross-link': 'Enlace cruzado',
+  crosslink: 'Enlace cruzado',
+  glycosylation: 'Glicosilación',
+  'glycosylation site': 'Sitio de glicosilación',
+  lipidation: 'Lipidación',
+  'modified residue': 'Residuo modificado',
+  'natural variant': 'Variante natural',
+  'natural variation': 'Variación natural',
+  mutagenesis: 'Mutagénesis',
+  'mutagenesis site': 'Sitio de mutagénesis',
+  'sequence conflict': 'Conflicto de secuencia',
+  'sequence uncertainty': 'Incertidumbre de secuencia',
+  'unsure residue': 'Residuo de secuencia incierta',
+  'non-adjacent residues': 'Residuos no consecutivos',
+  'non-consecutive residues': 'Residuos no consecutivos',
+  'non-terminal residue': 'Residuo no terminal',
+  'non-standard residue': 'Residuo no canónico',
+  helix: 'Hélice',
+  'beta strand': 'Lámina β',
+  strand: 'Hebra β',
+  turn: 'Giro',
+  'initiator methionine': 'Metionina iniciadora',
+  'zinc finger': 'Dedo de zinc',
+  'rna editing': 'Edición de ARN',
+  frameshift: 'Desplazamiento del marco de lectura',
+});
+
+const UNIPROT_FEATURE_PHRASES = [
+  [/\bLDL[-\s]+receptor\s+class\s+A\b/gi, 'Receptor LDL clase A'],
+  [/\bC-terminal\s+region\b/gi, 'Región C-terminal'],
+  [/\bN-terminal\s+region\b/gi, 'Región N-terminal'],
+  [/\bcompositionally\s+biased\s+region\b/gi, 'Región de sesgo composicional'],
+  [/\btransmembrane\s+helix\b/gi, 'Hélice transmembrana'],
+  [/\btransmembrane\s+region\b/gi, 'Región transmembrana'],
+  [/\btopological\s+domain\b/gi, 'Dominio topológico'],
+  [/\bnon[-\s]+adjacent\s+residues\b/gi, 'Residuos no consecutivos'],
+  [/\bnon[-\s]+terminal\s+residue\b/gi, 'Residuo no terminal'],
+  [/\bshort\s+sequence\s+motif\b/gi, 'Motivo de secuencia corta'],
+  [/\bbinding\s+site\b/gi, 'Sitio de unión'],
+  [/\bactive\s+site\b/gi, 'Sitio activo'],
+  [/\bmetal[-\s]+binding\b/gi, 'Unión a metal'],
+  [/\bmetal[-\s]+ion[-\s]+binding\b/gi, 'Unión a ion metálico'],
+  [/\bnucleotide[-\s]+phosphate[-\s]+binding\b/gi, 'Unión a nucleótido fosfato'],
+  [/\bnucleotide[-\s]+binding\b/gi, 'Unión a nucleótido'],
+  [/\bDNA[-\s]+binding\b/gi, 'Unión a ADN'],
+  [/\bRNA[-\s]+binding\b/gi, 'Unión a ARN'],
+  [/\bcalcium[-\s]+binding\b/gi, 'Unión a calcio'],
+  [/\bdisulfide\s+bond\b/gi, 'Puente disulfuro'],
+  [/\bcross[-\s]+link\b/gi, 'Enlace cruzado'],
+  [/\bglycosylation\s+site\b/gi, 'Sitio de glicosilación'],
+  [/\bnon[-\s]+standard\s+residue\b/gi, 'Residuo no canónico'],
+  [/\bsignal\s+peptide\b/gi, 'Péptido señal'],
+  [/\btransit\s+peptide\b/gi, 'Péptido de tránsito'],
+  [/\bapolipoprotein\b/gi, 'Apolipoproteína'],
+  [/\bEGF-like\b/gi, 'Tipo EGF'],
+  [/\b(?:beta|β)[-\s]+propeller\b/gi, 'Propela β'],
+];
+
+const CLINVAR_STATUS_LABELS = Object.freeze({
+  no_matching_snv_in_local_vcf: 'Sin variantes coincidentes',
+  matches_found: 'Variantes coincidentes',
+  matched: 'Variantes coincidentes',
+});
+
+export function normalizeUniprotFeatureLabel(value) {
+  const label = String(value ?? '').trim();
+  if (!label) return '';
+
+  return label.split(/[·;|]/).map((part) => {
+    const normalized = part.trim().replace(/_/g, ' ').replace(/\s+/g, ' ');
+    if (!normalized) return normalized;
+    const key = normalized.toLowerCase().replace(/[‐‑‒–—]/g, '-').replace(/\s*-\s*/g, '-');
+    const featureTypeLabel = UNIPROT_FEATURE_TYPE_LABELS[key];
+    if (featureTypeLabel) return featureTypeLabel;
+    return UNIPROT_FEATURE_PHRASES.reduce((result, [pattern, translation]) => result.replace(pattern, translation), normalized);
+  }).filter(Boolean).join(' · ');
+}
+
+export function clinvarStatusLabel(value) {
+  const status = String(value ?? '').trim().toLowerCase();
+  return CLINVAR_STATUS_LABELS[status] ?? null;
+}
 
 export const ANNOTATION_GROUPS = [
   ['Contexto funcional', [
@@ -446,18 +571,23 @@ function hasPublishedField(rows, field, kind, fallbackFields = []) {
   });
 }
 
-export function viewerModeAvailability(rows, { structureAvailable = false, mappingValid = false } = {}) {
+export function viewerModeAvailability(rows, { structureAvailable = false, mappingValid = false, allowSequenceOnly = false } = {}) {
   const mappedStructure = Boolean(structureAvailable && mappingValid);
+  const viewable = mappedStructure || allowSequenceOnly;
   return {
     topology: mappedStructure && hasPublishedField(rows, VISUALIZATION_MODES.topology.field, 'categorical'),
     regime: mappedStructure && hasPublishedField(rows, VISUALIZATION_MODES.regime.field, 'categorical'),
     frustration: mappedStructure && hasPublishedField(rows, VISUALIZATION_MODES.frustration.field, 'continuous', VISUALIZATION_MODES.frustration.fallbackFields),
     contacts: mappedStructure && hasPublishedField(rows, VISUALIZATION_MODES.contacts.field, 'continuous'),
-    conservation: mappedStructure && (rows ?? []).some((row) => normalizeConservationGrade(row?.values?.consurf_grade) !== null),
-    functional: mappedStructure && (
+    conservation: viewable && (rows ?? []).some((row) => normalizeConservationGrade(row?.values?.consurf_grade) !== null),
+    functional: viewable && (
       hasPublishedField(rows, VISUALIZATION_MODES.functional.field, 'categorical')
       || hasPublishedField(rows, 'functional_feature_class', 'categorical')
     ),
+    ...Object.fromEntries(Object.entries(SCIENTIFIC_EVIDENCE_MODE_CONFIG).map(([mode, config]) => [
+      mode,
+      viewable && hasPublishedField(rows, config.field, 'categorical'),
+    ])),
     ddg: mappedStructure && hasPublishedField(rows, VISUALIZATION_MODES.ddg.field, 'continuous'),
   };
 }
@@ -513,5 +643,6 @@ export function readableValue(key, value) {
   if (key === 'structural_contacts_n_contacts' && text !== 'NA') return `${text} contactos`;
   if (key === 'consurf_grade') return formatConservationGrade(value);
   if (key === 'cadd_phred_mean' && text !== 'NA') return `${text} PHRED`;
+  if (key === 'uniprot_domain') return normalizeUniprotFeatureLabel(text);
   return VALUE_LABELS[text] || VALUE_LABELS[text.toLowerCase()] || text;
 }

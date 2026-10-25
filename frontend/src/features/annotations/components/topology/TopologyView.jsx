@@ -13,6 +13,7 @@ import {
 import { userErrorMessage } from '@shared/lib/error-presentation';
 import { loadAnalysisArtifactDetails } from '@features/annotations/analysis-artifacts.js';
 import { acquireStructureUrl } from '@features/annotations/structure-url-cache.js';
+import { getZoomOptimizedCanvas3dProps } from '@features/annotations/zoom-rendering.js';
 import { AA3, AA_NAMES, hexToColorInt, mergeAnnotationRows } from '@features/annotations/viewer-presentation.js';
 import {
   normalizeTopologyClass,
@@ -147,7 +148,7 @@ function SequenceStrip({ rows, selectedStart, selectedEnd, onSelect }) {
   }, [selectedStart]);
 
   return (
-    <div class="frustration-sequence-scroll" role="group" aria-label="Secuencia canónica coloreada por topología TMbed">
+    <div class="frustration-sequence-scroll" role="group" aria-label="Secuencia canónica coloreada por topología TMbed" tabIndex={0}>
       <div ref={trackRef} class="frustration-sequence-track">
         {rows.map((row) => {
           const info = TOPOLOGY_CLASSES[row.topologyClass];
@@ -262,6 +263,7 @@ function TopologyStructure({
         viewerRef.current = viewer;
         if (disposed) return disposeViewer();
         viewer.plugin.canvas3d?.setProps({
+          ...getZoomOptimizedCanvas3dProps(),
           interaction: { maxFps: 60 },
           camera: { helper: { axes: { name: 'off', params: {} } } },
           cameraResetDurationMs: 180,

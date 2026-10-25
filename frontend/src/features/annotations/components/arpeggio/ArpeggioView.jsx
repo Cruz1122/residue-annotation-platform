@@ -12,6 +12,8 @@ import {
 import { userErrorMessage } from '@shared/lib/error-presentation';
 import { loadAnalysisArtifactDetails } from '@features/annotations/analysis-artifacts.js';
 import { acquireStructureUrl } from '@features/annotations/structure-url-cache.js';
+import { placeArpeggioOverlayLabels } from '@features/annotations/arpeggio-overlay-layout.js';
+import { getZoomOptimizedCanvas3dProps } from '@features/annotations/zoom-rendering.js';
 import {
   formatScaleNumber,
   hexToColorInt,
@@ -22,6 +24,7 @@ import {
   ARPEGGIO_CAVEAT,
   ARPEGGIO_METRIC_OPTIONS,
   ARPEGGIO_ROLE_COLORS,
+  aggregateContactRows,
   buildArpeggioModel,
   buildArpeggioRoleColors,
   buildArpeggioSummaryRows,
@@ -31,6 +34,7 @@ import {
   formatArpeggioCount,
   formatArpeggioDistance,
   normalizeContactRows,
+  observedContactTypes,
   residueInfo,
 } from '@features/annotations/arpeggio-presentation.js';
 import 'molstar/build/viewer/molstar.css';
@@ -252,7 +256,7 @@ function SequenceStrip({ rows, selectedPosition, metricLabel, onSelect }) {
 
   return (
     <div class="frustration-chain-card arpeggio-chain-card">
-      <div class="frustration-sequence-scroll" role="group" aria-label="Secuencia canónica coloreada por contactos ARPEGGIO">
+      <div class="frustration-sequence-scroll" role="group" aria-label="Secuencia canónica coloreada por contactos ARPEGGIO" tabIndex={0}>
         <div ref={trackRef} class="frustration-sequence-track arpeggio-sequence-track">
           {rows.map((row) => (
             <button
@@ -727,42 +731,7 @@ function ArpeggioStructure({
         });
       }
 
-      // Keep labels readable even when several contact partners project into
-      // the same few pixels. Labels stay beside their endpoint and are moved
-      // vertically only as much as needed to avoid overlap.
-      const placedRects = [];
-      const scaleRect = { x: 8, y: host.clientHeight - 76, width: host.clientWidth - 16, height: 64 };
-      const badgeRect = { x: 8, y: 8, width: 150, height: 54 };
-      const intersects = (a, b) => a.x < b.x + b.width + 4
-        && a.x + a.width + 4 > b.x
-        && a.y < b.y + b.height + 4
-        && a.y + a.height + 4 > b.y;
-      for (const item of next) {
-        const textWidth = Math.max(16, item.label.length * 5.7 + 5);
-        const anchorRight = item.x2 >= item.x1;
-        const baseX = anchorRight ? item.x2 + 8 : item.x2 - 8;
-        const baseY = item.y2 + 3;
-        const offsets = [0, -18, -36, -54, -72, -90, -108, 18, 36, 54];
-        let chosen = null;
-        for (const offset of offsets) {
-          const x = anchorRight ? baseX : baseX - textWidth;
-          const rect = { x, y: baseY + offset - 6, width: textWidth, height: 12 };
-          if (rect.x < 6 || rect.x + rect.width > host.clientWidth - 6) continue;
-          if (rect.y < 6 || rect.y + rect.height > host.clientHeight - 6) continue;
-          if (intersects(rect, scaleRect) || intersects(rect, badgeRect)) continue;
-          if (placedRects.some((placed) => intersects(rect, placed))) continue;
-          chosen = { x, y: baseY + offset, rect };
-          break;
-        }
-        if (!chosen) {
-          const x = anchorRight ? baseX : baseX - textWidth;
-          chosen = { x, y: baseY, rect: { x, y: baseY - 6, width: textWidth, height: 12 } };
-        }
-        placedRects.push(chosen.rect);
-        item.textAnchor = anchorRight ? 'start' : 'end';
-        item.labelX = anchorRight ? chosen.x : chosen.x + textWidth;
-        item.labelY = chosen.y;
-      }
+      placeArpeggioOverlayLabels(next, { width: host.clientWidth, height: host.clientHeight });
       const signature = next.map((item) => `${item.id}:${item.x1.toFixed(1)}:${item.y1.toFixed(1)}:${item.x2.toFixed(1)}:${item.y2.toFixed(1)}:${item.labelX.toFixed(1)}:${item.labelY.toFixed(1)}`).join('|');
       if (signature === overlaySignatureRef.current) return;
       overlaySignatureRef.current = signature;
@@ -827,6 +796,7 @@ function ArpeggioStructure({
         viewerRef.current = viewer;
         if (disposed) return disposeViewer();
         viewer.plugin.canvas3d?.setProps({
+          ...getZoomOptimizedCanvas3dProps(),
           interaction: { maxFps: 60 },
           camera: { helper: { axes: { name: 'off', params: {} } } },
           cameraResetDurationMs: CAMERA_RESET_DURATION_MS,
@@ -1226,6 +1196,14 @@ export default function ArpeggioView({ proteinId }) {
     [annotationByPosition, artifactDetails.contact_residue_summary],
   );
   const contactRows = useMemo(() => normalizeContactRows(artifactDetails.contacts_long ?? []), [artifactDetails.contacts_long]);
+  const observedTypes = useMemo(() => observedContactTypes(summaryRows, contactRows), [contactRows, summaryRows]);
+  const contactAggregates = useMemo(() => {
+    const all = aggregateContactRows(contactRows);
+    return {
+      all,
+      filtered: selectedTypes === null ? all : aggregateContactRows(contactRows, selectedTypes),
+    };
+  }, [contactRows, selectedTypes]);
   const provenance = artifactDetails.provenance?.[0] ?? null;
   const availableMetricOptions = useMemo(() => {
     const rows = [...summaryRows.values()];
@@ -1236,12 +1214,15 @@ export default function ArpeggioView({ proteinId }) {
   const model = useMemo(() => buildArpeggioModel({
     summaryRows,
     contactRows,
+    allDetailByPosition: contactAggregates.all,
+    filteredDetailByPosition: contactAggregates.filtered,
+    knownObservedTypes: observedTypes,
     sequence: protein?.sequence,
     metric,
     selectedTypes,
     selectedPosition,
     provenance,
-  }), [contactRows, metric, protein?.sequence, provenance, selectedPosition, selectedTypes, summaryRows]);
+  }), [contactAggregates, contactRows, metric, observedTypes, protein?.sequence, provenance, selectedPosition, selectedTypes, summaryRows]);
 
   const structureRequest = useMemo(
     () => structureSourceForArpeggio(run, provenance),

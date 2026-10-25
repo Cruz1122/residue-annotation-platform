@@ -207,11 +207,11 @@ test('PDB summary counts first-model atoms and residues and maps an exact chain 
 test('Mol* atom-count incompatibility becomes an understandable stop state', () => {
   assert.deepEqual(classifyBioEmuTrajectoryError(new Error('Frame element count mismatch, got 10 but expected 12')), {
     state: 'incompatible',
-    message: 'El número de átomos del XTC no coincide con topology.pdb. La reproducción se detuvo; se muestra la topología PDB disponible.',
+    message: 'El modelo de referencia y la trayectoria tienen distinto número de átomos. La reproducción se detuvo y se conserva la estructura de referencia.',
   });
   assert.deepEqual(classifyBioEmuTrajectoryError(new Error('invalid xtc magic')), {
     state: 'error',
-    message: 'Mol* no pudo cargar samples.xtc. La reproducción se detuvo; se muestra la topología PDB disponible.',
+    message: 'No se pudo cargar la trayectoria de conformeros. La reproducción se detuvo y se conserva la estructura de referencia.',
   });
 });
 

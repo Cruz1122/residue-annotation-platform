@@ -6,7 +6,7 @@ const STAGE_PRESENTATION = Object.freeze({
   uniprot_features: { stageIcon: 'uniprot_features', estimate: 'Puede tardar algunos segundos' },
   sequence_frustration: { stageIcon: 'sequence_frustration', estimate: 'Puede tardar un par de minutos' },
   evolutionary_conservation: { stageIcon: 'evolutionary_conservation', estimate: 'Puede tardar varios minutos' },
-  functional_region_evidence: { stageIcon: 'functional_region_evidence', label: 'Evidencia funcional', estimate: 'Puede tardar algunos segundos' },
+  functional_region_evidence: { stageIcon: 'functional_region_evidence', label: 'Regiones asociadas a LDL-C/estatinas', estimate: 'Puede tardar algunos segundos' },
   experimental_variant_evidence: { stageIcon: 'experimental_variant_evidence', estimate: 'Puede tardar algunos segundos' },
   membrane_topology: { stageIcon: 'membrane_topology', estimate: 'Puede tardar un par de minutos' },
   conformational_ensemble: { stageIcon: 'conformational_ensemble', estimate: 'Este paso normalmente demora horas' },

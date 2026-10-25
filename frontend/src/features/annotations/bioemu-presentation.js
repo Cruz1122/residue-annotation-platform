@@ -344,7 +344,7 @@ export function validatePdbSequenceCompatibility(proteinSequence, summary, metad
     return `La corrida publica una secuencia de ${metadata.sequenceLength} residuos, pero la proteína tiene ${targetLength}. No se cargará la trayectoria.`;
   }
   if (!findSequenceChain(summary, proteinSequence)) {
-    return 'La secuencia de topology.pdb no coincide con la secuencia de la proteína. No se cargará la trayectoria.';
+    return 'La secuencia de la estructura de referencia no coincide con la proteína seleccionada. No se puede reproducir la trayectoria.';
   }
   return '';
 }
@@ -354,12 +354,12 @@ export function classifyBioEmuTrajectoryError(error) {
   if (/element count mismatch|atom count|number of atoms|atom number/i.test(message)) {
     return {
       state: 'incompatible',
-      message: 'El número de átomos del XTC no coincide con topology.pdb. La reproducción se detuvo; se muestra la topología PDB disponible.',
+      message: 'El modelo de referencia y la trayectoria tienen distinto número de átomos. La reproducción se detuvo y se conserva la estructura de referencia.',
     };
   }
   return {
     state: 'error',
-    message: 'Mol* no pudo cargar samples.xtc. La reproducción se detuvo; se muestra la topología PDB disponible.',
+    message: 'No se pudo cargar la trayectoria de conformeros. La reproducción se detuvo y se conserva la estructura de referencia.',
   };
 }
 

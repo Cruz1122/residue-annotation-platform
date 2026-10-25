@@ -71,6 +71,16 @@ export function normalizeVariant(value) {
   };
 }
 
+export function indexVariantsByPosition(variants = []) {
+  const byPosition = new Map();
+  for (const variant of variants ?? []) {
+    const position = Number(variant?.aa_position);
+    if (!Number.isInteger(position) || position < 1 || byPosition.has(position)) continue;
+    byPosition.set(position, variant);
+  }
+  return byPosition;
+}
+
 export function variantFromRecord(record) {
   return normalizeVariant(record);
 }

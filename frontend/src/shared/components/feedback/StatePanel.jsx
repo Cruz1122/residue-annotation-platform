@@ -10,6 +10,15 @@ const DEFAULT_ICONS = {
   success: 'circle-check',
 };
 
+const DEFAULT_TITLES = {
+  loading: 'Cargando',
+  waiting: 'En espera',
+  warning: 'Atención',
+  empty: 'Sin resultados',
+  error: 'No se pudo completar la solicitud',
+  success: 'Completado',
+};
+
 /**
  * @param {{
  *   kind?: 'loading' | 'waiting' | 'warning' | 'empty' | 'error' | 'success',
@@ -26,9 +35,9 @@ const DEFAULT_ICONS = {
  */
 export default function StatePanel({
   kind = 'empty',
-  icon = DEFAULT_ICONS[kind],
+  icon,
   eyebrow = '',
-  title,
+  title = DEFAULT_TITLES[kind],
   description = '',
   meta = '',
   compact = false,
@@ -36,6 +45,7 @@ export default function StatePanel({
   className = '',
   children = undefined,
 }) {
+  const stateIcon = icon || DEFAULT_ICONS[kind] || 'info';
   const classes = [
     'state-panel',
     `state-panel-${kind}`,
@@ -50,7 +60,7 @@ export default function StatePanel({
       role={kind === 'error' ? 'alert' : 'status'}
       aria-live={kind === 'loading' || kind === 'waiting' ? 'polite' : undefined}
     >
-      {icon && <PackIcon name={icon} kind="ui" className="state-panel-icon" />}
+      <PackIcon name={stateIcon} kind="ui" className="state-panel-icon" />
       <div class="state-panel-copy">
         {eyebrow && <p class="state-panel-eyebrow">{eyebrow}</p>}
         {title && <p class="state-panel-title">{title}</p>}

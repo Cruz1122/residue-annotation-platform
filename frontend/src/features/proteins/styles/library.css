@@ -46,7 +46,7 @@
 .protein-filter:hover { border-color: rgba(17,19,24,.5); }
 .protein-filter .icon-slot { width: 19px; height: 19px; }
 .library-workspace { width: 100%; min-height: clamp(520px, calc(100svh - var(--app-inset) - 250px), 700px); display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, 340px); gap: 24px; align-items: stretch; }
-.library-main { min-width: 0; }
+.library-main { min-width: 0; display: flex; flex-direction: column; }
 .library-history-column { min-width: 0; position: sticky; top: 18px; height: 100%; }
 .proteins-grid {
   width: 100%;
@@ -85,13 +85,7 @@
 .protein-preview-state {
   position: absolute;
   inset: 0;
-  display: grid;
-  place-items: center;
-  padding: 18px;
-  color: var(--muted);
-  font-size: 10px;
-  font-weight: 650;
-  text-align: center;
+  background: rgba(255, 255, 255, .76);
   pointer-events: none;
 }
 .protein-card-title { text-align: center; padding: 1px 6px 0; }

@@ -37,8 +37,18 @@
 .comparison-order-controls button { width: 24px; height: 24px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); color: var(--ink); cursor: pointer; }
 .comparison-order-controls button:disabled { opacity: .35; cursor: default; }
 
-.comparison-sequence-scroll { overflow-x: auto; scrollbar-width: thin; }
-.comparison-sequence-track { min-width: max-content; display: flex; padding: 8px 10px 10px; }
+.comparison-sequence-scroll {
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-x;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+}
+.comparison-sequence-track { min-width: max-content; display: flex; padding: 8px 0 10px; }
 .comparison-sequence-residue { position: relative; width: 28px; height: 51px; border: 1px solid transparent; border-radius: 3px; background: transparent; color: var(--ink); display: grid; grid-template-rows: 12px 17px 14px; place-items: center; padding: 0; cursor: pointer; }
 .comparison-sequence-residue:hover { background: var(--surface); }
 .comparison-sequence-residue.is-selected { border-color: var(--ink); background: var(--panel); box-shadow: 0 0 0 1px rgba(255,255,255,.85); }

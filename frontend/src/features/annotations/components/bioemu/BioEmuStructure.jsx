@@ -11,6 +11,7 @@ import {
 } from '@features/annotations/bioemu-coordinate-interpolation.js';
 import { loadBioEmuTrajectory } from '@features/annotations/bioemu-trajectory.js';
 import { followBioEmuCameraTarget, updateBioEmuFrame } from '@features/annotations/bioemu-structure-state.js';
+import { getZoomOptimizedCanvas3dProps } from '@features/annotations/zoom-rendering.js';
 
 const FOCUS_OPTIONS = { extraRadius: 4, durationMs: 180, easing: 'cubic-out', trajectory: 'linear' };
 
@@ -146,6 +147,7 @@ export default function BioEmuStructure({
         }
         viewerRef.current = viewer;
         viewer.plugin.canvas3d?.setProps({
+          ...getZoomOptimizedCanvas3dProps(),
           interaction: { maxFps: 60 },
           camera: { helper: { axes: { name: 'off', params: {} } } },
           cameraResetDurationMs: 180,
@@ -231,8 +233,8 @@ export default function BioEmuStructure({
                   if (!disposed) {
                     const selectionError = /selección actual dejó/i.test(String(error?.message ?? ''));
                     const message = selectionError
-                      ? 'El residuo seleccionado dejó de corresponder con topology.pdb. La reproducción se detuvo.'
-                      : 'Mol* no pudo actualizar las coordenadas del conformero. La reproducción se detuvo.';
+                      ? 'El residuo seleccionado no coincide con su posición en la estructura de referencia. La reproducción se detuvo.'
+                      : 'No se pudieron actualizar las coordenadas del conformero. La reproducción se detuvo.';
                     setViewerError(message);
                     setViewerState(selectionError ? 'selection-error' : 'trajectory-error');
                     onIssueRef.current?.({ state: selectionError ? 'selection-error' : 'error', message });
@@ -292,7 +294,7 @@ export default function BioEmuStructure({
         if (trajectoryError) setViewerState(trajectoryFailureState === 'error' ? 'trajectory-error' : 'incompatible');
       } catch (error) {
         if (disposed) return;
-        const message = 'No se pudo cargar topology.pdb en el visor molecular.';
+        const message = 'No se pudo cargar la estructura de referencia en el visor molecular.';
         setViewerError(message);
         setViewerState('error');
         onIssueRef.current?.({ state: 'error', message });
@@ -319,7 +321,7 @@ export default function BioEmuStructure({
     }
     const items = selectionItemsForCurrent(selectedPosition, sequenceChain);
     if (!items.length) {
-      setViewerError('La selección no se puede asociar con una posición de topology.pdb.');
+      setViewerError('No se pudo asociar la selección con su posición en la estructura de referencia.');
       setViewerState('selection-error');
       return;
     }
@@ -327,7 +329,7 @@ export default function BioEmuStructure({
       cameraFocusModeRef.current = 'selection';
       viewer.structureInteractivity({ elements: { items }, action: ['select', 'focus'], focusOptions: FOCUS_OPTIONS });
     } catch {
-      setViewerError('No se pudo mantener la selección del residuo en la topología cargada.');
+      setViewerError('No se pudo mantener la selección del residuo en la estructura de referencia.');
       setViewerState('selection-error');
     }
   }, [selectedPosition, sequenceChain, viewerState]);
@@ -354,12 +356,12 @@ export default function BioEmuStructure({
   return (
     <div class="frustration-structure-viewport topology-structure-viewport bioemu-structure-viewport" role="group" aria-label="Estructura relajada y conformeros BioEmu">
       <div ref={hostRef} class="frustration-molstar-host" role="img" aria-label="Representación cartoon de la estructura relajada y del conformero actual" />
-      {viewerState === 'loading-trajectory' && <StatePanel kind="loading" compact title="Cargando trayectoria" description="Mol* prepara los conformeros sobre la topología PDB." className="frustration-viewport-state" />}
-      {viewerState === 'loading-topology' && <StatePanel kind="loading" compact title="Cargando topología" description="Preparando topology.pdb en Mol*." className="frustration-viewport-state" />}
+      {viewerState === 'loading-trajectory' && <StatePanel kind="loading" compact title="Cargando trayectoria" description="Preparando los conformeros sobre la estructura de referencia." className="frustration-viewport-state" />}
+      {viewerState === 'loading-topology' && <StatePanel kind="loading" compact title="Cargando estructura" description="Preparando la estructura molecular para su visualización." className="frustration-viewport-state" />}
       {viewerState === 'incompatible' && <StatePanel kind="error" compact title="Trayectoria incompatible" description={viewerError} className="bioemu-viewport-error" />}
-      {viewerState === 'trajectory-error' && <StatePanel kind="error" compact title="Error al cargar la trayectoria" description={`${viewerError} Se conserva topology.pdb para su revisión.`} className="bioemu-viewport-error" />}
+      {viewerState === 'trajectory-error' && <StatePanel kind="error" compact title="No se pudo cargar la trayectoria" description={`${viewerError} La estructura de referencia permanece disponible.`} className="bioemu-viewport-error" />}
       {viewerState === 'selection-error' && <StatePanel kind="warning" compact title="Selección no disponible" description={viewerError} className="bioemu-viewport-error" />}
-      {viewerState === 'error' && <StatePanel kind="error" compact title="No se pudo cargar la topología" description={viewerError} className="frustration-viewport-state" />}
+      {viewerState === 'error' && <StatePanel kind="error" compact title="No se pudo cargar la estructura" description={viewerError} className="frustration-viewport-state" />}
       {Number.isInteger(selectedPosition) && (
         <div class="frustration-structure-selection" aria-live="polite"><strong>{selectedPosition}</strong><span>Residuo seleccionado</span></div>
       )}

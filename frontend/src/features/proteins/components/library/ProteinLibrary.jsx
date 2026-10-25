@@ -197,6 +197,7 @@ export default function ProteinLibrary() {
               <StatePanel
                 kind="empty"
                 icon="protein"
+                fill
                 eyebrow="Catálogo vacío"
                 title="Aún no tienes proteínas registradas."
                 description="Registra una proteína para iniciar y conservar tus corridas de análisis."
@@ -220,6 +221,7 @@ export default function ProteinLibrary() {
               <StatePanel
                 kind="empty"
                 icon="scan-search"
+                fill
                 eyebrow="Sin resultados"
                 title="No hay proteínas que coincidan con la búsqueda."
                 description="Prueba con otro ID, alias o hash de secuencia."

@@ -31,8 +31,13 @@
 }
 
 .frustration-sequence-scroll {
+  min-width: 0;
+  max-width: 100%;
   overflow-x: auto;
   overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-x;
   scrollbar-width: thin;
   scrollbar-color: var(--line-strong) transparent;
 }
@@ -40,7 +45,7 @@
 .frustration-sequence-track {
   min-width: max-content;
   height: 58px;
-  padding: 0 8px;
+  padding-inline: 0;
   display: flex;
   align-items: stretch;
 }

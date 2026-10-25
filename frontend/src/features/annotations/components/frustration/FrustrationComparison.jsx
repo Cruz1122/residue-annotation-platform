@@ -12,7 +12,15 @@ import {
 } from '@shared/api/client';
 import { userErrorMessage } from '@shared/lib/error-presentation';
 import { loadAnalysisArtifactDetails } from '@features/annotations/analysis-artifacts.js';
+import { annotationResultSignature } from '@features/annotations/annotation-result-signature.js';
 import { acquireStructureUrl } from '@features/annotations/structure-url-cache.js';
+import { captureCameraSnapshot, sameCameraSnapshot } from '@features/annotations/camera-snapshot.js';
+import { getZoomOptimizedCanvas3dProps } from '@features/annotations/zoom-rendering.js';
+import {
+  FRUSTRATION_ARTIFACT_TYPES,
+  frustrationRecordsAtPosition,
+  indexFrustrationArtifactDetails,
+} from '@features/annotations/frustration-artifact-index.js';
 import MetricSelect from '@features/annotations/components/shared/MetricSelect.jsx';
 import {
   classifyFrustrAISeqIndex,
@@ -185,14 +193,6 @@ function structureMappingMaps(mapping) {
   return { byCanonical, byStructure };
 }
 
-function recordPosition(record) {
-  for (const key of ['aa_position', 'position', 'residue_position', 'canonical_position', 'residue_number']) {
-    const position = Number(record?.[key]);
-    if (Number.isInteger(position) && position > 0) return position;
-  }
-  return null;
-}
-
 function recordValue(record, field) {
   const value = record?.[field];
   if (value !== null && value !== undefined && value !== '' && value !== 'NA') return value;
@@ -200,9 +200,8 @@ function recordValue(record, field) {
   return nested !== null && nested !== undefined && nested !== '' && nested !== 'NA' ? nested : null;
 }
 
-function valueFromRecords(records, position, fields) {
+function valueFromRecords(records, fields) {
   for (const record of records ?? []) {
-    if (recordPosition(record) !== position) continue;
     for (const field of fields) {
       const value = recordValue(record, field);
       if (value !== null) return value;
@@ -211,7 +210,7 @@ function valueFromRecords(records, position, fields) {
   return null;
 }
 
-function getPublishedValue(position, field, annotationByPosition, artifactDetails, fallbackFields = []) {
+function getPublishedValue(position, field, annotationByPosition, indexedArtifactDetails, fallbackFields = []) {
   const row = annotationByPosition.get(position);
   for (const candidate of [field, ...fallbackFields]) {
     const direct = row?.values?.[candidate];
@@ -220,19 +219,20 @@ function getPublishedValue(position, field, annotationByPosition, artifactDetail
 
   const fields = [field, ...fallbackFields];
   const artifactTypes = field.startsWith('frustraiseq_')
-    ? ['frustraiseq_per_residue']
+    ? [FRUSTRATION_ARTIFACT_TYPES.sequence]
     : field.startsWith('structural_frustration_')
-      ? ['frustration_per_residue', 'frustratometer_per_residue']
-      : ['frustratometer_per_residue', 'frustration_per_residue'];
+      ? [FRUSTRATION_ARTIFACT_TYPES.structural, FRUSTRATION_ARTIFACT_TYPES.primary]
+      : [FRUSTRATION_ARTIFACT_TYPES.primary, FRUSTRATION_ARTIFACT_TYPES.structural];
   for (const artifactType of artifactTypes) {
-    const value = valueFromRecords(artifactDetails?.[artifactType], position, fields);
+    const records = frustrationRecordsAtPosition(indexedArtifactDetails, artifactType, position);
+    const value = valueFromRecords(records, fields);
     if (value !== null) return value;
   }
   return null;
 }
 
-function numericPublishedValue(position, field, annotationByPosition, artifactDetails, fallbackFields = []) {
-  return finiteAnnotationValue(getPublishedValue(position, field, annotationByPosition, artifactDetails, fallbackFields));
+function numericPublishedValue(position, field, annotationByPosition, indexedArtifactDetails, fallbackFields = []) {
+  return finiteAnnotationValue(getPublishedValue(position, field, annotationByPosition, indexedArtifactDetails, fallbackFields));
 }
 
 function formatValue(value) {
@@ -281,19 +281,6 @@ function valueDomain(values, field) {
   return null;
 }
 
-function cameraSnapshotSignature(snapshot) {
-  if (!snapshot) return '';
-  return JSON.stringify([
-    snapshot.mode,
-    snapshot.fov,
-    snapshot.radius,
-    snapshot.radiusMax,
-    ...Array.from(snapshot.position ?? []),
-    ...Array.from(snapshot.target ?? []),
-    ...Array.from(snapshot.up ?? []),
-  ]);
-}
-
 function requestCameraSync(cameraSyncRef, sourceId) {
   const sync = cameraSyncRef.current;
   if (!sync.enabled || sync.applying || performance.now() < sync.suspendUntil || !sync.cameras.has(sourceId)) return;
@@ -304,9 +291,8 @@ function requestCameraSync(cameraSyncRef, sourceId) {
     const source = sync.cameras.get(sync.pendingSource);
     if (!sync.enabled || performance.now() < sync.suspendUntil || !source) return;
     const snapshot = source.getSnapshot();
-    const signature = cameraSnapshotSignature(snapshot);
-    if (signature === sync.lastSignature) return;
-    sync.lastSignature = signature;
+    if (sameCameraSnapshot(snapshot, sync.lastSnapshot)) return;
+    sync.lastSnapshot = captureCameraSnapshot(snapshot);
     sync.applying = true;
     try {
       for (const [panelId, camera] of sync.cameras.entries()) {
@@ -321,7 +307,7 @@ function requestCameraSync(cameraSyncRef, sourceId) {
 function suspendCameraSync(cameraSyncRef, durationMs = CAMERA_SYNC_ACTION_GUARD_MS) {
   const sync = cameraSyncRef.current;
   sync.suspendUntil = Math.max(sync.suspendUntil, performance.now() + durationMs);
-  sync.lastSignature = '';
+  sync.lastSnapshot = null;
   if (sync.frame !== null) {
     cancelAnimationFrame(sync.frame);
     sync.frame = null;
@@ -332,7 +318,7 @@ function requestCameraSyncAfterAction(cameraSyncRef, sourceId, delayMs = CAMERA_
   window.setTimeout(() => {
     const sync = cameraSyncRef.current;
     if (sync.enabled && performance.now() >= sync.suspendUntil) {
-      sync.lastSignature = '';
+      sync.lastSnapshot = null;
       requestCameraSync(cameraSyncRef, sourceId);
     }
   }, delayMs);
@@ -454,12 +440,12 @@ function MetricScale({ methodKind, method, domain }) {
   );
 }
 
-function sequenceRows(sequence, annotationByPosition, artifactDetails, method) {
+function sequenceRows(sequence, annotationByPosition, indexedArtifactDetails, method) {
   return [...String(sequence ?? '')].map((aa, index) => {
     const position = index + 1;
-    const value = numericPublishedValue(position, method, annotationByPosition, artifactDetails);
+    const value = numericPublishedValue(position, method, annotationByPosition, indexedArtifactDetails);
     const publishedClass = method === 'frustraiseq_index'
-      ? getPublishedValue(position, 'frustraiseq_class', annotationByPosition, artifactDetails)
+      ? getPublishedValue(position, 'frustraiseq_class', annotationByPosition, indexedArtifactDetails)
       : null;
     return { position, aa, value, publishedClass };
   });
@@ -621,6 +607,7 @@ function ComparisonStructurePanel({
           return;
         }
         viewer.plugin.canvas3d?.setProps({
+          ...getZoomOptimizedCanvas3dProps(),
           interaction: { maxFps: 60 },
           camera: { helper: { axes: { name: 'off', params: {} } } },
           cameraResetDurationMs: 180,
@@ -848,6 +835,7 @@ function SequenceStrip({
       class="frustration-sequence-scroll"
       role="group"
       aria-label="Secuencia canónica; selecciona un residuo para comparar sus valores"
+      tabIndex={0}
     >
       <div class="frustration-sequence-track">
         {[...String(sequence ?? '')].map((aa, index) => {
@@ -996,7 +984,7 @@ function AnnotationPanel({
   selectedPosition,
   onSelect,
   annotationByPosition,
-  artifactDetails,
+  indexedArtifactDetails,
   structuralValues,
   sequenceValues,
   sequenceClasses,
@@ -1015,10 +1003,10 @@ function AnnotationPanel({
     const rows = [];
     for (let position = 1; position <= String(sequence ?? '').length; position += 1) {
       const structuralValueAtPosition = structuralValues.get(position);
-      const sequenceIndexValue = numericPublishedValue(position, 'frustraiseq_index', annotationByPosition, artifactDetails);
+      const sequenceIndexValue = numericPublishedValue(position, 'frustraiseq_index', annotationByPosition, indexedArtifactDetails);
       const value = hotspotSource === 'frustraiseq' ? sequenceIndexValue : structuralValueAtPosition;
       const publishedClass = hotspotSource === 'frustraiseq'
-        ? normalizeFrustrationClass(getPublishedValue(position, 'frustraiseq_class', annotationByPosition, artifactDetails))
+        ? normalizeFrustrationClass(getPublishedValue(position, 'frustraiseq_class', annotationByPosition, indexedArtifactDetails))
         : null;
       const isHighlyFrustrated = hotspotSource === 'frustraiseq'
         ? publishedClass === 'highly_frustrated'
@@ -1032,7 +1020,7 @@ function AnnotationPanel({
       });
     }
     return rows.sort((left, right) => left.value - right.value);
-  }, [annotationByPosition, artifactDetails, hotspotSource, sequence, structuralValues, structureMethod]);
+  }, [annotationByPosition, indexedArtifactDetails, hotspotSource, sequence, structuralValues, structureMethod]);
   const hotspotRows = highlyFrustratedRows.slice(0, 5);
   const structuralValue = hasSelectedPosition ? structuralValues.get(selectedPosition) : null;
   const sequenceValue = hasSelectedPosition ? sequenceValues.get(selectedPosition) : null;
@@ -1043,7 +1031,7 @@ function AnnotationPanel({
   ].map((metric) => ({
     ...metric,
     value: hasSelectedPosition
-      ? numericPublishedValue(selectedPosition, metric.field, annotationByPosition, artifactDetails)
+      ? numericPublishedValue(selectedPosition, metric.field, annotationByPosition, indexedArtifactDetails)
       : null,
   }));
   const structuralClass = classifyFrustratometerValue(structuralValue, structureMethod);
@@ -1062,10 +1050,10 @@ function AnnotationPanel({
     ? structuralColor
     : sequenceColor;
   const ensembleMean = hasSelectedPosition
-    ? numericPublishedValue(selectedPosition, 'frustratometer_mean', annotationByPosition, artifactDetails)
+    ? numericPublishedValue(selectedPosition, 'frustratometer_mean', annotationByPosition, indexedArtifactDetails)
     : null;
   const ensembleSd = hasSelectedPosition
-    ? numericPublishedValue(selectedPosition, 'frustratometer_sd', annotationByPosition, artifactDetails)
+    ? numericPublishedValue(selectedPosition, 'frustratometer_sd', annotationByPosition, indexedArtifactDetails)
     : null;
   const secondaryStructure = selectedRow?.values?.secondary_structure;
   const uniprotDomain = String(selectedRow?.values?.uniprot_domain ?? '').trim();
@@ -1159,7 +1147,7 @@ export default function FrustrationComparison({ proteinId }) {
     applying: false,
     cameras: new Map(),
     frame: null,
-    lastSignature: '',
+    lastSnapshot: null,
     pendingSource: null,
     suspendUntil: 0,
   });
@@ -1174,6 +1162,8 @@ export default function FrustrationComparison({ proteinId }) {
     let timer;
     let controller;
     let latestRun = null;
+    let latestAnnotationResultSignature = '';
+    let annotationRefreshVersion = 0;
     let reconnectAttempts = 0;
     let finished = false;
     setAnnotationsTruncated(false);
@@ -1184,15 +1174,31 @@ export default function FrustrationComparison({ proteinId }) {
       setRun(nextRun);
     };
 
+    const refreshAnnotations = async (nextRun, reportError = false) => {
+      const signature = annotationResultSignature(nextRun);
+      if (signature === latestAnnotationResultSignature) return;
+      const previousSignature = latestAnnotationResultSignature;
+      latestAnnotationResultSignature = signature;
+      const version = ++annotationRefreshVersion;
+      try {
+        const annotationData = await getAllFrustrationAnnotations(runId);
+        if (!active || version !== annotationRefreshVersion || signature !== latestAnnotationResultSignature) return;
+        setAnnotations(annotationData.rows ?? []);
+        setAnnotationsTruncated(Boolean(annotationData.truncated));
+      } catch (requestError) {
+        if (active && version === annotationRefreshVersion && signature === latestAnnotationResultSignature) {
+          latestAnnotationResultSignature = previousSignature;
+          if (reportError) setError(userErrorMessage(requestError, 'No se pudieron actualizar las anotaciones de frustración.'));
+        }
+      }
+    };
+
     const refreshSnapshot = async () => {
       if (!runId) return;
       try {
-        const [nextRun, annotationData] = await Promise.all([getRun(runId), getAllFrustrationAnnotations(runId)]);
+        const nextRun = await getRun(runId);
         applyRun(nextRun);
-        if (active) {
-          setAnnotations(annotationData.rows ?? []);
-          setAnnotationsTruncated(Boolean(annotationData.truncated));
-        }
+        await refreshAnnotations(nextRun, true);
         if (TERMINAL_RUN_STATUSES.has(nextRun.status)) {
           finished = true;
           controller?.abort();
@@ -1221,12 +1227,7 @@ export default function FrustrationComparison({ proteinId }) {
           onSnapshot: (snapshot) => {
             reconnectAttempts = 0;
             applyRun(snapshot);
-            void getAllFrustrationAnnotations(runId).then((data) => {
-              if (active) {
-                setAnnotations(data.rows ?? []);
-                setAnnotationsTruncated(Boolean(data.truncated));
-              }
-            }).catch(() => undefined);
+            void refreshAnnotations(snapshot).catch(() => undefined);
             if (TERMINAL_RUN_STATUSES.has(snapshot.status)) {
               finished = true;
               controller.abort();
@@ -1258,6 +1259,7 @@ export default function FrustrationComparison({ proteinId }) {
         setProtein(proteinData);
         setAnnotations(annotationData.rows ?? []);
         setAnnotationsTruncated(Boolean(annotationData.truncated));
+        latestAnnotationResultSignature = annotationResultSignature(runData);
         applyRun(runData);
         setState('ready');
         if (!TERMINAL_RUN_STATUSES.has(runData.status)) void connectStream();
@@ -1319,15 +1321,16 @@ export default function FrustrationComparison({ proteinId }) {
   }, [structureRequest?.id]);
 
   const annotationByPosition = useMemo(() => mergeAnnotationRows(annotations), [annotations]);
+  const indexedArtifactDetails = useMemo(() => indexFrustrationArtifactDetails(artifactDetails), [artifactDetails]);
   const structureMapping = run?.configuration?.structure_mapping ?? {};
   const mapping = useMemo(() => structureMappingMaps(structureMapping), [structureMapping]);
   const structuralRows = useMemo(
-    () => sequenceRows(protein?.sequence, annotationByPosition, artifactDetails, structureMethod),
-    [annotationByPosition, artifactDetails, protein?.sequence, structureMethod],
+    () => sequenceRows(protein?.sequence, annotationByPosition, indexedArtifactDetails, structureMethod),
+    [annotationByPosition, indexedArtifactDetails, protein?.sequence, structureMethod],
   );
   const sequenceRowsData = useMemo(
-    () => sequenceRows(protein?.sequence, annotationByPosition, artifactDetails, sequenceMethod),
-    [annotationByPosition, artifactDetails, protein?.sequence, sequenceMethod],
+    () => sequenceRows(protein?.sequence, annotationByPosition, indexedArtifactDetails, sequenceMethod),
+    [annotationByPosition, indexedArtifactDetails, protein?.sequence, sequenceMethod],
   );
   const structuralValues = useMemo(() => new Map(structuralRows.map((row) => [row.position, row.value])), [structuralRows]);
   const sequenceValues = useMemo(() => new Map(sequenceRowsData.map((row) => [row.position, row.value])), [sequenceRowsData]);
@@ -1390,7 +1393,7 @@ export default function FrustrationComparison({ proteinId }) {
           sequence={protein?.sequence}
           selectedPosition={selectedPosition}
           onSelect={toggleSelectedPosition}
-          structureValues={new Map([...structuralValues].map(([position, value]) => [position, value]))}
+          structureValues={structuralValues}
           sequenceValues={sequenceValues}
           sequenceClasses={sequenceClasses}
           structureMethod={structureMethod}
@@ -1446,7 +1449,7 @@ export default function FrustrationComparison({ proteinId }) {
           selectedPosition={selectedPosition}
           onSelect={toggleSelectedPosition}
           annotationByPosition={annotationByPosition}
-          artifactDetails={artifactDetails}
+          indexedArtifactDetails={indexedArtifactDetails}
           structuralValues={structuralValues}
           sequenceValues={sequenceValues}
           sequenceClasses={sequenceClasses}

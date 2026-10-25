@@ -39,6 +39,7 @@ export default function RunHistory({ runs, proteins }) {
         <StatePanel
           kind="empty"
           compact
+          fill
           icon="workflow"
           eyebrow="Historial vacío"
           title="Todavía no tienes corridas registradas."

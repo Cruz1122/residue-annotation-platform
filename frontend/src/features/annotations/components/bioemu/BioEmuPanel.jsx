@@ -21,8 +21,8 @@ function playbackStatus(stateLabel) {
   if (stateLabel === 'Selección no disponible') return stateLabel;
   if (stateLabel.startsWith('Cargando') || stateLabel.startsWith('Verificando') || stateLabel.startsWith('Preparando')) return stateLabel;
   if (stateLabel === 'Trayectoria incompatible') return 'Trayectoria incompatible';
-  if (stateLabel === 'Error al cargar') return 'Error al cargar';
-  return 'XTC no disponible';
+  if (stateLabel === 'Error al cargar') return 'No se pudo cargar la trayectoria';
+  return 'Trayectoria no disponible';
 }
 
 export default function BioEmuPanel({
@@ -141,8 +141,8 @@ export default function BioEmuPanel({
             kind="empty"
             compact
             icon="box"
-            title="No hay XTC para recorrer conformeros"
-            description="Se muestra el PDB relajado de referencia. Esta corrida no tiene coordenadas XTC para cambiar de conformero."
+            title="No hay trayectoria de conformeros"
+            description="Se muestra la estructura de referencia. Esta corrida no publicó coordenadas para recorrer los conformeros."
           />
         )}
       </div>

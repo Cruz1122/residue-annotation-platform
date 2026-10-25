@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
+import StatePanel from '@shared/components/feedback/StatePanel.jsx';
 import { getArtifactObjectUrl } from '@shared/api/client';
 import { artifactDisplayName } from '@features/artifacts/artifact-display.js';
 import { acquireStructureUrl } from '@features/annotations/structure-url-cache.js';
+import { getZoomOptimizedCanvas3dProps } from '@features/annotations/zoom-rendering.js';
 import 'molstar/build/viewer/molstar.css';
 
 function isStructureArtifact(artifact) {
@@ -68,7 +70,8 @@ export default function ProteinStructurePreview({ run, label }) {
           return;
         }
         viewerRef.current = viewer;
-        await viewer.loadStructureFromUrl(objectUrl, structure.format, false, { label: structure.label });
+        viewer.plugin.canvas3d?.setProps(getZoomOptimizedCanvas3dProps());
+        await viewer.loadStructureFromUrl(loadedUrl, structure.format, false, { label: structure.label });
         if (!disposed) setState('ready');
       } catch {
         if (!disposed) setState('error');
@@ -89,11 +92,13 @@ export default function ProteinStructurePreview({ run, label }) {
     <div class="protein-structure-preview" aria-label={`Vista 3D de ${label}`}>
       <div ref={hostRef} class="protein-preview-molstar" aria-hidden={state !== 'ready'} />
       {state !== 'ready' && (
-        <div class="protein-preview-state" role="status">
-          {state === 'loading' && 'Cargando vista 3D…'}
-          {state === 'unavailable' && 'Sin modelo 3D disponible'}
-          {state === 'error' && 'No se pudo cargar la vista 3D'}
-        </div>
+        <StatePanel
+          kind={state === 'loading' ? 'loading' : state === 'error' ? 'error' : 'empty'}
+          compact
+          title={state === 'loading' ? 'Cargando vista 3D' : state === 'error' ? 'No se pudo cargar la estructura' : 'Estructura no disponible'}
+          description={state === 'unavailable' ? 'Esta corrida no publicó un modelo molecular para mostrar.' : ''}
+          className="protein-preview-state"
+        />
       )}
     </div>
   );

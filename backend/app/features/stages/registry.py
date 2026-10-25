@@ -239,7 +239,7 @@ STAGE_DEFINITIONS: tuple[StageDefinition, ...] = (
     StageDefinition(
         "functional_region_evidence",
         "P15",
-        "Evidencia de región funcional",
+        "Regiones asociadas a LDL-C/estatinas",
         ("uniprot_features",),
         required_annotations=("gene", "uniprot_mapping_status"),
         columns=("variant_in_statin_ldlc_region",),

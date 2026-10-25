@@ -7,7 +7,7 @@ export const ANALYSIS_DETAIL_ARTIFACTS = {
   topology: ['tmbed_per_residue', 'tm_segments', 'span_metadata'],
   frustration: ['frustratometer_conformers', 'frustratometer_per_residue', 'frustration_per_residue', 'frustraiseq_per_residue', 'metadata', 'closure', 'frames_index'],
   conservation: ['evolution_per_residue', 'metadata'],
-  functional: ['ldlc_statin_evidence', 'functional_features_long', 'summary'],
+  'scientific-evidence': ['ldlc_statin_evidence', 'functional_features_long', 'mavedb_details', 'pgx_per_position', 'pgx_alleles', 'predictor_per_position', 'predictor_substitutions', 'clinvar_per_position', 'clinvar_variants'],
   ddg: ['variant_annotations', 'ddg_replicates', 'provenance', 'rosetta_metadata', 'variant_set'],
   contacts: ['contact_residue_summary', 'contacts_long', 'provenance'],
 };
@@ -124,6 +124,18 @@ export async function loadAnalysisArtifactDetails(run, analysis, getBlob) {
       const isContactsEvidence = analysis === 'contacts'
         && ['contact_residue_summary', 'contacts_long', 'provenance'].includes(artifact.artifact_type);
       if (isContactsEvidence && stage.id !== 'structural_contacts') return false;
+      const evidenceArtifactStages = {
+        ldlc_statin_evidence: ['functional_region_evidence'],
+        functional_features_long: ['uniprot_features'],
+        mavedb_details: ['experimental_variant_evidence'],
+        pgx_per_position: ['pharmacogenomics'],
+        pgx_alleles: ['pharmacogenomics'],
+        predictor_per_position: ['variant_predictors'],
+        predictor_substitutions: ['variant_predictors'],
+        clinvar_per_position: ['clinvar'],
+        clinvar_variants: ['clinvar'],
+      };
+      if (analysis === 'scientific-evidence' && !evidenceArtifactStages[artifact.artifact_type]?.includes(stage.id)) return false;
       // ``metadata`` is a shared artifact name across stages. Conservation
       // must read the metadata published by its own stage, otherwise a later
       // predictor/feature metadata file can silently replace its method and
@@ -218,7 +230,7 @@ export function presentationRowsFromArtifacts(details, analysis) {
   if (analysis === 'conservation') {
     return conservationRowsFromArtifact(details?.evolution_per_residue);
   }
-  if (analysis === 'functional') {
+  if (analysis === 'scientific-evidence') {
     const grouped = new Map();
     for (const record of details?.functional_features_long ?? []) {
       const aaPosition = positionFromRecord(record);

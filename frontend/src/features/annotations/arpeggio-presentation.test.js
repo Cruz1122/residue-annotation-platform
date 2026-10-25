@@ -13,6 +13,7 @@ import {
   isContactType,
   normalizeContactRows,
   normalizeSummaryRecord,
+  observedContactTypes,
   parseContactTypeList,
 } from './arpeggio-presentation.js';
 
@@ -175,6 +176,33 @@ test('selected residue uses filtered counts, partner evidence and a scientific s
   assert.match(view.scale.methodLabel, /pH 7\.4/);
   assert.equal(view.scale.note, 'Conteo entero por residuo');
   assert.equal(view.scale.sourceUrl, 'https://doi.org/10.1016/j.jmb.2016.12.004');
+});
+
+test('uses precomputed contact aggregates without changing the selected-residue model', () => {
+  const summaryRows = buildArpeggioSummaryRows({ summaryRecords: SUMMARY_RECORDS });
+  const contactRows = normalizeContactRows(LONG_RECORDS);
+  const observedTypes = observedContactTypes(summaryRows, contactRows);
+  const allDetailByPosition = aggregateContactRows(contactRows);
+  const filteredDetailByPosition = aggregateContactRows(contactRows, new Set(['hydrophobic', 'polar']));
+  const options = {
+    summaryRows,
+    contactRows,
+    sequence: SEQUENCE,
+    metric: 'partners',
+    selectedTypes: new Set(['hydrophobic', 'polar']),
+    selectedPosition: 79,
+    provenance: { parameters: { interacting_A: 5, ph: 7.4 } },
+  };
+
+  assert.deepEqual(
+    buildArpeggioModel(options),
+    buildArpeggioModel({
+      ...options,
+      allDetailByPosition,
+      filteredDetailByPosition,
+      knownObservedTypes: observedTypes,
+    }),
+  );
 });
 
 test('metric dropdown changes panel values and sequence colours', () => {

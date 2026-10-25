@@ -6,7 +6,15 @@ import StatePanel from '@shared/components/feedback/StatePanel.jsx';
 import { getAnnotations, getArtifactBlob, getArtifactObjectUrl, getProtein, getRun, getUploadObjectUrl, subscribeRunEvents } from '@shared/api/client';
 import { userErrorMessage } from '@shared/lib/error-presentation';
 import { firstDetailValue, loadAnalysisArtifactDetails, presentationRowsFromArtifacts, recordsForPosition, summarizeArtifactRecord } from '@features/annotations/analysis-artifacts.js';
+import { groupPredictorSubstitutions } from '@features/annotations/predictor-interpretation.js';
+import MetricSelect from '@features/annotations/components/shared/MetricSelect.jsx';
+import {
+  SCIENTIFIC_EVIDENCE_MODE_OPTIONS,
+  availableScientificEvidenceModes,
+  scientificEvidenceRows,
+} from '@features/annotations/scientific-evidence-presentation.js';
 import { acquireStructureUrl } from '@features/annotations/structure-url-cache.js';
+import { getZoomOptimizedCanvas3dProps } from '@features/annotations/zoom-rendering.js';
 import {
   CONSERVATION_SCALE,
   CONSERVATION_REFERENCE_URL,
@@ -29,6 +37,7 @@ import {
   annotationForResidue,
   assignCanonicalPositions,
   canonicalChain,
+  clinvarStatusLabel,
   colorForValues,
   fixedDomainForMode,
   formatScaleNumber,
@@ -36,6 +45,7 @@ import {
   mergeAnnotationRows,
   measurementForMode,
   normalizeValue,
+  normalizeUniprotFeatureLabel,
   oneLetter,
   publishedModeValue,
   readableValue,
@@ -293,11 +303,11 @@ function displayDetail(record, keys, unitKeys = [], fallbackUnit = null) {
   return unit === null ? displayValue : `${displayValue} ${unit}`;
 }
 
-function EvidenceRow({ label, value, tone = '' }) {
+function EvidenceRow({ label, value, tone = '', title }) {
   return (
     <div class="analysis-evidence-row">
       <dt>{label}</dt>
-      <dd class={tone ? `tone-${tone}` : ''}>{value ?? 'Sin dato'}</dd>
+      <dd class={tone ? `tone-${tone}` : ''} title={title}>{value ?? 'Sin dato'}</dd>
     </div>
   );
 }
@@ -391,10 +401,39 @@ function AnalysisDetails({ analysis, annotation, residue, run, view, artifactDet
     ? 'Sin dato publicado'
     : `${readableValue('rate4site_score', conservationEvidence.rate4siteScore)}${conservationEvidence.rate4siteUnit ? ` ${conservationEvidence.rate4siteUnit}` : ''}`;
   const functionalDetail = recordsForPosition(artifactDetails, 'ldlc_statin_evidence', canonicalPosition)[0];
+  const functionalEvidenceValue = firstDetailValue(functionalDetail, ['evidence', 'region_name', 'label']);
+  const functionalEvidenceText = String(functionalEvidenceValue ?? '').trim().toLowerCase();
+  const functionalEvidenceAvailable = functionalEvidenceValue !== null
+    && !['false', '0', 'none', 'no evidence', 'sin evidencia', 'no region', 'n/a'].includes(functionalEvidenceText);
   const functionalFeatures = recordsForPosition(artifactDetails, 'functional_features_long', canonicalPosition);
-  const functionalFeatureTypes = [...new Set(functionalFeatures.map((record) => String(record?.feature_type ?? '').trim()).filter(Boolean))];
-  const functionalFeatureNames = [...new Set(functionalFeatures.map((record) => String(record?.feature_name ?? '').trim()).filter(Boolean))];
-  const functionalSummary = artifactDetails?.summary?.[0];
+  const functionalFeatureTypes = [...new Set(functionalFeatures.map((record) => normalizeUniprotFeatureLabel(record?.feature_type)).filter(Boolean))];
+  const functionalFeatureNames = [...new Set(functionalFeatures.map((record) => normalizeUniprotFeatureLabel(record?.feature_name)).filter(Boolean))];
+  const experimentalStage = relatedStages.find((stage) => stage.id === 'experimental_variant_evidence');
+  const pharmacogenomicsStage = relatedStages.find((stage) => stage.id === 'pharmacogenomics');
+  const predictorsStage = relatedStages.find((stage) => stage.id === 'variant_predictors');
+  const clinvarStage = relatedStages.find((stage) => stage.id === 'clinvar');
+  const mavePosition = recordsForPosition(artifactDetails, 'mavedb_details', canonicalPosition)[0];
+  const pgxPosition = recordsForPosition(artifactDetails, 'pgx_per_position', canonicalPosition)[0];
+  const predictorPosition = recordsForPosition(artifactDetails, 'predictor_per_position', canonicalPosition)[0];
+  const predictorVariantRecords = recordsForPosition(artifactDetails, 'predictor_substitutions', canonicalPosition)
+    .filter((record) => {
+      const reference = String(record?.aa_ref ?? record?.ref_aa ?? String(record?.variant_id ?? record?.variant ?? '').match(/^([A-Z])\d+[A-Z]$/i)?.[1] ?? '').toUpperCase();
+      return !residue?.one || !reference || reference === residue.one;
+    });
+  const predictorVariantRows = groupPredictorSubstitutions(predictorVariantRecords, canonicalPosition)
+    .filter((row) => row.scores.some((score) => score.score !== null || score.label !== 'Sin interpretación'));
+  const clinvarPosition = recordsForPosition(artifactDetails, 'clinvar_per_position', canonicalPosition)[0];
+  const clinvarVariants = recordsForPosition(artifactDetails, 'clinvar_variants', canonicalPosition);
+  const clinvarStatus = clinvarStatusLabel(firstDetailValue(clinvarPosition, ['clinvar_status']));
+  const pgxHasValues = ['pgx_star_alleles', 'pgx_allele_function', 'pgx_gene_evidence_level']
+    .some((field) => firstDetailValue(pgxPosition, [field]) !== null);
+  const predictorPositionHasValues = ['alphamissense_mean', 'alphamissense_max', 'cadd_phred_mean', 'revel_mean']
+    .some((field) => firstDetailValue(predictorPosition, [field]) !== null)
+  const predictorVariantsHaveValues = predictorVariantRows.length > 0;
+  const clinvarHasValues = ['clinvar_n_variants', 'clinvar_n_pathogenic_or_likely', 'clinvar_n_benign_or_likely', 'clinvar_n_vus', 'clinvar_n_conflicting', 'clinvar_status']
+    .some((field) => firstDetailValue(clinvarPosition, [field]) !== null);
+  const maveHasValues = ['mavedb_position_assayed', 'mavedb_n_score_sets', 'mavedb_n_substitutions_tested']
+    .some((field) => firstDetailValue(mavePosition, [field]) !== null);
   const ddgDetail = recordsForPosition(artifactDetails, 'variant_annotations', canonicalPosition)[0];
   const displayedVariant = requestedVariant ?? (ddgDetail?.aa_position && (ddgDetail?.aa_ref || ddgDetail?.aa_alt || ddgDetail?.variant_id)
     ? {
@@ -415,10 +454,13 @@ function AnalysisDetails({ analysis, annotation, residue, run, view, artifactDet
       {residue ? (
         <>
           <div class="viewer-residue-title">
-            <div><strong>{residue.one}</strong><span>{residue.compId} · {AA_NAMES[residue.compId] ?? 'Residuo'}</span></div>
+            <div>
+              <strong style={{ color: residueDisplayColor(view.mode, residue, annotation, null) }}>{residue.one}</strong>
+              <span style={{ color: residueDisplayColor(view.mode, residue, annotation, null) }}>{residue.compId} · {AA_NAMES[residue.compId] ?? 'Residuo'}</span>
+            </div>
             <b>{canonicalPosition ?? `${residue.authSeqId}${residue.insCode || ''}`}</b>
           </div>
-          {uniprotDomain !== 'NA' && (
+          {analysis !== 'scientific-evidence' && uniprotDomain !== 'NA' && (
             <div class="analysis-context">
               <span>Contexto funcional</span>
               <EvidenceRow label="Dominio UniProt" value={readableValue('uniprot_domain', uniprotDomain)} />
@@ -494,17 +536,91 @@ function AnalysisDetails({ analysis, annotation, residue, run, view, artifactDet
         </EvidenceSection>
       )}
 
-      {residue && analysis === 'functional' && (
-        <EvidenceSection title="Evidencia funcional" meta={displayField(annotation, 'variant_in_statin_ldlc_region')} open>
-          <dl>
-            <EvidenceRow label="Región LDL-C / estatinas" value={displayField(annotation, 'variant_in_statin_ldlc_region')} tone={booleanClass(annotation?.values?.variant_in_statin_ldlc_region)} />
-            <EvidenceRow label="Mapeo canónico" value={displayField(annotation, 'uniprot_mapping_status')} />
-            {functionalDetail && <EvidenceRow label="Evidencia del recurso" value={displayDetail(functionalDetail, ['evidence', 'source', 'region_name', 'label'])} />}
-            {functionalFeatureTypes.length > 0 && <EvidenceRow label="Tipos UniProt" value={functionalFeatureTypes.slice(0, 5).join(' · ')} tone={functionalFeatureTone} />}
-            {functionalFeatureNames.length > 0 && <EvidenceRow label="Regiones / sitios" value={functionalFeatureNames.slice(0, 3).join(' · ')} tone={functionalFeatureTone} />}
-            {functionalSummary && <EvidenceRow label="Resumen de la etapa" value={summarizeArtifactRecord(functionalSummary)} />}
-          </dl>
-        </EvidenceSection>
+      {analysis === 'scientific-evidence' && relatedStages.some((stage) => ['functional_region_evidence', 'uniprot_features', 'experimental_variant_evidence', 'pharmacogenomics', 'variant_predictors', 'clinvar'].includes(stage.id)) && (
+        <div class="scientific-evidence-list">
+          {functionalFeatures.length > 0 && (
+            <EvidenceSection title="UniProtKB / InterPro" meta={`${functionalFeatures.length} característica${functionalFeatures.length === 1 ? '' : 's'}`} open={Boolean(residue)}>
+              <dl>
+                {uniprotDomain !== 'NA' && <EvidenceRow label="Dominio anotado" value={readableValue('uniprot_domain', uniprotDomain)} />}
+                {functionalFeatureTypes.length > 0 && <EvidenceRow label="Tipo" value={functionalFeatureTypes.slice(0, 5).join(' · ')} tone={functionalFeatureTone} />}
+                {functionalFeatureNames.length > 0 && <EvidenceRow label="Anotación" value={functionalFeatureNames.slice(0, 4).join(' · ')} tone={functionalFeatureTone} />}
+              </dl>
+            </EvidenceSection>
+          )}
+          {functionalEvidenceAvailable && (
+            <EvidenceSection title="Regiones asociadas a LDL-C y estatinas" meta="Coincidencia en esta posición" open={Boolean(residue)}>
+              <dl>
+                <EvidenceRow label="Evidencia publicada" value={functionalEvidenceValue} />
+              </dl>
+            </EvidenceSection>
+          )}
+          {experimentalStage && ['success', 'reused'].includes(experimentalStage.status) && maveHasValues && (
+            <EvidenceSection title="Ensayos funcionales (MaveDB)" meta="Medición disponible" open={Boolean(residue)}>
+              <dl>
+                {['mavedb_position_assayed', 'mavedb_n_score_sets', 'mavedb_n_substitutions_tested'].map((field) => firstDetailValue(mavePosition, [field]) !== null && <EvidenceRow key={field} label={{ mavedb_position_assayed: 'Posición ensayada', mavedb_n_score_sets: 'Conjuntos de puntuaciones compatibles', mavedb_n_substitutions_tested: 'Sustituciones medidas' }[field]} value={firstDetailValue(mavePosition, [field])} />)}
+              </dl>
+            </EvidenceSection>
+          )}
+          {pharmacogenomicsStage && ['success', 'reused'].includes(pharmacogenomicsStage.status) && pgxHasValues && (
+            <EvidenceSection title="Farmacogenómica" meta="Evidencia en esta posición" open={Boolean(residue)}>
+              <dl>
+                {['pgx_star_alleles', 'pgx_allele_function', 'pgx_gene_evidence_level'].map((field) => firstDetailValue(pgxPosition, [field]) !== null && <EvidenceRow key={field} label={{ pgx_star_alleles: 'Alelos farmacogenéticos', pgx_allele_function: 'Función del alelo', pgx_gene_evidence_level: 'Nivel de evidencia génica' }[field]} value={firstDetailValue(pgxPosition, [field])} />)}
+              </dl>
+            </EvidenceSection>
+          )}
+          {predictorsStage && ['success', 'reused'].includes(predictorsStage.status) && predictorPositionHasValues && (
+            <EvidenceSection title="Predicciones computacionales" meta="Promedios por posición" open={Boolean(residue)}>
+              <dl>
+                {['alphamissense_mean', 'alphamissense_max', 'cadd_phred_mean', 'revel_mean'].map((field) => firstDetailValue(predictorPosition, [field]) !== null && (
+                  <EvidenceRow
+                    key={field}
+                    label={{ alphamissense_mean: 'AlphaMissense · media', alphamissense_max: 'AlphaMissense · máximo', cadd_phred_mean: 'CADD PHRED · media', revel_mean: 'REVEL · media' }[field]}
+                    value={firstDetailValue(predictorPosition, [field])}
+                    title="Agregado de varias sustituciones posibles en esta posición. Los umbrales publicados se aplican a una sustitución individual y no permiten clasificar este promedio."
+                  />
+                ))}
+              </dl>
+            </EvidenceSection>
+          )}
+          {predictorsStage && ['success', 'reused'].includes(predictorsStage.status) && predictorVariantsHaveValues && (
+            <EvidenceSection title="Puntuaciones por variante" meta={`${predictorVariantRows.length} variantes`} open={Boolean(residue)}>
+              <ul class="predictor-variant-list">
+                {predictorVariantRows.map((row) => (
+                  <li key={row.key}>
+                    <strong>{row.label}</strong>
+                    <span class="predictor-score-list">
+                      {row.scores.filter((score) => score.score !== null || score.label !== 'Sin interpretación').map((score) => (
+                        <span
+                          key={score.model}
+                          class={`predictor-score predictor-score--${score.tone}`}
+                          title={score.tooltip}
+                          aria-label={`${score.model}: ${score.scoreText ?? 'sin puntuación'}, ${score.label}`}
+                        >
+                          {score.model === 'AlphaMissense' ? 'AM' : score.model} {score.scoreText ?? score.label}
+                        </span>
+                      ))}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+              <p class="predictor-interpretation-note">
+                Puntuaciones para variantes; no son diagnósticos.
+                {' '}Referencias: <a href="https://doi.org/10.1126/science.adg7492" target="_blank" rel="noreferrer">AlphaMissense</a>
+                {' '}· <a href="https://pmc.ncbi.nlm.nih.gov/articles/PMC9748256/" target="_blank" rel="noreferrer">ClinGen SVI</a>.
+              </p>
+            </EvidenceSection>
+          )}
+          {clinvarStage && ['success', 'reused'].includes(clinvarStage.status) && (clinvarHasValues || clinvarVariants.length > 0) && (
+            <EvidenceSection title="Variantes ClinVar" meta={clinvarHasValues ? 'Variantes coincidentes' : undefined} open={Boolean(residue && (clinvarHasValues || clinvarVariants.length))}>
+              <p>Consulta de variantes missense de ClinVar para esta posición en GRCh38.</p>
+              {clinvarPosition && <dl>
+                {['clinvar_n_variants', 'clinvar_n_pathogenic_or_likely', 'clinvar_n_benign_or_likely', 'clinvar_n_vus', 'clinvar_n_conflicting'].map((field) => firstDetailValue(clinvarPosition, [field]) !== null && <EvidenceRow key={field} label={{ clinvar_n_variants: 'Variantes coincidentes', clinvar_n_pathogenic_or_likely: 'Patogénicas o probablemente patogénicas', clinvar_n_benign_or_likely: 'Benignas o probablemente benignas', clinvar_n_vus: 'Significado incierto', clinvar_n_conflicting: 'Interpretaciones discordantes' }[field]} value={firstDetailValue(clinvarPosition, [field])} />)}
+                {clinvarStatus && <EvidenceRow label="Resultado en ClinVar" value={clinvarStatus} />}
+                {clinvarVariants.slice(0, 4).map((record, index) => <EvidenceRow key={`${index}-${summarizeArtifactRecord(record)}`} label="Registro" value={summarizeArtifactRecord(record)} />)}
+              </dl>}
+            </EvidenceSection>
+          )}
+        </div>
       )}
 
       {residue && analysis === 'ddg' && (
@@ -537,7 +653,7 @@ function AnalysisDetails({ analysis, annotation, residue, run, view, artifactDet
         />
       )}
 
-      {(artifacts.length > 0 || analysis !== 'conservation') && (
+      {artifacts.length > 0 && (
         <EvidenceSection title="Archivos publicados" meta={`${artifacts.length} archivo${artifacts.length === 1 ? '' : 's'}`}>
           <div class="analysis-artifacts">
             {artifacts.length > 0 ? artifacts.map((artifact) => (
@@ -560,7 +676,9 @@ function AnalysisDetails({ analysis, annotation, residue, run, view, artifactDet
 
 export default function ProteinViewer({ proteinId, analysis = 'topology' }) {
   const analysisView = ANALYSIS_VIEWS[analysis] ?? ANALYSIS_VIEWS.topology;
-  const mode = analysisView.mode;
+  const [requestedEvidenceMode, setRequestedEvidenceMode] = useState('evidence-curated');
+  const [hasUserSelectedEvidenceMode, setHasUserSelectedEvidenceMode] = useState(false);
+  const mode = analysis === 'scientific-evidence' ? requestedEvidenceMode : analysisView.mode;
   const hostRef = useRef(null);
   const viewerRef = useRef(null);
   const structureLibRef = useRef(null);
@@ -581,6 +699,7 @@ export default function ProteinViewer({ proteinId, analysis = 'topology' }) {
   const [protein, setProtein] = useState(null);
   const [run, setRun] = useState(null);
   const [artifactDetails, setArtifactDetails] = useState({});
+  const [artifactDetailsLoaded, setArtifactDetailsLoaded] = useState(false);
   const [annotations, setAnnotations] = useState([]);
   const [chains, setChains] = useState([]);
   const [chainId, setChainId] = useState('');
@@ -752,19 +871,47 @@ export default function ProteinViewer({ proteinId, analysis = 'topology' }) {
   useEffect(() => {
     let active = true;
     setArtifactDetails({});
-    if (!run) return () => { active = false; };
+    setArtifactDetailsLoaded(false);
+    if (!run) {
+      setArtifactDetailsLoaded(true);
+      return () => { active = false; };
+    }
     loadAnalysisArtifactDetails(run, analysis, getArtifactBlob)
       .then((details) => {
-        if (active) setArtifactDetails(details);
+        if (active) {
+          setArtifactDetails(details);
+          setArtifactDetailsLoaded(true);
+        }
       })
       .catch(() => {
-        if (active) setArtifactDetails({});
+        if (active) {
+          setArtifactDetails({});
+          setArtifactDetailsLoaded(true);
+        }
       });
     return () => { active = false; };
   }, [analysis, artifactSignature, run?.id]);
 
   const activeChain = chains.find((chain) => chain.id === chainId) ?? chains[0] ?? null;
   const residues = activeChain?.residues ?? [];
+  const evidenceModeOptions = useMemo(
+    () => analysis === 'scientific-evidence'
+      ? availableScientificEvidenceModes(run?.stages, artifactDetails, annotations)
+      : SCIENTIFIC_EVIDENCE_MODE_OPTIONS,
+    [analysis, annotations, artifactDetails, run?.stages],
+  );
+  useEffect(() => {
+    if (evidenceModeOptions.length === 0) return;
+    if (!hasUserSelectedEvidenceMode) {
+      const preferred = evidenceModeOptions.find((option) => option.value === 'evidence-curated')
+        ?? (artifactDetailsLoaded ? evidenceModeOptions[0] : null);
+      if (preferred && preferred.value !== requestedEvidenceMode) setRequestedEvidenceMode(preferred.value);
+      return;
+    }
+    if (evidenceModeOptions.some((option) => option.value === requestedEvidenceMode)) return;
+    const fallback = evidenceModeOptions.find((option) => option.value === 'evidence-curated') ?? evidenceModeOptions[0];
+    setRequestedEvidenceMode(fallback.value);
+  }, [artifactDetailsLoaded, evidenceModeOptions, hasUserSelectedEvidenceMode, requestedEvidenceMode]);
   const mappingValid = useMemo(() => {
     if (!structureParsed || !activeChain || !protein?.sequence?.length) return false;
     const mappedPositions = new Set(
@@ -776,23 +923,27 @@ export default function ProteinViewer({ proteinId, analysis = 'topology' }) {
   }, [activeChain, protein, structureParsed]);
   const presentationRows = useMemo(() => {
     const artifactRows = presentationRowsFromArtifacts(artifactDetails, analysis);
+    const evidenceRows = analysis === 'scientific-evidence'
+      ? scientificEvidenceRows(artifactDetails, run?.stages, protein?.sequence, annotations)
+      : [];
     // Conservation annotations are the stage's published API result. The
     // per-residue artifact adds coverage and optional evidence, but must not
     // overwrite a value already published in the annotation row.
     return analysis === 'conservation'
       ? [...artifactRows, ...annotations]
-      : [...annotations, ...artifactRows];
-  }, [analysis, annotations, artifactDetails]);
+      : [...annotations, ...artifactRows, ...evidenceRows];
+  }, [analysis, annotations, artifactDetails, protein?.sequence, run?.stages]);
   const annotationByPosition = useMemo(() => {
     return mergeAnnotationRows(presentationRows);
   }, [presentationRows]);
   const domain = useMemo(() => fixedDomainForMode(mode), [mode]);
   const modeAvailability = useMemo(
     () => viewerModeAvailability(presentationRows, {
-      structureAvailable: Boolean(structureRequest),
-      mappingValid,
+      structureAvailable: analysis === 'scientific-evidence' || Boolean(structureRequest),
+      mappingValid: analysis === 'scientific-evidence' || mappingValid,
+      allowSequenceOnly: analysis === 'scientific-evidence',
     }),
-    [mappingValid, presentationRows, structureRequest],
+    [analysis, mappingValid, presentationRows, structureRequest],
   );
   const colors = useMemo(
     () => residues.map((residue) => residueDisplayColor(mode, residue, annotationForResidue(residue, annotationByPosition), domain)),
@@ -893,13 +1044,14 @@ export default function ProteinViewer({ proteinId, analysis = 'topology' }) {
           return;
         }
         viewer.plugin.canvas3d?.setProps({
+          ...getZoomOptimizedCanvas3dProps(),
           interaction: { maxFps: 60 },
           cameraResetDurationMs: CAMERA_RESET_DURATION_MS,
           cameraResetEasing: 'cubic-out',
           cameraResetTrajectory: 'linear',
         });
         viewerRef.current = viewer;
-        await viewer.loadStructureFromUrl(structureObjectUrl, structureRequest.format, false, { label: structureRequest.label });
+        await viewer.loadStructureFromUrl(objectUrl, structureRequest.format, false, { label: structureRequest.label });
         const canvas3d = viewer.plugin.canvas3d;
         const boundingSphere = canvas3d?.boundingSphereVisible ?? canvas3d?.boundingSphere;
         canvas3d?.requestResize?.();
@@ -1176,18 +1328,43 @@ export default function ProteinViewer({ proteinId, analysis = 'topology' }) {
   }
 
   const categoricalMode = VISUALIZATION_MODES[mode].kind === 'categorical';
+  const canvasHeadingLayout = analysis === 'scientific-evidence' || analysis === 'conservation';
+  const chainPickerVisible = chains.length > 1 && analysis !== 'conservation';
   const selectedCategoryMissing = categoricalMode && activeResidue && !colorForValues(mode, activeAnnotation?.values, null);
 
   return (
-    <section class={`viewer-shell has-annotations analysis-workspace ${annotationsOpen ? 'annotations-expanded' : 'annotations-collapsed'}`} data-analysis={analysis} aria-label={`${analysisView.title}: modelo molecular, secuencia y evidencia`} onContextMenu={(event) => event.preventDefault()}>
-      <div ref={hostRef} class="molstar-host" aria-label={structureRequest ? 'Visor molecular Mol*' : 'Sin modelo 3D disponible'} />
+    <section class={`viewer-shell has-annotations analysis-workspace ${canvasHeadingLayout ? 'has-canvas-heading' : ''} ${chainPickerVisible ? 'has-chain-picker' : ''} ${annotationsOpen ? 'annotations-expanded' : 'annotations-collapsed'}`} data-analysis={analysis} aria-label={`${analysisView.title}: modelo molecular, secuencia y evidencia`} onContextMenu={(event) => event.preventDefault()}>
+      {canvasHeadingLayout ? (
+        <div class="viewer-canvas-region frustration-method-card">
+          <header class="viewer-canvas-heading frustration-method-head">
+            <h2>{analysisView.title}</h2>
+            {analysis === 'scientific-evidence' && (
+              <div class="scientific-evidence-mode-select">
+                <MetricSelect
+                  id="scientific-evidence-mode"
+                  label="Modo de visualización de evidencia"
+                  options={evidenceModeOptions}
+                  value={mode}
+                  onChange={(value) => {
+                    setHasUserSelectedEvidenceMode(true);
+                    setRequestedEvidenceMode(value);
+                  }}
+                />
+              </div>
+            )}
+          </header>
+          <div ref={hostRef} class="molstar-host" aria-label={structureRequest ? 'Visor molecular Mol*' : 'Sin modelo 3D disponible'} />
+        </div>
+      ) : (
+        <div ref={hostRef} class="molstar-host" aria-label={structureRequest ? 'Visor molecular Mol*' : 'Sin modelo 3D disponible'} />
+      )}
       {viewerState === 'unavailable' && wipe === 'gone' && <StatePanel kind="empty" compact icon="box" title="Estructura no disponible" description="La corrida no tiene un PDB o mmCIF subido ni un artefacto publicado." className="viewer-boot-state" />}
       {viewerState === 'error' && wipe === 'gone' && <StatePanel kind="error" compact title="No se pudo cargar la estructura" description={viewerError || 'Verifica el artefacto y vuelve a intentarlo.'} className="viewer-boot-state" />}
       {(viewerState === 'unavailable' || viewerState === 'error') && wipe === 'gone' && <p class="viewer-accessibility-note" role="status">La secuencia y los estados de evidencia siguen disponibles en formato textual; la vista 3D no está disponible.</p>}
 
       <div class="viewer-top-stack">
         <div class="viewer-chain-panel">
-          {chains.length > 1 && analysis !== 'conservation' && <div class="viewer-chain-title">
+          {chainPickerVisible && <div class="viewer-chain-title">
             <span>Cadenas</span>
             <div class="viewer-chain-switch" role="tablist" aria-label="Cadenas">
               {chains.map((chain) => (
@@ -1195,7 +1372,16 @@ export default function ProteinViewer({ proteinId, analysis = 'topology' }) {
               ))}
             </div>
           </div>}
-          <div class="viewer-sequence-scroll" onPointerDown={sequencePointerDown} onPointerMove={sequencePointerMove} onPointerUp={sequencePointerUp} onPointerCancel={sequencePointerCancel}>
+          <div
+            class="viewer-sequence-scroll"
+            role="group"
+            aria-label={`Secuencia de aminoácidos de la cadena ${activeChain?.id || 'sin identificador'}, ${residues.length} residuos`}
+            tabIndex={0}
+            onPointerDown={sequencePointerDown}
+            onPointerMove={sequencePointerMove}
+            onPointerUp={sequencePointerUp}
+            onPointerCancel={sequencePointerCancel}
+          >
             <div class={`viewer-sequence-track ${selection.lo !== null ? 'has-selection' : ''}`}>
               {residues.map((residue, index) => (
                 <ResidueButton
@@ -1214,6 +1400,21 @@ export default function ProteinViewer({ proteinId, analysis = 'topology' }) {
 
       </div>
 
+      {analysis === 'scientific-evidence' && (
+        <div class="viewer-classification-overlay viewer-evidence-scale" aria-label={`Escala de ${MODE_INFO[mode].title}`}>
+          <span class="viewer-classification-title">{MODE_INFO[mode].title}</span>
+          <span class="viewer-mode-legend">
+            {(MODE_INFO[mode].legend ?? []).map(([label, color]) => <span key={label} class="viewer-legend-item"><i style={{ background: color }} />{label}</span>)}
+            {selectedCategoryMissing && <span class="continuous-legend__missing">Sin dato</span>}
+          </span>
+          {!structureRequest
+            ? <span class="viewer-mode-pending">Sin estructura publicada; se muestran la secuencia y las anotaciones.</span>
+            : !fieldAvailable
+              ? <span class="viewer-mode-pending">No hay valores publicados para este modo.</span>
+              : !modeAvailability[mode] && <span class="viewer-mode-pending">La evidencia no se pudo asignar a la secuencia.</span>}
+        </div>
+      )}
+
       {mode === 'conservation' && (
         <div class="viewer-scale-overlay" aria-label="Escala de conservación evolutiva">
           <ConservationLegend
@@ -1225,7 +1426,7 @@ export default function ProteinViewer({ proteinId, analysis = 'topology' }) {
       )}
 
       <aside class={`viewer-annotations ${annotationsOpen ? 'is-expanded' : 'is-collapsed'}`} aria-label={`Evidencia de ${analysisView.title}`}>
-        <div class="viewer-annotations-head">
+        {!canvasHeadingLayout && <div class="viewer-annotations-head">
           <div>
             <span>Análisis</span>
             <h2>{analysisView.title}</h2>
@@ -1235,16 +1436,19 @@ export default function ProteinViewer({ proteinId, analysis = 'topology' }) {
             class="annotations-toggle"
             aria-expanded={annotationsOpen}
             aria-controls="viewer-annotations-body"
+            aria-label={annotationsOpen ? 'Ocultar panel de análisis' : 'Mostrar panel de análisis'}
+            title={annotationsOpen ? 'Ocultar panel' : 'Mostrar panel'}
             onClick={() => setAnnotationsOpen((open) => !open)}
           >
             {annotationsOpen ? 'Ocultar' : 'Mostrar'}
           </button>
-        </div>
+        </div>}
         <div id="viewer-annotations-body" class="viewer-annotations-body" hidden={!annotationsOpen}>
-          {mode !== 'conservation' && <div class="viewer-mode-panel">
+          {mode !== 'conservation' && !(analysis === 'scientific-evidence' && categoricalMode) && <div class="viewer-mode-panel">
             <div class={`viewer-mode-info ${categoricalMode ? '' : 'is-continuous'}`}>
               {!fieldAvailable && <span class="viewer-mode-pending">No hay un valor publicado para esta vista.</span>}
               {fieldAvailable && !modeAvailability[mode] && <span class="viewer-mode-pending">Hay datos publicados, pero el modelo no tiene un mapeo estructural válido.</span>}
+              {analysis === 'scientific-evidence' && !structureRequest && <span class="viewer-mode-pending">Sin estructura publicada en esta corrida; consulte la secuencia y las anotaciones disponibles.</span>}
               {categoricalMode ? (
                 <span class="viewer-mode-legend">
                   {(MODE_INFO[mode].legend ?? []).map(([label, color]) => <span key={label} class="viewer-legend-item"><i style={{ background: color }} />{label}</span>)}
@@ -1255,7 +1459,14 @@ export default function ProteinViewer({ proteinId, analysis = 'topology' }) {
               )}
             </div>
           </div>}
-          <AnalysisDetails analysis={analysis} annotation={activeAnnotation} residue={activeResidue} run={run} view={analysisView} artifactDetails={artifactDetails} />
+          <AnalysisDetails
+            analysis={analysis}
+            annotation={activeAnnotation}
+            residue={activeResidue}
+            run={run}
+            view={analysis === 'scientific-evidence' ? { ...analysisView, mode } : analysisView}
+            artifactDetails={artifactDetails}
+          />
         </div>
       </aside>
 

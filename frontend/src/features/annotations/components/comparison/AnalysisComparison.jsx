@@ -18,6 +18,7 @@ import { AA3, AA_NAMES, hexToColorInt, oneLetter } from '@features/annotations/v
 import { structureSelectionItems } from '@features/annotations/topology-presentation.js';
 import { buildComparisonRibbon, createComparisonMeshGeometry } from '@features/annotations/comparison-mesh.js';
 import { comparisonCameraAction, comparisonChannelSignature } from '@features/annotations/comparison-camera.js';
+import { getZoomOptimizedCanvas3dProps } from '@features/annotations/zoom-rendering.js';
 import {
   COMPARISON_MISSING_COLOR,
   buildAvailableComparisonAnalyses,
@@ -231,7 +232,7 @@ function SequenceStrip({ composition, selectedPosition, onSelect }) {
     trackRef.current?.querySelector(`[data-position="${selectedPosition}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
   }, [selectedPosition]);
   return (
-    <div class="comparison-sequence-scroll" role="group" aria-label="Secuencia canónica con canales de análisis">
+    <div class="comparison-sequence-scroll" role="group" aria-label="Secuencia canónica con canales de análisis" tabIndex={0}>
       <div ref={trackRef} class="comparison-sequence-track">
         {composition.residues.map((residue) => (
           <button
@@ -354,9 +355,9 @@ function ResiduePanel({ sequence, selectedPosition, composition, availableAnalys
           </div>
           <strong class="frustration-residue-position">{selectedPosition ?? '—'}</strong>
         </section>
-        {!composition.active.length && <div class="comparison-panel-empty"><PackIcon name="layers-3" kind="ui" /><p>Selecciona al menos un análisis para comparar sus datos.</p></div>}
-        {composition.active.length > 0 && !selectedPosition && <div class="comparison-panel-empty"><PackIcon name="circle-dot" kind="ui" /><p>Selecciona un aminoácido para consultar los valores publicados.</p></div>}
-        {composition.active.length > 0 && selectedPosition && !sections.length && <div class="comparison-panel-empty"><PackIcon name="circle-slash" kind="ui" /><p>Sin dato publicado para este residuo en los análisis activos.</p></div>}
+        {!composition.active.length && <StatePanel kind="empty" compact icon="layers-3" title="Ningún análisis seleccionado" description="Selecciona al menos un análisis para comparar sus datos." className="comparison-panel-empty" />}
+        {composition.active.length > 0 && !selectedPosition && <StatePanel kind="empty" compact icon="circle-dot" title="Ningún residuo seleccionado" description="Selecciona un aminoácido para consultar los valores publicados." className="comparison-panel-empty" />}
+        {composition.active.length > 0 && selectedPosition && !sections.length && <StatePanel kind="empty" compact icon="circle-slash" title="Sin datos para este residuo" description="No hay datos publicados en los análisis activos." className="comparison-panel-empty" />}
         {sections.map((section) => (
           <section class="comparison-evidence-section" key={section.analysisId}>
             <header><div><strong>{section.label}</strong>{section.source && <small>{section.source}</small>}</div><span class="comparison-panel-swatches">{section.colors.map((color, index) => <i key={index} style={{ background: color }} />)}</span></header>
@@ -514,6 +515,7 @@ function ComparisonStructure({ structureRequest, composition, mapping, sequence,
         viewerInstance = viewer;
         viewerRef.current = viewer;
         viewer.plugin.canvas3d?.setProps({
+          ...getZoomOptimizedCanvas3dProps(),
           interaction: { maxFps: 60 },
           camera: { helper: { axes: { name: 'off', params: {} } } },
           cameraResetDurationMs: 180,
