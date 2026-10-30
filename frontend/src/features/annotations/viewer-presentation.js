@@ -1,4 +1,12 @@
 import { formatConservationGrade, normalizeConservationGrade } from './conservation-presentation.js';
+import {
+  classifyFrustrAISeqIndex,
+  classifyFrustratometerValue,
+  FRUSTRATION_CLASS_INFO,
+  HIGHLY_FRUSTRATED_CUTOFF,
+  normalizeFrustrationClass,
+  SRFI_MINIMALLY_FRUSTRATED_CUTOFF,
+} from './frustration-classification.js';
 import { SCIENTIFIC_EVIDENCE_MODE_CONFIG } from './scientific-evidence-presentation.js';
 
 export const AA3 = {
@@ -102,6 +110,13 @@ export const VISUALIZATION_MODES = {
     kind: 'continuous',
     field: 'frustratometer_mean',
     fallbackFields: ['structural_frustration_fi_singleresidue', 'frustraiseq_index'],
+    classificationColors: {
+      highly_frustrated: FRUSTRATION_CLASS_INFO.highly_frustrated.color,
+      neutral: FRUSTRATION_CLASS_INFO.neutral.color,
+      minimally_frustrated: FRUSTRATION_CLASS_INFO.minimally_frustrated.color,
+      unknown: FRUSTRATION_CLASS_INFO.unknown.color,
+    },
+    // Kept for the comparison view, which still plots the raw ensemble mean continuously.
     colors: ['#0759c7', '#00a8c6', '#b8dc16', '#ff9d00', '#c90000'],
   },
   contacts: {
@@ -167,6 +182,14 @@ export const FIXED_NUMERIC_DOMAINS = {
   ddg: { min: -5, max: 5, source: 'fixed_native_unit_reference' },
 };
 
+function formatFrustrationCutoff(value) {
+  const formatted = Math.abs(value).toLocaleString('es-CO', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+  return value < 0 ? `−${formatted}` : formatted;
+}
+
 export const MODE_INFO = {
   topology: {
     title: 'Topología de membrana',
@@ -187,7 +210,15 @@ export const MODE_INFO = {
       ['Estructura incierta', VISUALIZATION_MODES.regime.colors.structurally_uncertain],
     ],
   },
-  frustration: { title: 'Frustración por residuo', icon: 'activity' },
+  frustration: {
+    title: 'Frustración por residuo',
+    icon: 'activity',
+    legend: [
+      [`Alta · < ${formatFrustrationCutoff(HIGHLY_FRUSTRATED_CUTOFF)}`, FRUSTRATION_CLASS_INFO.highly_frustrated.color],
+      [`Neutral · ${formatFrustrationCutoff(HIGHLY_FRUSTRATED_CUTOFF)} a ${formatFrustrationCutoff(SRFI_MINIMALLY_FRUSTRATED_CUTOFF)}`, FRUSTRATION_CLASS_INFO.neutral.color],
+      [`Mínima · > ${formatFrustrationCutoff(SRFI_MINIMALLY_FRUSTRATED_CUTOFF)}`, FRUSTRATION_CLASS_INFO.minimally_frustrated.color],
+    ],
+  },
   contacts: { title: 'Contactos estructurales', icon: 'network' },
   conservation: { title: 'Conservación evolutiva', icon: 'scan-search' },
   functional: {
@@ -396,8 +427,17 @@ function mappingResidueKey(chain, residueNumber, insertionCode = '') {
   return `${String(chain || 'A')}|${String(residueNumber)}|${String(insertionCode || '')}`;
 }
 
-export function assignCanonicalPositions(chains, canonicalSequence, structureMapping = null) {
+export function assignCanonicalPositions(chains, canonicalSequence, structureMapping = null, requestedVariants = []) {
   const canonicalLength = String(canonicalSequence || '').length;
+  const canonicalResidues = String(canonicalSequence || '').toUpperCase();
+  const alternateByPosition = new Map((requestedVariants ?? []).flatMap((variant) => {
+    const position = Number(variant?.aa_position);
+    const reference = String(variant?.aa_ref ?? '').trim().toUpperCase();
+    const alternate = String(variant?.aa_alt ?? '').trim().toUpperCase();
+    if (!Number.isInteger(position) || position < 1 || position > canonicalLength || !/^[A-Z]$/.test(alternate)) return [];
+    if (reference && canonicalResidues[position - 1] !== reference) return [];
+    return [[position, alternate]];
+  }));
   const pairs = Array.isArray(structureMapping?.canonical_to_structure)
     ? structureMapping.canonical_to_structure
     : [];
@@ -424,7 +464,13 @@ export function assignCanonicalPositions(chains, canonicalSequence, structureMap
         ...residue,
         aaPosition: (() => {
           const mapped = byStructureResidue.get(mappingResidueKey(residue.chain, residue.authSeqId, residue.insCode));
-          return mapped && (!mapped.aminoAcid || mapped.aminoAcid === residue.one) ? mapped.canonicalPosition : null;
+          const normalizedResidue = String(residue.one ?? '').toUpperCase();
+          const expectedAlternate = alternateByPosition.get(mapped?.canonicalPosition);
+          const isRequestedAlternate = expectedAlternate === normalizedResidue
+            && (!mapped?.aminoAcid || mapped.aminoAcid === canonicalResidues[mapped.canonicalPosition - 1]);
+          return mapped && (!mapped.aminoAcid || mapped.aminoAcid === normalizedResidue || isRequestedAlternate)
+            ? mapped.canonicalPosition
+            : null;
         })(),
       })),
     };
@@ -509,8 +555,15 @@ export function booleanClass(value) {
   return 'unknown';
 }
 
-export function mergeAnnotationRows(rows) {
+export function mergeAnnotationRows(rows, requestedVariants = []) {
   const byPosition = new Map();
+  const variantsByPosition = new Map((requestedVariants ?? []).map((variant) => [
+    Number(variant?.aa_position),
+    {
+      aaRef: String(variant?.aa_ref ?? '').toUpperCase(),
+      aaAlt: String(variant?.aa_alt ?? '').toUpperCase(),
+    },
+  ]));
   for (const row of rows ?? []) {
     if (!Number.isInteger(row?.aa_position) || row.aa_position < 1) continue;
     const current = byPosition.get(row.aa_position) ?? {
@@ -521,7 +574,13 @@ export function mergeAnnotationRows(rows) {
       qcByStage: {},
       stages: [],
     };
-    if (current.aa_ref && row.aa_ref && current.aa_ref !== row.aa_ref) continue;
+    if (current.aa_ref && row.aa_ref && current.aa_ref !== row.aa_ref) {
+      const variant = variantsByPosition.get(row.aa_position);
+      const isRequestedSubstitution = variant
+        && ((current.aa_ref === variant.aaRef && row.aa_ref === variant.aaAlt)
+          || (row.aa_ref === variant.aaRef && current.aa_ref === variant.aaAlt));
+      if (!isRequestedSubstitution) continue;
+    }
     Object.assign(current.values, row.values ?? {});
     Object.assign(current.units, row.units ?? {});
     if (row.stage_id && row.qc_status !== null && row.qc_status !== undefined) current.qcByStage[row.stage_id] = row.qc_status;
@@ -592,18 +651,44 @@ export function viewerModeAvailability(rows, { structureAvailable = false, mappi
   };
 }
 
-export function annotationForResidue(residue, byPosition) {
+export function annotationForResidue(residue, byPosition, requestedVariants = []) {
   const position = residue?.aaPosition ?? residue?.canonicalPosition;
   if (position == null) return null;
   const row = byPosition.get(position) ?? null;
   if (!row) return null;
-  if (row.aa_ref && row.aa_ref !== 'NA' && residue.one && row.aa_ref !== residue.one) return null;
+  if (row.aa_ref && row.aa_ref !== 'NA' && residue.one && row.aa_ref !== residue.one) {
+    const variant = (requestedVariants ?? []).find((item) => Number(item?.aa_position) === position);
+    const matchesRequestedSubstitution = variant
+      && String(variant.aa_ref ?? '').toUpperCase() === String(row.aa_ref).toUpperCase()
+      && String(variant.aa_alt ?? '').toUpperCase() === String(residue.one).toUpperCase();
+    if (!matchesRequestedSubstitution) return null;
+  }
   return row;
+}
+
+function frustrationClassification(values) {
+  const measurement = measurementForMode('frustration', values);
+  if (!measurement) return null;
+  if (measurement.field === 'frustraiseq_index') {
+    const publishedClass = normalizeFrustrationClass(values.frustraiseq_class);
+    return publishedClass === 'unknown' ? classifyFrustrAISeqIndex(measurement.value) : publishedClass;
+  }
+  return classifyFrustratometerValue(
+    measurement.value,
+    measurement.field === 'frustratometer_mean'
+      ? 'structural_frustration_fi_singleresidue'
+      : measurement.field,
+  );
 }
 
 export function colorForValues(mode, values, domain) {
   const spec = VISUALIZATION_MODES[mode];
   if (!spec || !values) return null;
+  if (mode === 'frustration') {
+    const category = frustrationClassification(values);
+    if (!category) return null;
+    return spec.classificationColors[category] ?? null;
+  }
   if (spec.kind === 'categorical') {
     let category = mode === 'functional' && values.functional_feature_class
       ? values.functional_feature_class

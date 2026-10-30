@@ -1,5 +1,6 @@
 x-worker-common: &worker-common
   init: true
+  restart: unless-stopped
   # The SSH secret bind mount keeps the host file owner/mode. Match its UID
   # explicitly instead of running the worker as root. Use the backend app
   # group as the worker's primary GID so both services can read the shared
@@ -63,6 +64,69 @@ x-platform-environment: &platform-environment
   RUN_WORKER_LEASE_SECONDS: ${RUN_WORKER_LEASE_SECONDS:-900}
   RUN_WORKER_MAX_ATTEMPTS: ${RUN_WORKER_MAX_ATTEMPTS:-3}
   ANNOTATIONS_DEFAULT_LIMIT: ${ANNOTATIONS_DEFAULT_LIMIT:-20000}
+  MN5_EXTERNAL_SYNC_INTERVAL_SECONDS: ${MN5_EXTERNAL_SYNC_INTERVAL_SECONDS:-15}
+  MN5_EXTERNAL_SYNC_BATCH_SIZE: ${MN5_EXTERNAL_SYNC_BATCH_SIZE:-288}
+  MN5_EXTERNAL_SYNC_PARALLELISM: ${MN5_EXTERNAL_SYNC_PARALLELISM:-4}
+  MN5_EXTERNAL_TRACKING_ONLY: ${MN5_EXTERNAL_TRACKING_ONLY:-false}
+
+x-worker-vpn-environment: &worker-vpn-environment
+  <<: *platform-environment
+  DATABASE_URL: postgresql+psycopg://residue:${POSTGRES_PASSWORD:-residue-dev}@db:5432/residue_annotation
+  HPC_EXECUTION_MODE: ssh
+  HPC_SSH_HOST: ${HPC_SSH_HOST:-}
+  HPC_SSH_PORT: ${HPC_SSH_PORT:-22}
+  HPC_SSH_USERNAME: ${HPC_SSH_USERNAME:-}
+  HPC_SSH_PASSWORD_FILE: /run/secrets/hpc_ssh_password
+  HPC_KNOWN_HOSTS_FILE: /run/secrets/hpc_known_hosts
+  HPC_REMOTE_ROOT: ${HPC_REMOTE_ROOT:-/gpfs/projects/bsc08/bsc001997/vcfs_1000geno/hilo_integrado_anotacion}
+  HPC_REMOTE_WORKDIR: ${HPC_REMOTE_WORKDIR:-}
+  HPC_COMMAND_TIMEOUT_SECONDS: ${HPC_COMMAND_TIMEOUT_SECONDS:-30.0}
+  HPC_SLURM_ACCOUNT: ${HPC_SLURM_ACCOUNT:-}
+  HPC_SLURM_PARTITION: ${HPC_SLURM_PARTITION:-acc}
+  HPC_SLURM_QOS: ${HPC_SLURM_QOS:-}
+  HPC_SLURM_TIME: ${HPC_SLURM_TIME:-24:00:00}
+  HPC_PIPELINE_PYTHON: ${HPC_PIPELINE_PYTHON:-python}
+  HPC_PIPELINE_MAIN: ${HPC_PIPELINE_MAIN:-main.py}
+  HPC_PIPELINE_PREFETCH_COMMAND: ${HPC_PIPELINE_PREFETCH_COMMAND:-}
+  HPC_AVAILABLE_TECHNICAL_REQUIREMENTS: ${HPC_AVAILABLE_TECHNICAL_REQUIREMENTS:-}
+  HPC_PREFLIGHT_RETRY_SECONDS: ${HPC_PREFLIGHT_RETRY_SECONDS:-60}
+  HPC_PIPELINE_MAX_PARALLEL: ${HPC_PIPELINE_MAX_PARALLEL:-1}
+  HPC_PIPELINE_CPU_BUDGET: ${HPC_PIPELINE_CPU_BUDGET:-80}
+  HPC_PIPELINE_GPU_BUDGET: ${HPC_PIPELINE_GPU_BUDGET:-4}
+  HPC_PIPELINE_PDB_SUBSTITUTION_ENABLED: ${HPC_PIPELINE_PDB_SUBSTITUTION_ENABLED:-false}
+  HPC_MAX_RESULT_BYTES: ${HPC_MAX_RESULT_BYTES:-268435456}
+  HPC_MAX_ARTIFACT_ENTRIES: ${HPC_MAX_ARTIFACT_ENTRIES:-10000}
+  HPC_MAX_INFLIGHT_STAGES: ${HPC_MAX_INFLIGHT_STAGES:-1}
+  MN5_INSPECTION_ENABLED: "true"
+  MN5_INSPECTION_MODE: ssh_sftp
+  MN5_ROOT: ${MN5_ROOT:-/gpfs/projects/bsc08/bsc001997/vcfs_1000geno/hilo_integrado_anotacion}
+  MN5_MAX_ENTRIES: ${MN5_MAX_ENTRIES:-10000}
+  MN5_MAX_PREVIEW_BYTES: ${MN5_MAX_PREVIEW_BYTES:-524288}
+  MN5_MAX_ARTIFACT_BYTES: ${MN5_MAX_ARTIFACT_BYTES:-33554432}
+  HPC_INPUT_TRANSFER_ENABLED: "true"
+  HPC_INPUT_REMOTE_SUBDIR: ${HPC_INPUT_REMOTE_SUBDIR:-uploads}
+
+x-worker-vpn-settings: &worker-vpn-settings
+  <<: *worker-common
+  profiles: ["vpn"]
+  build:
+    context: ./backend
+  # Only the VPN namespace can reach MN5. Workers have no extra capabilities.
+  network_mode: service:vpn
+  group_add:
+    - "${HPC_APP_GID:-999}"
+  volumes:
+    - residue-artifacts:/app/data/artifacts
+  secrets:
+    - hpc_ssh_password
+    - hpc_known_hosts
+  depends_on:
+    db:
+      condition: service_healthy
+    migrate:
+      condition: service_completed_successfully
+    vpn:
+      condition: service_healthy
 
 services:
   vpn:
@@ -191,64 +255,35 @@ services:
       start_period: 10s
 
   worker-vpn:
-    <<: *worker-common
-    profiles: ["vpn"]
-    build:
-      context: ./backend
-    # The worker needs to read the SSH secret, but it receives no host mounts,
-    # no NET_ADMIN capability, and no direct host network access. Its
-    # It shares only the isolated VPN namespace below and runs without extra
-    # capabilities. The configured worker UID reads the mode-0600 SSH secret.
-    network_mode: service:vpn
-    group_add:
-      - "${HPC_APP_GID:-999}"
+    <<: *worker-vpn-settings
+    # Read-only campaign tracker; it never claims or submits scientific stages.
+    # Small batches keep fresh snapshots flowing while result artifacts sync.
     environment:
-      <<: *platform-environment
-      DATABASE_URL: postgresql+psycopg://residue:${POSTGRES_PASSWORD:-residue-dev}@db:5432/residue_annotation
-      HPC_EXECUTION_MODE: ssh
-      HPC_SSH_HOST: ${HPC_SSH_HOST:-}
-      HPC_SSH_PORT: ${HPC_SSH_PORT:-22}
-      HPC_SSH_USERNAME: ${HPC_SSH_USERNAME:-}
-      HPC_SSH_PASSWORD_FILE: /run/secrets/hpc_ssh_password
-      HPC_KNOWN_HOSTS_FILE: /run/secrets/hpc_known_hosts
-      HPC_REMOTE_ROOT: ${HPC_REMOTE_ROOT:-/gpfs/projects/bsc08/bsc001997/vcfs_1000geno/hilo_integrado_anotacion}
-      HPC_REMOTE_WORKDIR: ${HPC_REMOTE_WORKDIR:-}
-      HPC_COMMAND_TIMEOUT_SECONDS: ${HPC_COMMAND_TIMEOUT_SECONDS:-30.0}
-      HPC_SLURM_ACCOUNT: ${HPC_SLURM_ACCOUNT:-}
-      HPC_SLURM_PARTITION: ${HPC_SLURM_PARTITION:-acc}
-      HPC_SLURM_QOS: ${HPC_SLURM_QOS:-}
-      HPC_SLURM_TIME: ${HPC_SLURM_TIME:-24:00:00}
-      HPC_PIPELINE_PYTHON: ${HPC_PIPELINE_PYTHON:-python}
-      HPC_PIPELINE_MAIN: ${HPC_PIPELINE_MAIN:-main.py}
-      HPC_PIPELINE_PREFETCH_COMMAND: ${HPC_PIPELINE_PREFETCH_COMMAND:-}
-      HPC_AVAILABLE_TECHNICAL_REQUIREMENTS: ${HPC_AVAILABLE_TECHNICAL_REQUIREMENTS:-}
-      HPC_PREFLIGHT_RETRY_SECONDS: ${HPC_PREFLIGHT_RETRY_SECONDS:-60}
-      HPC_PIPELINE_MAX_PARALLEL: ${HPC_PIPELINE_MAX_PARALLEL:-1}
-      HPC_PIPELINE_CPU_BUDGET: ${HPC_PIPELINE_CPU_BUDGET:-80}
-      HPC_PIPELINE_GPU_BUDGET: ${HPC_PIPELINE_GPU_BUDGET:-4}
-      HPC_PIPELINE_PDB_SUBSTITUTION_ENABLED: ${HPC_PIPELINE_PDB_SUBSTITUTION_ENABLED:-false}
-      HPC_MAX_RESULT_BYTES: ${HPC_MAX_RESULT_BYTES:-268435456}
-      HPC_MAX_ARTIFACT_ENTRIES: ${HPC_MAX_ARTIFACT_ENTRIES:-10000}
-      HPC_MAX_INFLIGHT_STAGES: ${HPC_MAX_INFLIGHT_STAGES:-1}
-      MN5_INSPECTION_ENABLED: ${MN5_INSPECTION_ENABLED:-false}
-      MN5_INSPECTION_MODE: ${MN5_INSPECTION_MODE:-disabled}
-      MN5_ROOT: ${MN5_ROOT:-/gpfs/projects/bsc08/bsc001997/vcfs_1000geno/hilo_integrado_anotacion}
-      MN5_MAX_ENTRIES: ${MN5_MAX_ENTRIES:-100}
-      MN5_MAX_PREVIEW_BYTES: ${MN5_MAX_PREVIEW_BYTES:-64000}
-      HPC_INPUT_TRANSFER_ENABLED: "true"
-      HPC_INPUT_REMOTE_SUBDIR: ${HPC_INPUT_REMOTE_SUBDIR:-uploads}
-    volumes:
-      - residue-artifacts:/app/data/artifacts
-    secrets:
-      - hpc_ssh_password
-      - hpc_known_hosts
-    depends_on:
-      db:
-        condition: service_healthy
-      migrate:
-        condition: service_completed_successfully
-      vpn:
-        condition: service_healthy
+      <<: *worker-vpn-environment
+      MN5_EXTERNAL_TRACKING_ONLY: "true"
+      MN5_EXTERNAL_SYNC_BATCH_SIZE: ${MN5_EXTERNAL_SYNC_BATCH_SIZE:-16}
+      MN5_MAX_PREVIEW_BYTES: ${MN5_EXTERNAL_ARTIFACT_MAX_BYTES:-2097152}
+
+  worker-vpn-snapshots:
+    <<: *worker-vpn-settings
+    # Rotate snapshots in bounded batches so they do not hold every campaign
+    # tracking claim while the publication worker imports result artifacts.
+    volumes: []
+    environment:
+      <<: *worker-vpn-environment
+      MN5_EXTERNAL_TRACKING_ONLY: "true"
+      MN5_EXTERNAL_SNAPSHOT_ONLY: "true"
+      MN5_EXTERNAL_SYNC_BATCH_SIZE: ${MN5_EXTERNAL_SNAPSHOT_BATCH_SIZE:-16}
+      MN5_EXTERNAL_SYNC_PARALLELISM: ${MN5_EXTERNAL_SNAPSHOT_PARALLELISM:-2}
+      MN5_MAX_PREVIEW_BYTES: ${MN5_EXTERNAL_CONTEXT_MAX_BYTES:-262144}
+
+  worker-vpn-executor:
+    <<: *worker-vpn-settings
+    # Normal user runs use the same filtered worker path, which excludes imported
+    # external runs but continues submitting independently requested work.
+    environment:
+      <<: *worker-vpn-environment
+      MN5_EXTERNAL_TRACKING_ONLY: "false"
 
   worker-mn5:
     <<: *worker-common

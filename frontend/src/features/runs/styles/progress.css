@@ -107,6 +107,7 @@
   scrollbar-color: rgba(31,45,39,.22) transparent;
 }
 .pipeline-scroll.is-panning { cursor: grabbing; user-select: none; }
+.pipeline-scroll--compact { align-items: stretch; cursor: auto; }
 .pipeline-scroll::-webkit-scrollbar { width: 8px; height: 8px; }
 .pipeline-scroll::-webkit-scrollbar-track { background: transparent; }
 .pipeline-scroll::-webkit-scrollbar-thumb { background: rgba(31,45,39,.22); border-radius: 8px; }

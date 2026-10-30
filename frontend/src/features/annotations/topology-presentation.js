@@ -63,7 +63,11 @@ export function topologyClassProbability(record, topologyClass) {
 
 export function topologyRegions(rows) {
   const ordered = [...(rows ?? [])]
-    .filter((row) => Number.isInteger(Number(row?.position)) && Number(row.position) > 0)
+    .filter((row) => (
+      Number.isInteger(Number(row?.position))
+      && Number(row.position) > 0
+      && normalizeTopologyClass(row?.topologyClass) !== 'unknown'
+    ))
     .sort((left, right) => Number(left.position) - Number(right.position));
   const regions = [];
   for (const row of ordered) {
@@ -78,6 +82,16 @@ export function topologyRegions(rows) {
     }
   }
   return regions;
+}
+
+export function hasPublishedTopologyData(annotationRows, perResidueRecords) {
+  const annotationData = (annotationRows ?? []).some((row) => (
+    normalizeTopologyClass(row?.values?.tmbed_topology) !== 'unknown'
+  ));
+  const artifactData = (perResidueRecords ?? []).some((record) => (
+    normalizeTopologyClass(record?.tmbed_topology ?? record?.tmbed_label) !== 'unknown'
+  ));
+  return annotationData || artifactData;
 }
 
 export function structureSelectionItems(structureByCanonical, start, end) {

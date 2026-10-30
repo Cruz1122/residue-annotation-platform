@@ -74,8 +74,8 @@ La inspección local del código confirma el siguiente alcance:
 | API FastAPI | `backend/app/main.py`, `backend/app/features/*/router.py` | Expone catálogo, runs, SSE, artifacts, auth y uploads; no dispara por sí sola una ejecución científica real |
 | Frontend Astro/Preact | `frontend/src/` | Onboarding y progreso conectados a la API; no contiene fixtures científicos de producto |
 | Progreso del pipeline | `frontend/src/features/runs/components/progress/PipelineProgress.jsx` | Consulta la API/SSE persistida; no afirma que un stage tenga resultado sin `StageResult` |
-| Compose | `compose.yml` | El perfil `vpn` levanta VPN, PostgreSQL, migraciones, API, `worker-vpn` y frontend; el perfil `mn5` sustituye el worker por `worker-mn5`, que usa Slurm/GPFS locales sin VPN ni SSH |
-| Datos científicos locales | No se versionan fixtures de producto | El frontend no contiene artefactos científicos simulados; los resultados sólo llegan por el backend y los outputs MN5 aún no están publicados |
+| Compose | `compose.yml` | El perfil `vpn` levanta VPN, PostgreSQL, migraciones, API, `worker-vpn-snapshots` (estado de etapas), `worker-vpn` (publicaciones externas de solo lectura), `worker-vpn-executor` (corridas normales) y frontend; el perfil `mn5` usa `worker-mn5`, que usa Slurm/GPFS locales sin VPN ni SSH |
+| Datos científicos locales | No se versionan fixtures de producto | El frontend no contiene artefactos científicos simulados; publicaciones MN5 verificadas se guardan en el backend mientras llegan los archivos restantes |
 | Cliente HPC | `backend/app/infrastructure/hpc/{base,disabled,offline,ssh,native}.py` | Implementado como frontera local; el perfil `vpn` usa SSH/SCP y el perfil `mn5` usa Slurm local; el smoke de envío real sigue pendiente |
 | Inspector read-only | `backend/app/infrastructure/hpc/readonly.py` | Implementado con paths confinados; smoke remoto y matriz completa siguen pendientes |
 | Código científico remoto | raíz MN5 autorizada | Inspeccionado por SFTP: 19 paquetes de stage, 18 en el registro, documentación y tests; no ejecutado |

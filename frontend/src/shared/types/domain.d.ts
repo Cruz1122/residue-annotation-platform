@@ -113,6 +113,21 @@ export interface RunPreparation {
   finished_at: string | null;
 }
 
+export interface ExternalRunTracking {
+  source: string;
+  remote_run_id: string;
+  run_type: 'ddg' | 'mutant' | 'base';
+  base_protein_id: string;
+  accession: string;
+  variant: string | null;
+  display_name: string;
+  last_synced_at: string | null;
+  last_attempt_at: string | null;
+  connection_status: 'connected' | 'unavailable';
+  sync_error_code: string | null;
+  tracking_active: boolean;
+}
+
 export interface RunConfiguration {
   id: string;
   run_id: string;
@@ -146,6 +161,8 @@ export interface Run {
   priority?: string | null;
   requested_variants: VariantRequest[];
   remote_job_id: string | null;
+  is_external_import: boolean;
+  external_tracking: ExternalRunTracking | null;
   error_code: string | null;
   error_message: string | null;
   configuration: RunConfiguration | null;
@@ -155,6 +172,7 @@ export interface Run {
   started_at: string | null;
   finished_at: string | null;
   stages: RunStage[];
+  pipeline_stages?: RunStage[];
   uploads: Upload[];
 }
 

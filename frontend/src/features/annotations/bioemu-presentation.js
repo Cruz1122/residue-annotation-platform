@@ -23,6 +23,19 @@ function findArtifact(artifacts, predicate) {
   return artifacts.find(predicate) ?? null;
 }
 
+function resolveReferencePdb(run) {
+  const artifacts = (run?.stages ?? []).flatMap((item) => item?.artifacts ?? []);
+  const pdbArtifacts = artifacts.filter((item) => {
+    const name = artifactName(item);
+    return ['selected_reference_pdb', 'rosettamp_relaxed_pdb', 'foldx_relaxed_pdb'].includes(item?.artifact_type)
+      || /\.pdb(?:\s|$)/.test(name);
+  });
+  const preferredTypes = ['rosettamp_relaxed_pdb', 'selected_reference_pdb', 'foldx_relaxed_pdb'];
+  return preferredTypes.map((type) => pdbArtifacts.find((item) => item.artifact_type === type)).find(Boolean)
+    ?? pdbArtifacts[0]
+    ?? null;
+}
+
 export function resolveBioEmuArtifacts(run) {
   const stage = (run?.stages ?? []).find((item) => item.id === 'conformational_ensemble');
   const artifacts = stage?.artifacts ?? [];
@@ -43,7 +56,16 @@ export function resolveBioEmuArtifacts(run) {
     .find((item) => item.id === 'ensemble_frustration')
     ?.artifacts?.find((item) => item.artifact_type === 'frustratometer_conformers') ?? null;
 
-  return { stage: stage ?? null, topology, trajectory, finalDirectory, metadata, frameIndex, conformerMetrics };
+  return {
+    stage: stage ?? null,
+    topology,
+    referencePdb: topology ? null : resolveReferencePdb(run),
+    trajectory,
+    finalDirectory,
+    metadata,
+    frameIndex,
+    conformerMetrics,
+  };
 }
 
 export function hasPublishedBioEmuTopology(run) {
@@ -335,7 +357,26 @@ export function parsePdbSummary(text) {
 export function findSequenceChain(summary, sequence) {
   const target = String(sequence ?? '').replace(/\s/g, '').toUpperCase();
   if (!target) return null;
-  return summary?.chains?.find((chain) => chain.sequence === target) ?? null;
+  const chains = summary?.chains ?? [];
+  const exact = chains.find((chain) => chain.sequence === target);
+  if (exact) return exact;
+
+  const matches = [];
+  for (const chain of chains) {
+    const offset = chain.sequence.indexOf(target);
+    if (offset < 0) continue;
+    if (chain.sequence.indexOf(target, offset + 1) >= 0) return null;
+    matches.push({ chain, offset });
+  }
+  if (matches.length !== 1) return null;
+
+  const { chain, offset } = matches[0];
+  return {
+    ...chain,
+    sequence: target,
+    residues: chain.residues.slice(offset, offset + target.length),
+    sequenceOffset: offset,
+  };
 }
 
 export function validatePdbSequenceCompatibility(proteinSequence, summary, metadata) {
@@ -343,7 +384,8 @@ export function validatePdbSequenceCompatibility(proteinSequence, summary, metad
   if (metadata?.sequenceLength !== null && metadata?.sequenceLength !== undefined && metadata.sequenceLength !== targetLength) {
     return `La corrida publica una secuencia de ${metadata.sequenceLength} residuos, pero la proteína tiene ${targetLength}. No se cargará la trayectoria.`;
   }
-  if (!findSequenceChain(summary, proteinSequence)) {
+  const target = String(proteinSequence ?? '').replace(/\s/g, '').toUpperCase();
+  if (!target || !(summary?.chains ?? []).some((chain) => chain.sequence === target)) {
     return 'La secuencia de la estructura de referencia no coincide con la proteína seleccionada. No se puede reproducir la trayectoria.';
   }
   return '';

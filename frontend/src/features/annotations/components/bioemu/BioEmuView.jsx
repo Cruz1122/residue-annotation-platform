@@ -15,6 +15,7 @@ import {
 import { createBioEmuPlayback } from '@features/annotations/bioemu-playback.js';
 import { AA_NAMES } from '@features/annotations/viewer-presentation.js';
 import { getArtifactBlob, getProtein, getRun, listRuns } from '@shared/api/client';
+import { runBelongsToProtein } from '@features/annotations/run-protein-context.js';
 import { userErrorMessage } from '@shared/lib/error-presentation';
 import BioEmuControls from './BioEmuControls.jsx';
 import BioEmuPanel from './BioEmuPanel.jsx';
@@ -152,14 +153,14 @@ export default function BioEmuView({ proteinId }) {
           setLoadState('empty');
           return;
         }
-        if (runResult.protein_id !== proteinId) {
+        if (!runBelongsToProtein(runResult, proteinId)) {
           setPageError('La corrida seleccionada pertenece a otra proteína.');
           setLoadState('error');
           return;
         }
         setRun(runResult);
         const artifacts = resolveBioEmuArtifacts(runResult);
-        if (!artifacts.topology && !artifacts.finalDirectory) {
+        if (!artifacts.topology && !artifacts.finalDirectory && !artifacts.referencePdb) {
           setPageError('La corrida no publicó una estructura de referencia ni los datos necesarios para recuperarla.');
           setEmptyTitle('Estructura de referencia no disponible');
           setLoadState('empty');
@@ -177,13 +178,18 @@ export default function BioEmuView({ proteinId }) {
         };
         const initialRequests = [];
         if (artifacts.topology) initialRequests.push(['topology', loadArtifact(artifacts.topology)]);
-        else initialRequests.push(['archive', getArtifactBlob(artifacts.finalDirectory.id, 'original', { signal: abortController.signal, onProgress: reportProgress })]);
+        if (!artifacts.topology && artifacts.finalDirectory) {
+          initialRequests.push(['archive', getArtifactBlob(artifacts.finalDirectory.id, 'original', { signal: abortController.signal, onProgress: reportProgress })]);
+        } else if (!artifacts.topology && artifacts.referencePdb) {
+          initialRequests.push(['reference', loadArtifact(artifacts.referencePdb)]);
+        }
         if (artifacts.metadata) initialRequests.push(['metadata', loadArtifact(artifacts.metadata)]);
         if (artifacts.frameIndex) initialRequests.push(['frameIndex', loadArtifact(artifacts.frameIndex)]);
         const settledInitial = await Promise.all(initialRequests.map(async ([key, promise]) => [key, await Promise.allSettled([promise]).then((result) => result[0])]));
         if (!isActive()) return;
         const initialResults = new Map(settledInitial);
         const topologyResult = initialResults.get('topology');
+        let referenceResult = initialResults.get('reference');
         const archiveResult = initialResults.get('archive');
         let archiveBlob = archiveResult?.status === 'fulfilled' ? archiveResult.value : null;
         let archiveMembers = archiveBlob ? await extractBioEmuTarArtifacts(archiveBlob) : {};
@@ -195,11 +201,15 @@ export default function BioEmuView({ proteinId }) {
           if (!isActive()) return;
           archiveMembers = await extractBioEmuTarArtifacts(archiveBlob);
         }
-        if (topologyResult?.status === 'rejected' && !archiveMembers.topology) throw topologyResult.reason;
-        if (!topologyResult && archiveResult?.status === 'rejected') throw archiveResult.reason;
+        if (!archiveMembers.topology && !referenceResult && artifacts.referencePdb) {
+          referenceResult = await Promise.allSettled([loadArtifact(artifacts.referencePdb)]).then((result) => result[0]);
+        }
+        if (topologyResult?.status === 'rejected' && !archiveMembers.topology && referenceResult?.status !== 'fulfilled') throw topologyResult.reason;
+        if (!topologyResult && !referenceResult && archiveResult?.status === 'rejected') throw archiveResult.reason;
         const topologyBlob = topologyResult?.status === 'fulfilled'
           ? topologyResult.value
-          : archiveMembers.topology?.blob;
+          : archiveMembers.topology?.blob
+            ?? (referenceResult?.status === 'fulfilled' ? referenceResult.value : null);
         if (!topologyBlob) {
           setPageError('No se encontró una estructura de referencia válida entre los resultados de la corrida.');
           setEmptyTitle('Estructura de referencia no disponible');
@@ -218,7 +228,9 @@ export default function BioEmuView({ proteinId }) {
         let nextMetadata = parseBioEmuMetadata(metadataText);
         let nextFrameIndex = parseFrameIndex(frameIndexText, artifacts.frameIndex?.media_type ?? archiveMembers.frameIndex?.mediaType);
         const nextSummary = parsePdbSummary(nextPdbText);
-        let nextSequenceError = validatePdbSequenceCompatibility(nextProtein.sequence, nextSummary, nextMetadata);
+        let nextSequenceError = artifacts.trajectory || archiveMembers.trajectory
+          ? validatePdbSequenceCompatibility(nextProtein.sequence, nextSummary, nextMetadata)
+          : '';
         if (!isActive()) return;
         setPdbText(nextPdbText);
         setMetadata(nextMetadata);
@@ -255,6 +267,8 @@ export default function BioEmuView({ proteinId }) {
             if (!nextMetadata && archiveMembers.metadata) {
               nextMetadata = parseBioEmuMetadata(await archiveMembers.metadata.blob.text());
               setMetadata(nextMetadata);
+            }
+            if (archiveMembers.trajectory) {
               nextSequenceError = validatePdbSequenceCompatibility(nextProtein.sequence, nextSummary, nextMetadata);
               if (nextSequenceError) {
                 setCompatibilityError(nextSequenceError);

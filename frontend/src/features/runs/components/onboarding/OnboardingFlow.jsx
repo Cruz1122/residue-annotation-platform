@@ -374,6 +374,15 @@ export default function OnboardingFlow() {
     withViewTransition(() => setStep('variants'));
   };
 
+  const goBack = () => {
+    if (step === 'upload') {
+      window.location.assign('/proteins/');
+      return;
+    }
+    const previousStep = step === 'variants' && pdbAttached ? 'structure' : 'upload';
+    withViewTransition(() => setStep(previousStep));
+  };
+
   const setVariantButtonState = (index, alt) => {
     const button = buttonRefs.current[index];
     if (!button) return;
@@ -540,8 +549,6 @@ export default function OnboardingFlow() {
   return (
     <main class="auth-page onboarding-page" aria-label="Carga de proteína">
       <header class="onboarding-head">
-        <a class="onboarding-back" href="/proteins/">← Proteínas</a>
-        <span class="onboarding-kicker">Nueva corrida</span>
         <h1 class={`onboarding-title${step === 'variants' ? ' is-variants' : ''}${step === 'structure' ? ' structure-choice__title' : ''}`}>
           {step === 'upload' && 'Datos de entrada'}
           {step === 'structure' && 'Fuente estructural'}
@@ -560,12 +567,22 @@ export default function OnboardingFlow() {
             <UploadCard kind="fasta" label="FASTA" icon="dna" accept=".fasta,.fa,.faa,.fas,.fna,text/plain" state={upload.fasta} onFile={handleFile} />
           </div>
           {error && <StatusNotice kind="error">{error}</StatusNotice>}
-          <button class="auth-button onboarding-action" type="button" disabled={!ready || upload.pdb.status === 'loading'} onClick={showVariants}>
-            Continuar
-          </button>
+          <div class="onboarding-actions">
+            <button class="auth-button auth-button-secondary onboarding-back-action" type="button" onClick={goBack}>
+              <PackIcon name="arrow-left" kind="ui" />
+              Volver
+            </button>
+            <button class="auth-button onboarding-action" type="button" disabled={!ready || upload.pdb.status === 'loading'} onClick={showVariants}>
+              Continuar
+            </button>
+          </div>
         </>
       ) : step === 'structure' ? (
         <div class="structure-choice__actions">
+          <button class="auth-button auth-button-secondary onboarding-back-action" type="button" onClick={goBack}>
+            <PackIcon name="arrow-left" kind="ui" />
+            Volver
+          </button>
           <button class="auth-button structure-choice__button" type="button" onClick={() => chooseStructure('provided_pdb')}>Usar estructura adjunta</button>
           <button class="auth-button structure-choice__button" type="button" onClick={() => chooseStructure('alphafold3')}>Generar con AlphaFold 3</button>
         </div>
@@ -614,9 +631,15 @@ export default function OnboardingFlow() {
               )}
             </StatusNotice>
           )}
-          <button class="auth-button onboarding-action" type="button" disabled={submitting} onClick={submit}>
-            {submitting ? 'Creando corrida…' : hasVariants ? 'Continuar' : 'Omitir y continuar'}
-          </button>
+          <div class="onboarding-actions">
+            <button class="auth-button auth-button-secondary onboarding-back-action" type="button" onClick={goBack}>
+              <PackIcon name="arrow-left" kind="ui" />
+              Volver
+            </button>
+            <button class="auth-button onboarding-action" type="button" disabled={submitting} onClick={submit}>
+              {submitting ? 'Creando corrida…' : hasVariants ? 'Continuar' : 'Omitir y continuar'}
+            </button>
+          </div>
         </>
       )}
     </main>

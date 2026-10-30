@@ -43,9 +43,8 @@
 }
 .protein-filter:hover { border-color: rgba(17,19,24,.5); }
 .protein-filter .icon-slot { width: 19px; height: 19px; }
-.library-workspace { width: 100%; min-height: clamp(520px, calc(100svh - var(--app-inset) - 250px), 700px); display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, 340px); gap: 24px; align-items: stretch; }
+.library-workspace { width: 100%; min-height: clamp(520px, calc(100svh - var(--app-inset) - 250px), 700px); display: grid; grid-template-columns: minmax(0, 1fr); align-items: stretch; }
 .library-main { min-width: 0; display: flex; flex-direction: column; }
-.library-history-column { min-width: 0; position: sticky; top: 18px; height: 100%; }
 .proteins-grid {
   width: 100%;
   display: flex;
@@ -97,7 +96,7 @@
   text-align: center;
   pointer-events: none;
 }
-.protein-card-content { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; min-width: 0; text-align: center; }
+.protein-card-content { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; min-width: 0; text-align: center; }
 .protein-accession { margin: 0; overflow-wrap: anywhere; font-size: clamp(18px, 1.7vw, 23px); line-height: 1.15; font-weight: 700; letter-spacing: -.035em; }
 .protein-meta { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px 18px; padding: 0; color: #4c5159; font-size: 11px; font-weight: 600; }
 .protein-meta-item { display: flex; align-items: center; gap: 7px; min-width: 0; }
@@ -137,6 +136,10 @@
 .run-history-head h2 { margin: 0; font-size: 15px; font-weight: 750; letter-spacing: -.02em; }
 .run-history-head p { display: none; }
 .run-history-count { min-width: 28px; height: 28px; padding: 0 8px; border: 1px solid rgba(81,171,117,.38); background: var(--green-soft); display: grid; place-items: center; color: var(--green-dark); font-size: 10px; font-weight: 750; }
+.run-history-filters { display: grid; gap: 8px; margin-bottom: 12px; }
+.run-history-filters label { display: grid; gap: 4px; color: var(--muted); font-size: 9px; font-weight: 650; }
+.run-history-filters select { width: 100%; min-width: 0; min-height: 32px; padding: 0 8px; border: 1px solid var(--line-strong); border-radius: 3px; background: #fff; color: var(--ink); font: inherit; font-size: 10px; }
+.run-history-filters select:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
 .run-history-list { display: flex; flex: 1; flex-direction: column; gap: 9px; overflow-y: auto; }
 .run-history-card { display: flex; flex-direction: column; gap: 12px; border: 1px solid var(--line-strong); background: var(--surface); padding: 12px; }
 .run-history-main { min-width: 0; }
@@ -167,7 +170,6 @@
 
 @media (max-width: 980px) {
   .library-workspace { min-height: 0; grid-template-columns: 1fr; }
-  .library-history-column { position: static; height: auto; }
   .run-history { height: auto; }
   .protein-card { display: flex; flex-direction: column; align-items: stretch; gap: 8px; padding: 14px; }
   .protein-structure-preview { width: 100%; height: 108px; }

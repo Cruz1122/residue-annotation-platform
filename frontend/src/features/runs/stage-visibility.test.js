@@ -1,10 +1,16 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { runPhase } from './run-phase.js';
-import { presentRunStages, progressSummary, validateDisabledStages } from './stage-visibility.js';
+import {
+  presentRunStages,
+  progressSummary,
+  validateDisabledStages,
+  visibleRunStages,
+} from './stage-visibility.js';
 
 const DEPENDENCIES = {
   protein_identity: [],
+  clinvar: ['protein_identity'],
   variant_predictors: ['protein_identity'],
   pharmacogenomics: ['protein_identity'],
   uniprot_features: ['protein_identity'],
@@ -90,9 +96,41 @@ test('the counter includes all registry stages unless the backend marks one disa
     stage.id === 'protein_identity' ? { ...stage, status: 'success' } : stage
   ));
   const summary = progressSummary(presented);
-  assert.equal(summary.enabled, 18);
+  assert.equal(summary.enabled, 19);
   assert.equal(summary.completed, 1);
-  assert.equal(summary.percentage, 6);
+  assert.equal(summary.percentage, 5);
+});
+
+test('disabled external stages remain visible but do not inflate active progress', () => {
+  const importedStages = stages().map((stage) => ({
+    ...stage,
+    status: ['protein_identity', 'structure_modeling'].includes(stage.id)
+      ? 'success'
+      : 'disabled',
+  }));
+
+  const presented = presentRunStages(importedStages);
+  const summary = progressSummary(presented);
+
+  assert.equal(presented.length, 19);
+  assert.equal(presented.find((stage) => stage.id === 'conformational_ensemble').status, 'disabled');
+  assert.equal(presented.find((stage) => stage.id === 'ensemble_frustration').status, 'disabled');
+  assert.deepEqual(summary, { enabled: 2, completed: 2, percentage: 100 });
+});
+
+test('external imports keep worker-reported stages outside the saved selection visible', () => {
+  const workerReportedStages = stages().map((stage) => (
+    stage.id === 'structural_frustration' ? { ...stage, status: 'success' } : stage
+  ));
+  const run = {
+    is_external_import: true,
+    configuration: { selected_stage_ids: ['protein_identity'] },
+  };
+
+  const visible = visibleRunStages(run, workerReportedStages);
+
+  assert.equal(visible.length, workerReportedStages.length);
+  assert.equal(visible.find((stage) => stage.id === 'structural_frustration').status, 'success');
 });
 
 test('retryable preparation stays visible as pending instead of terminal failure', () => {
@@ -136,6 +174,19 @@ test('active and terminal phases keep the pipeline visible', () => {
   assert.equal(runPhase({ status: 'running', stages: [] }).presentation, 'banner');
   assert.equal(runPhase({ status: 'success', stages: [] }).presentation, 'banner');
   assert.equal(runPhase({ status: 'failed', error_message: 'worker failed', stages: [] }).presentation, 'banner');
+});
+
+test('keeps the existing running label without claiming a stage is active when none is reported', () => {
+  assert.deepEqual(runPhase({
+    status: 'running',
+    external_tracking: { source: 'mn5' },
+    stages: [{ status: 'success' }, { status: 'success' }],
+  }), {
+    label: 'Corrida en ejecución',
+    detail: '',
+    tone: 'running',
+    presentation: 'banner',
+  });
 });
 
 test('wait time is normalized to seconds, minutes, and hours', async () => {

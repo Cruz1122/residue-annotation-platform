@@ -10,11 +10,16 @@ import {
   getUploadObjectUrl,
 } from '@shared/api/client';
 import { userErrorMessage } from '@shared/lib/error-presentation';
-import { loadAnalysisArtifactDetails } from '@features/annotations/analysis-artifacts.js';
+import {
+  runStagePublicationSignature,
+} from '@features/runs/run-updates.js';
+import { loadAnalysisArtifactDetails, structureMappingFromArtifactRows } from '@features/annotations/analysis-artifacts.js';
+import { runBelongsToProtein } from '@features/annotations/run-protein-context.js';
 import { acquireStructureUrl } from '@features/annotations/structure-url-cache.js';
 import { isStructureArtifact, structureFormat } from '@features/annotations/structure-format.js';
 import { placeArpeggioOverlayLabels } from '@features/annotations/arpeggio-overlay-layout.js';
 import { getZoomOptimizedCanvas3dProps } from '@features/annotations/zoom-rendering.js';
+import { waitForCanvasDraw } from '@features/annotations/components/shared/canvas-render-readiness.js';
 import {
   formatScaleNumber,
   hexToColorInt,
@@ -47,7 +52,7 @@ const MAX_ANNOTATION_PAGES = 20;
 const CAMERA_RESET_DURATION_MS = 180;
 const CAMERA_RESET_OPTIONS = { easing: 'cubic-out', trajectory: 'linear' };
 const FOCUS_OPTIONS = { extraRadius: 4, durationMs: 180, easing: 'cubic-out', trajectory: 'linear' };
-const STRUCTURE_REFERENCE_TYPES = ['selected_reference_pdb', 'foldx_relaxed_pdb', 'rosettamp_relaxed_pdb'];
+const STRUCTURE_REFERENCE_TYPES = ['model_cif', 'foldx_relaxed_pdb', 'selected_reference_pdb', 'rosettamp_relaxed_pdb'];
 
 async function getAllAnnotations(runId) {
   const rows = [];
@@ -83,7 +88,7 @@ function structureSourceForArpeggio(run, provenance) {
       format: structureFormat(artifact),
       loadUrl: () => getArtifactObjectUrl(artifact.id),
       referenceMatched: Boolean(matched)
-        || (!inputSha && ['selected_reference_pdb', 'foldx_relaxed_pdb', 'rosettamp_relaxed_pdb'].includes(artifact.artifact_type)),
+        || (!inputSha && ['model_cif', 'selected_reference_pdb', 'foldx_relaxed_pdb', 'rosettamp_relaxed_pdb'].includes(artifact.artifact_type)),
     };
   }
   const uploads = (run?.uploads ?? []).filter((upload) => upload.input_type === 'structure');
@@ -626,7 +631,7 @@ function ArpeggioStructure({
     };
   };
 
-  const installTheme = () => {
+  const installTheme = async () => {
     const viewer = viewerRef.current;
     const registry = themeRegistryRef.current;
     if (!viewer?.plugin || !registry || !themeFactoryRef.current) return;
@@ -638,22 +643,21 @@ function ArpeggioStructure({
     try {
       registry.add(provider);
       themeProviderRef.current = provider;
-      void applyTheme(viewer, themeName).then(() => {
-        if (previous && themeProviderRef.current === provider) {
-          try {
-            registry.remove(previous);
-          } catch {
-            // A disposed viewer may already have released its theme registry.
-          }
+      await applyTheme(viewer, themeName);
+      if (previous && themeProviderRef.current === provider) {
+        try {
+          registry.remove(previous);
+        } catch {
+          // A disposed viewer may already have released its theme registry.
         }
-      });
+      }
     } catch {
       // Keep the last valid theme while the viewer is being replaced.
     }
   };
 
   useEffect(() => {
-    if (structureReady) installTheme();
+    if (structureReady) void installTheme();
   }, [roleColorByKey, structureReady]);
 
   useEffect(() => {
@@ -666,6 +670,7 @@ function ArpeggioStructure({
     if (!structureUrl || !hostRef.current) return undefined;
 
     let disposed = false;
+    const renderController = new AbortController();
     let viewerInstance = null;
     let clickSubscription = null;
     let cameraSubscription = null;
@@ -851,6 +856,9 @@ function ArpeggioStructure({
         resizeListener = scheduleOverlay;
         window.addEventListener('resize', resizeListener);
 
+        await installTheme();
+        await waitForCanvasDraw(canvas3d, { signal: renderController.signal });
+        if (disposed) return;
         structureReadyRef.current = true;
         setStructureReady(true);
         installTheme();
@@ -870,6 +878,7 @@ function ArpeggioStructure({
     void loadViewer();
     return () => {
       disposed = true;
+      renderController.abort();
       disposeViewer();
       themeProviderRef.current = null;
       themeRegistryRef.current = null;
@@ -1138,13 +1147,13 @@ export default function ArpeggioView({ proteinId }) {
   const [selectedTypes, setSelectedTypes] = useState(null);
   const [metric, setMetric] = useState('contacts');
   const selectionInitializedRef = useRef(false);
+  const latestRunRef = useRef(null);
 
   useEffect(() => {
     let active = true;
     async function load() {
       if (!runId) {
-        setState('error');
-        setError('Selecciona una corrida desde el historial o la vista de progreso para consultar ARPEGGIO.');
+        setState('no-run');
         return;
       }
       try {
@@ -1153,7 +1162,7 @@ export default function ArpeggioView({ proteinId }) {
           getRun(runId),
           getAllAnnotations(runId),
         ]);
-        if (runData.protein_id !== proteinData.id) {
+        if (!runBelongsToProtein(runData, proteinData.id)) {
           if (active) {
             setState('error');
             setError('La corrida seleccionada no corresponde a esta proteína.');
@@ -1162,6 +1171,7 @@ export default function ArpeggioView({ proteinId }) {
         }
         const details = await loadAnalysisArtifactDetails(runData, 'contacts', getArtifactBlob);
         if (!active) return;
+        latestRunRef.current = runData;
         setProtein(proteinData);
         setRun(runData);
         setAnnotations((annotationData.rows ?? []).filter((row) => row.stage_id === 'structural_contacts'));
@@ -1177,6 +1187,52 @@ export default function ArpeggioView({ proteinId }) {
     void load();
     return () => { active = false; };
   }, [proteinId, runId]);
+
+  useEffect(() => {
+    if (!runId || !run?.external_tracking?.tracking_active) return undefined;
+    let active = true;
+    let refreshing = false;
+
+    const refresh = async () => {
+      if (refreshing || document.visibilityState !== 'visible') return;
+      refreshing = true;
+      try {
+        const nextRun = await getRun(runId);
+        if (!active) return;
+        const contactsChanged = runStagePublicationSignature(
+          latestRunRef.current,
+          ['structural_contacts'],
+        ) !== runStagePublicationSignature(nextRun, ['structural_contacts']);
+        latestRunRef.current = nextRun;
+        setRun(nextRun);
+        if (!contactsChanged) return;
+
+        const [annotationData, details] = await Promise.all([
+          getAllAnnotations(runId),
+          loadAnalysisArtifactDetails(nextRun, 'contacts', getArtifactBlob),
+        ]);
+        if (!active) return;
+        setAnnotations((annotationData.rows ?? []).filter((row) => row.stage_id === 'structural_contacts'));
+        setAnnotationsTruncated(Boolean(annotationData.truncated));
+        setArtifactDetails(details);
+      } catch {
+        // Keep the last confirmed contacts while MN5 or the local API is unavailable.
+      } finally {
+        refreshing = false;
+      }
+    };
+
+    const timer = window.setInterval(() => { void refresh(); }, 5000);
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') void refresh();
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, [proteinId, runId, run?.external_tracking?.tracking_active]);
 
   const annotationByPosition = useMemo(() => mergeAnnotationRows(annotations), [annotations]);
   const summaryRows = useMemo(
@@ -1237,7 +1293,10 @@ export default function ArpeggioView({ proteinId }) {
     return { byCanonical, byStructure };
   }, [contactRows, summaryRows]);
   const mapping = useMemo(() => {
-    const configured = structureMappingMaps(run?.configuration?.structure_mapping ?? {});
+    const configured = structureMappingMaps(structureMappingFromArtifactRows(
+      run?.configuration?.structure_mapping,
+      artifactDetails?.structure_mapping,
+    ));
     for (const [position, key] of fallbackMapping.byCanonical) {
       if (!configured.byCanonical.has(position)) configured.byCanonical.set(position, key);
     }
@@ -1245,7 +1304,7 @@ export default function ArpeggioView({ proteinId }) {
       if (!configured.byStructure.has(key)) configured.byStructure.set(key, position);
     }
     return configured;
-  }, [fallbackMapping, run?.configuration?.structure_mapping]);
+  }, [artifactDetails?.structure_mapping, fallbackMapping, run?.configuration?.structure_mapping]);
   const selectedStructureKey = selectedPosition === null
     ? ''
     : mapping.byCanonical.get(selectedPosition) ?? model.selected?.structureKey ?? '';
@@ -1330,12 +1389,19 @@ export default function ArpeggioView({ proteinId }) {
   if (state === 'loading') {
     return <section class="frustration-page"><StatePanel kind="loading" fill title="Cargando ARPEGGIO" description="Consultando la corrida y los contactos publicados." /></section>;
   }
+  if (state === 'no-run') {
+    return <section class="frustration-page"><StatePanel kind="empty" fill icon="workflow" title="No hay una corrida seleccionada" description="Selecciona una corrida desde el historial o la vista de progreso para consultar ARPEGGIO."><a class="protein-open" href="/proteins/">Mis proteínas</a></StatePanel></section>;
+  }
   if (state === 'error') {
     return <section class="frustration-page"><StatePanel kind="error" fill title="No se pudo cargar ARPEGGIO" description={error} /></section>;
   }
 
   const contactsStage = run?.stages?.find((stage) => stage.id === 'structural_contacts') ?? null;
   const contactsStageStatus = contactsStage?.status ?? 'missing';
+  const contactPublicationPending = run?.external_tracking?.tracking_active
+    && run.external_tracking.connection_status === 'connected'
+    && run.external_tracking.sync_error_code === 'result_publication_pending'
+    && ['success', 'reused'].includes(contactsStageStatus);
   if (!model.hasPublishedRows) {
     if (contactsStageStatus === 'failed') {
       return (
@@ -1348,6 +1414,18 @@ export default function ArpeggioView({ proteinId }) {
       return (
         <section class="frustration-page">
           <StatePanel kind="waiting" fill title="ARPEGGIO aún no está disponible" description="La etapa de contactos estructurales todavía está en ejecución." />
+        </section>
+      );
+    }
+    if (contactPublicationPending) {
+      return (
+        <section class="frustration-page">
+          <StatePanel
+            kind="loading"
+            fill
+            title="Cargando resultados"
+            description="Consultando los resultados publicados de contactos estructurales."
+          />
         </section>
       );
     }

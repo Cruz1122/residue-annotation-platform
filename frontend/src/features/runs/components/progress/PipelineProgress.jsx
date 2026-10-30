@@ -3,7 +3,7 @@ import PackIcon from '@shared/components/icons/PackIcon.jsx';
 import StageIcon from '@shared/components/icons/StageIcon.jsx';
 import StatePanel from '@shared/components/feedback/StatePanel.jsx';
 import { ApiError, cancelRun, getActiveRun, getRun, subscribeRunEvents } from '@shared/api/client';
-import { presentRunStages } from '@features/runs/stage-visibility.js';
+import { presentRunStages, visibleRunStages } from '@features/runs/stage-visibility.js';
 import { runPhase } from '@features/runs/run-phase.js';
 import { runFailureMessage, userErrorMessage } from '@shared/lib/error-presentation';
 import {
@@ -11,6 +11,7 @@ import {
 } from '@features/runs/pipeline-layout.js';
 import { stagePresentation } from '@features/runs/stage-presentation.js';
 import { stageHref } from '@features/runs/stage-routes.js';
+import { runUpdatesFinished } from '@features/runs/run-updates.js';
 import '@features/runs/styles/progress.css';
 
 const STATUS_ICON = {
@@ -47,7 +48,7 @@ const OMISSION_REASON_TEXT = {
   dependency_not_applicable: 'Dependencia no aplicable',
 };
 
-const RUN_TERMINAL = new Set(['success', 'failed', 'cancelled']);
+const MIN_AUTOFIT_ZOOM = 0.75;
 
 function formatElapsed(milliseconds) {
   const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000));
@@ -151,16 +152,8 @@ export default function PipelineProgress({ proteinId }) {
     let timer;
     let streamController;
     let finished = false;
-    let reconnectAttempts = 0;
-    const maxReconnectAttempts = 3;
-
-    const scheduleFallback = (load, delay = 2000) => {
+    const scheduleFallback = (load, delay = 5000) => {
       if (!active || finished) return;
-      if (reconnectAttempts >= maxReconnectAttempts) {
-        setError('La actualización automática se detuvo; recarga para consultar el estado actual.');
-        return;
-      }
-      reconnectAttempts += 1;
       if (timer) window.clearTimeout(timer);
       timer = window.setTimeout(load, delay);
     };
@@ -195,11 +188,11 @@ export default function PipelineProgress({ proteinId }) {
         if (!value || typeof value !== 'object') {
           throw new Error('La API devolvió una corrida vacía.');
         }
-        let latestStatus = value.status;
+        let latestRun = value;
         setRun(value);
         setState('ready');
         setError('');
-        if (RUN_TERMINAL.has(value.status)) {
+        if (runUpdatesFinished(value)) {
           finished = true;
           streamController?.abort();
           if (timer) window.clearTimeout(timer);
@@ -214,18 +207,18 @@ export default function PipelineProgress({ proteinId }) {
             signal: controller.signal,
             onSnapshot: (snapshot) => {
               if (!active) return;
-              latestStatus = snapshot.status;
+              latestRun = snapshot;
               setRun(snapshot);
               setState('ready');
               setError('');
-              if (RUN_TERMINAL.has(snapshot.status)) {
+              if (runUpdatesFinished(snapshot)) {
                 finished = true;
                 controller.abort();
                 if (timer) window.clearTimeout(timer);
               }
             },
           });
-          if (active && !finished && !RUN_TERMINAL.has(latestStatus)) scheduleFallback(load);
+          if (active && !finished && !runUpdatesFinished(latestRun)) scheduleFallback(load);
         } catch (streamError) {
           if (!active || controller.signal.aborted || finished) return;
           // Keep the existing polling path when SSE is unavailable or drops.
@@ -235,7 +228,7 @@ export default function PipelineProgress({ proteinId }) {
         if (!active) return;
         setState('error');
         setError(userErrorMessage(requestError, 'No se pudo cargar la corrida.'));
-        scheduleFallback(load, 4000);
+        scheduleFallback(load, 5000);
       }
     };
 
@@ -248,7 +241,7 @@ export default function PipelineProgress({ proteinId }) {
   }, [proteinId, runId]);
 
   useEffect(() => {
-    if (!run || RUN_TERMINAL.has(run.status)) {
+    if (!run || runUpdatesFinished(run)) {
       setNow(Date.now());
       return undefined;
     }
@@ -257,25 +250,29 @@ export default function PipelineProgress({ proteinId }) {
   }, [run]);
 
   const stages = useMemo(() => {
-    if (!run?.stages?.length) return [];
+    const sourceStages = run?.pipeline_stages?.length ? run.pipeline_stages : run?.stages;
+    if (!sourceStages?.length) return [];
     try {
       return presentRunStages(
-        run.stages,
+        sourceStages,
       );
     } catch (visibilityError) {
       console.error(visibilityError);
-      return run.stages;
+      return sourceStages;
     }
   }, [run]);
   const graphStages = useMemo(() => {
-    const selectedIds = new Set(run?.configuration?.selected_stage_ids ?? []);
-    const visibleStages = selectedIds.size
-      ? stages.filter((stage) => selectedIds.has(stage.id) || stage.id === 'protein_identity')
-      : stages.filter((stage) => stage.status !== 'disabled');
-    return presentRunStages(visibleStages);
+    return presentRunStages(visibleRunStages(run, stages));
   }, [run, stages]);
   const layout = useMemo(() => compactStageLayout(graphStages), [graphStages]);
   const edges = useMemo(() => buildEdges(graphStages, layout.positions), [graphStages, layout]);
+  const orderedGraphStages = useMemo(() => [...graphStages].sort((left, right) => {
+    const leftPosition = layout.positions.get(left.id);
+    const rightPosition = layout.positions.get(right.id);
+    return leftPosition.x - rightPosition.x
+      || leftPosition.y - rightPosition.y
+      || left.id.localeCompare(right.id);
+  }), [graphStages, layout]);
   const graphStagesById = new Map(graphStages.map((stage) => [stage.id, stage]));
   const phase = runPhase(run);
   const activeCount = graphStages.filter((stage) => stage.status !== 'disabled').length;
@@ -285,23 +282,20 @@ export default function PipelineProgress({ proteinId }) {
   )).length;
   const percent = activeCount > 0 ? Math.round((resolvedCount / activeCount) * 100) : 100;
   const phaseNeedsBanner = phase.tone !== 'success';
+  const progressSummary = `${resolvedCount} de ${activeCount} pasos activos · ${percent}%`;
 
   useEffect(() => {
     if (state !== 'ready') return undefined;
     const viewport = viewportRef.current;
     if (!viewport) return undefined;
     const resizeObserver = new ResizeObserver(() => {
-      if (userZoomedRef.current) return;
       const width = viewport.clientWidth;
       const height = viewport.clientHeight;
-      const responsiveZoom = Math.min(
-        1,
-        Math.max(.5, Math.min(
-          (width - 32) / layout.width,
-          (height - 32) / layout.height,
-        )),
-      );
-      setZoom(responsiveZoom);
+      const fitZoom = Math.min(1, (width - 32) / layout.width, (height - 32) / layout.height);
+      if (!userZoomedRef.current) {
+        const responsiveZoom = Math.min(1, Math.max(MIN_AUTOFIT_ZOOM, fitZoom));
+        setZoom(responsiveZoom);
+      }
     });
     resizeObserver.observe(viewport);
     return () => resizeObserver.disconnect();
@@ -309,7 +303,7 @@ export default function PipelineProgress({ proteinId }) {
 
   const setZoomAround = (nextZoom, clientPoint = null) => {
     const viewport = viewportRef.current;
-    const clamped = Math.min(1.75, Math.max(.5, nextZoom));
+    const clamped = Math.min(1.75, Math.max(.25, nextZoom));
     if (!viewport || clamped === zoom) {
       userZoomedRef.current = true;
       setZoom(clamped);
@@ -331,7 +325,7 @@ export default function PipelineProgress({ proteinId }) {
   const fitMap = () => {
     const viewport = viewportRef.current;
     if (!viewport) return;
-    const fit = Math.min(1, Math.max(.5, Math.min(
+    const fit = Math.min(1, Math.max(.25, Math.min(
       (viewport.clientWidth - 32) / layout.width,
       (viewport.clientHeight - 32) / layout.height,
     )));
@@ -361,10 +355,10 @@ export default function PipelineProgress({ proteinId }) {
       <header class="progress-head">
         <div class="progress-heading">
           <h1>Progreso</h1>
-          <p>{resolvedCount} de {activeCount} pasos activos · {percent}%</p>
+          <p>{progressSummary}</p>
         </div>
         <div class="progress-actions">
-          {!['success', 'failed', 'cancelled'].includes(run.status) && <button class="cancel-run" type="button" onClick={cancel} disabled={cancelling}>{cancelling ? 'Cancelando…' : 'Cancelar'}</button>}
+          {!run.is_external_import && !['success', 'failed', 'cancelled'].includes(run.status) && <button class="cancel-run" type="button" onClick={cancel} disabled={cancelling}>{cancelling ? 'Cancelando…' : 'Cancelar'}</button>}
           <div class="progress-zoom" aria-label="Zoom del mapa">
             <button type="button" onClick={() => setZoomAround(zoom - .1)} aria-label="Alejar">−</button>
             <button type="button" class="zoom-value" onClick={() => setZoomAround(1)} aria-label="Restablecer zoom">{Math.round(zoom * 100)}%</button>
@@ -436,7 +430,7 @@ export default function PipelineProgress({ proteinId }) {
                 ];
               })}
             </svg>
-            {graphStages.map((stage) => {
+            {orderedGraphStages.map((stage) => {
               const position = layout.positions.get(stage.id);
               const visualStatus = stageVisualStatus(stage);
               const presentation = stagePresentation(stage, run.configuration);

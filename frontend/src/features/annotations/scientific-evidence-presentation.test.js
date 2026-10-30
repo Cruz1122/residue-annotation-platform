@@ -55,6 +55,27 @@ test('scientific evidence offers source-specific modes without an internal aggre
   assert.equal(Object.hasOwn(evidenceRows(details, stages, 'A')[0].values, 'evidence_level'), false);
 });
 
+test('UniProt curated evidence remains available when the optional LDL-C source is absent', () => {
+  const stages = [{
+    id: 'uniprot_features',
+    status: 'success',
+    artifacts: [{ artifact_type: 'functional_features_long' }],
+  }];
+  const details = {
+    functional_features_long: [{
+      aa_position: '1',
+      source_database: 'UniProtKB',
+      feature_type: 'Binding site',
+      feature_name: 'Curated binding site',
+      mapping_status: 'exact',
+    }],
+  };
+
+  assert.equal(availableScientificEvidenceModes(stages, details)
+    .some(({ value }) => value === 'evidence-curated'), true);
+  assert.equal(scientificEvidenceRows(details, stages, 'A')[0].values.curated_evidence_status, 'present');
+});
+
 test('an empty MaveDB detail file is evaluated only when published per-position coverage confirms explicit zeroes', () => {
   const { stages, details } = completeSourceSet();
   const zeroCoverage = [verifiedMaveCoverage[0]];

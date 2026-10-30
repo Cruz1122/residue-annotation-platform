@@ -8,16 +8,21 @@ import {
   getArtifactObjectUrl,
   getProtein,
   getRun,
+  listRuns,
   getUploadObjectUrl,
   subscribeRunEvents,
 } from '@shared/api/client';
 import { userErrorMessage } from '@shared/lib/error-presentation';
+import { runUpdatesFinished } from '@features/runs/run-updates.js';
 import {
+  loadDdgVariantDetails,
   loadAnalysisArtifactDetails,
+  structureMappingFromArtifactRows,
 } from '@features/annotations/analysis-artifacts.js';
 import { captureCameraSnapshot, sameCameraSnapshot } from '@features/annotations/camera-snapshot.js';
 import { isStructureArtifact, structureFormat } from '@features/annotations/structure-format.js';
 import { getZoomOptimizedCanvas3dProps } from '@features/annotations/zoom-rendering.js';
+import { waitForCanvasDraw } from '@features/annotations/components/shared/canvas-render-readiness.js';
 import {
   AA3,
   AA_NAMES,
@@ -29,6 +34,7 @@ import {
   formatPublishedNumber,
   formatVariantNumber,
   indexVariantsByPosition,
+  initialVariantSelection,
   isScientistVisibleVariantArtifact,
   mergePublishedVariants,
   publishedDdg,
@@ -42,14 +48,15 @@ import {
 import { structureSelectionItems } from '@features/annotations/topology-presentation.js';
 import {
   canCompareStructureSources,
+  areStructureSourcesReady,
   distinctStructureOptions,
+  matchingMutantRun,
   parseVariantStructureArchive,
 } from '@features/annotations/variant-structure-presentation.js';
 import { acquireStructureUrl } from '@features/annotations/structure-url-cache.js';
 import 'molstar/build/viewer/molstar.css';
 import '@features/annotations/styles/variant-comparison.css';
 
-const TERMINAL_RUN_STATUSES = new Set(['success', 'failed', 'cancelled']);
 const RESIDUE_FOCUS_OPTIONS = {
   extraRadius: 4,
   durationMs: 180,
@@ -59,10 +66,10 @@ const RESIDUE_FOCUS_OPTIONS = {
 const CAMERA_RESET_DURATION_MS = 180;
 const CAMERA_SYNC_ACTION_GUARD_MS = 480;
 const CAMERA_SELECTION_FOCUS_DELAY_MS = 80;
-const STRUCTURE_NEUTRAL_COLOR = '#d2d7dc';
+const STRUCTURE_RETRY_DELAY_MS = 250;
+const STRUCTURE_NEUTRAL_COLOR = '#73808a';
 const REFERENCE_HIGHLIGHT_COLOR = '#2f6ed7';
 const MUTANT_HIGHLIGHT_COLOR = '#c9362b';
-const INITIAL_STRUCTURE_FOCUS_FACTOR = 0.28;
 
 function allArtifacts(run) {
   const items = [...(run?.run_artifacts ?? []), ...(run?.stages ?? []).flatMap((stage) => stage.artifacts ?? [])];
@@ -126,10 +133,10 @@ function artifactVariantKey(artifact) {
 function structureSources(run, variants = []) {
   const artifacts = allArtifacts(run);
   const preferredTypes = [
+    'model_cif',
+    'foldx_relaxed_pdb',
     'selected_reference_pdb',
     'rosettamp_relaxed_pdb',
-    'foldx_relaxed_pdb',
-    'model_cif',
   ];
   const referenceArtifact = preferredTypes
     .map((type) => artifacts.find((item) => item.artifact_type === type))
@@ -167,6 +174,28 @@ function structureSources(run, variants = []) {
   const variantDirectory = artifacts.find(isVariantDirectoryArtifact) ?? null;
 
   return { reference, variants: variantSources, variantDirectory };
+}
+
+function mutantRunStructureSource(run, variants) {
+  const tracking = run?.external_tracking;
+  const key = variantKey({ variant_id: tracking?.variant });
+  const variant = variants.find((item) => variantKey(item) === key);
+  const preferredTypes = [
+    'model_cif',
+    'foldx_relaxed_pdb',
+    'selected_reference_pdb',
+    'rosettamp_relaxed_pdb',
+  ];
+  const artifacts = allArtifacts(run);
+  const model = preferredTypes
+    .map((type) => artifacts.find((artifact) => artifact.artifact_type === type && isConcreteStructureArtifact(artifact)))
+    .find(Boolean) ?? artifacts.find(isConcreteStructureArtifact);
+  if (!key || !variant || !model) return null;
+  return sourceFromArtifact(model, {
+    kind: 'variant',
+    variantKeyValue: key,
+    selectionLabel: variantLabel(variant),
+  });
 }
 
 function sourceFromArchiveMember(artifact, member, variants) {
@@ -326,7 +355,9 @@ function updateCameraSyncOffsets(cameraSyncRef) {
 
 function requestCameraSync(cameraSyncRef, sourceId) {
   const sync = cameraSyncRef.current;
-  if (!sync.enabled || sync.applying || performance.now() < sync.suspendUntil || !sync.cameras.has(sourceId)) return;
+  const otherPanelId = sourceId === 'first' ? 'second' : 'first';
+  if (!sync.enabled || sync.applying || performance.now() < sync.suspendUntil
+    || !sync.cameras.has(sourceId) || !sync.cameras.has(otherPanelId)) return;
   sync.pendingSource = sourceId;
   if (sync.frame !== null) return;
   sync.frame = requestAnimationFrame(() => {
@@ -375,7 +406,8 @@ function requestCameraSyncAfterAction(cameraSyncRef, sourceId, delayMs = CAMERA_
 
   const apply = (retry = 0) => {
     const sync = cameraSyncRef.current;
-    if (!sync.enabled) return;
+    const otherPanelId = sourceId === 'first' ? 'second' : 'first';
+    if (!sync.enabled || !sync.cameras.has(sourceId) || !sync.cameras.has(otherPanelId)) return;
     const remaining = sync.suspendUntil - performance.now();
     if (remaining > 0) {
       const timer = window.setTimeout(() => {
@@ -405,6 +437,7 @@ function requestCameraSyncAfterAction(cameraSyncRef, sourceId, delayMs = CAMERA_
 
 function useStructureUrl(source) {
   const [loaded, setLoaded] = useState({ sourceId: '', url: '', state: source ? 'loading' : 'unavailable' });
+  const [requestRevision, setRequestRevision] = useState(0);
   useEffect(() => {
     let active = true;
     const sourceId = source?.id ?? '';
@@ -426,10 +459,14 @@ function useStructureUrl(source) {
       active = false;
       lease.release();
     };
-  }, [source?.id]);
-  return loaded.sourceId === (source?.id ?? '')
-    ? { url: loaded.url, state: loaded.state }
-    : { url: '', state: source ? 'loading' : 'unavailable' };
+  }, [requestRevision, source?.id]);
+  const retry = () => setRequestRevision((current) => current + 1);
+  return {
+    ...(loaded.sourceId === (source?.id ?? '')
+      ? { url: loaded.url, state: loaded.state }
+      : { url: '', state: source ? 'loading' : 'unavailable' }),
+    retry,
+  };
 }
 
 function VariantStructurePanel({
@@ -441,11 +478,13 @@ function VariantStructurePanel({
   onSourceChange,
   structureUrl,
   structureState,
+  retryStructureUrl,
   structureMapping,
   selectedPosition,
   selectionRevision,
   highlightColor,
   onPick,
+  onStructureReady,
   cameraSyncRef,
   cameraSyncEnabled,
 }) {
@@ -470,8 +509,11 @@ function VariantStructurePanel({
   const cameraSyncEnabledRef = useRef(cameraSyncEnabled);
   const appliedSelectionTokenRef = useRef('');
   const [viewerReady, setViewerReady] = useState(false);
+  const [loadRetry, setLoadRetry] = useState(0);
   const [viewerState, setViewerState] = useState(structureState === 'error' ? 'error' : structureState === 'ready' ? 'loading' : structureState);
   const [viewerError, setViewerError] = useState('');
+  const themeSourceIdRef = useRef(source?.id ?? '');
+  const onStructureReadyRef = useRef(onStructureReady);
 
   mappingRef.current = structureMapping.byStructure;
   selectedPositionRef.current = selectedPosition;
@@ -479,6 +521,7 @@ function VariantStructurePanel({
   onPickRef.current = onPick;
   cameraSyncEnabledRef.current = cameraSyncEnabled;
   cameraSyncRef.current.enabled = cameraSyncEnabled;
+  onStructureReadyRef.current = onStructureReady;
 
   const applyTheme = async () => {
     const viewer = viewerRef.current;
@@ -520,23 +563,35 @@ function VariantStructurePanel({
     const registry = themeRegistryRef.current;
     const factory = themeFactoryRef.current;
     if (!viewer?.plugin || !registry || !factory) return;
-    const previousProvider = themeProviderRef.current;
+    const sourceId = source?.id ?? '';
+    if (themeSourceIdRef.current !== sourceId) {
+      themeSourceIdRef.current = sourceId;
+      return;
+    }
     themeRevisionRef.current += 1;
     const provider = createThemeProvider(`variant-comparison-${panelId}-${themeRevisionRef.current}`);
     if (!provider) return;
     try {
-      registry.add(provider);
-      themeNameRef.current = provider.name;
-      themeProviderRef.current = provider;
-      void applyTheme().then(() => {
-        if (previousProvider && themeProviderRef.current === provider) {
-          try { registry.remove(previousProvider); } catch { /* viewer is being disposed */ }
+      const queuedTheme = loadQueueRef.current.then(async () => {
+        if (viewerRef.current !== viewer) return;
+        const previousProvider = themeProviderRef.current;
+        try {
+          registry.add(provider);
+          themeNameRef.current = provider.name;
+          themeProviderRef.current = provider;
+          await applyTheme();
+          if (previousProvider && themeProviderRef.current === provider) {
+            registry.remove(previousProvider);
+          }
+        } catch {
+          // Keep the current theme if a selection changes during disposal.
         }
       });
+      loadQueueRef.current = queuedTheme.catch(() => undefined);
     } catch {
       // Keep the current theme if a selection changes during disposal.
     }
-  }, [highlightColor, selectedPosition]);
+  }, [highlightColor, panelId, selectedPosition, source?.id, structureMapping]);
 
   useEffect(() => {
     let disposed = false;
@@ -628,6 +683,7 @@ function VariantStructurePanel({
       } catch (error) {
         console.error(error);
         if (!disposed) {
+          onStructureReadyRef.current?.(panelId, source?.id ?? '', false);
           setViewerError('No se pudo interpretar la estructura molecular publicada.');
           setViewerState('error');
         }
@@ -651,6 +707,7 @@ function VariantStructurePanel({
       themeRegistryRef.current = null;
       themeFactoryRef.current = null;
       themeProviderRef.current = null;
+      onStructureReadyRef.current?.(panelId, source?.id ?? '', false);
     };
   }, [panelId]);
 
@@ -678,9 +735,12 @@ function VariantStructurePanel({
     const structureLib = structureLibRef.current;
     if (!source || !structureUrl || !viewerReady || !viewer || !structureLib || !hostRef.current) return undefined;
     let active = true;
+    const renderController = new AbortController();
     const revision = ++loadRevisionRef.current;
     setViewerState('loading');
     setViewerError('');
+    onStructureReadyRef.current?.(panelId, source.id, false);
+    suspendCameraSync(cameraSyncRef);
     cameraSyncRef.current.cameras.delete(panelId);
     cameraSyncRef.current.appliedSnapshots.delete(panelId);
 
@@ -688,14 +748,29 @@ function VariantStructurePanel({
       try {
         if (!active || revision !== loadRevisionRef.current) return;
         const camera = viewer.plugin.canvas3d?.camera;
+        const canvas3d = viewer.plugin.canvas3d;
+        const mutantLoadUsesReferenceCamera = cameraSyncEnabledRef.current && panelId === 'second';
         const previousCameraSnapshot = hasLoadedStructureRef.current ? camera?.getSnapshot?.() : null;
         await viewer.plugin.clear();
         if (!active || revision !== loadRevisionRef.current) return;
+        const drawBaseline = canvas3d?.didDraw?.value;
+        const renderReady = waitForCanvasDraw(canvas3d, { signal: renderController.signal, drawBaseline });
+        // Handle a timeout while the CIF request is still in flight; it is
+        // surfaced below when the load pipeline awaits this promise.
+        renderReady.catch(() => undefined);
         const cachedSnapshot = structureSnapshotCacheRef.current.get(source.id);
         if (cachedSnapshot) {
           await viewer.plugin.runTask(viewer.plugin.state.data.setSnapshot(cachedSnapshot));
         } else {
-          await viewer.loadStructureFromUrl(structureUrl, source.format ?? 'pdb', false, { label: source.label });
+          try {
+            await viewer.loadStructureFromUrl(structureUrl, source.format ?? 'pdb', false, { label: source.label });
+          } catch {
+            if (!active || revision !== loadRevisionRef.current) return;
+            await new Promise((resolve) => window.setTimeout(resolve, STRUCTURE_RETRY_DELAY_MS));
+            if (!active || revision !== loadRevisionRef.current) return;
+            await viewer.plugin.clear();
+            await viewer.loadStructureFromUrl(structureUrl, source.format ?? 'pdb', false, { label: source.label });
+          }
           if (active && revision === loadRevisionRef.current) {
             structureSnapshotCacheRef.current.delete(source.id);
             structureSnapshotCacheRef.current.set(source.id, viewer.plugin.state.data.getSnapshot());
@@ -706,13 +781,17 @@ function VariantStructurePanel({
         }
         if (!active || revision !== loadRevisionRef.current) return;
 
-        const canvas3d = viewer.plugin.canvas3d;
-        const boundingSphere = canvas3d?.boundingSphereVisible ?? canvas3d?.boundingSphere;
+        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        if (!active || revision !== loadRevisionRef.current) return;
+
         canvas3d?.requestResize?.();
-        if (canvas3d?.camera && previousCameraSnapshot) {
+        if (canvas3d?.camera && previousCameraSnapshot && !mutantLoadUsesReferenceCamera) {
           canvas3d.camera.setState(previousCameraSnapshot, 0);
-        } else if (canvas3d?.camera && boundingSphere?.radius > 0) {
-          canvas3d.camera.focus(boundingSphere.center, boundingSphere.radius * INITIAL_STRUCTURE_FOCUS_FACTOR, 180);
+        } else if (canvas3d?.camera) {
+          viewer.plugin.managers.camera.reset?.(undefined, CAMERA_RESET_DURATION_MS, {
+            easing: 'cubic-out',
+            trajectory: 'linear',
+          });
         }
         hasLoadedStructureRef.current = true;
 
@@ -732,17 +811,22 @@ function VariantStructurePanel({
         }
         await applyTheme();
         if (!active || revision !== loadRevisionRef.current) return;
+        canvas3d?.requestResize?.();
+        canvas3d?.requestDraw?.();
+        await renderReady;
+        if (!active || revision !== loadRevisionRef.current) return;
         if (canvas3d?.camera) cameraSyncRef.current.cameras.set(panelId, canvas3d.camera);
         setViewerState('ready');
+        onStructureReadyRef.current?.(panelId, source.id, true);
         // While synced, the reference panel owns camera changes. Loading a new
         // mutant structure must not push its independently restored camera back
         // onto the reference panel.
-        const mutantLoadUsesReferenceCamera = cameraSyncEnabledRef.current && panelId === 'second';
         const syncSourceId = mutantLoadUsesReferenceCamera ? 'first' : panelId;
         requestCameraSyncAfterAction(cameraSyncRef, syncSourceId, mutantLoadUsesReferenceCamera ? 0 : CAMERA_SYNC_ACTION_GUARD_MS);
       } catch (error) {
         console.error(error);
         if (active && revision === loadRevisionRef.current) {
+          onStructureReadyRef.current?.(panelId, source.id, false);
           setViewerError('No se pudo interpretar la estructura molecular publicada.');
           setViewerState('error');
         }
@@ -753,9 +837,14 @@ function VariantStructurePanel({
     loadQueueRef.current = queuedLoad.catch(() => undefined);
     return () => {
       active = false;
+      renderController.abort();
       loadRevisionRef.current += 1;
+      suspendCameraSync(cameraSyncRef);
+      cameraSyncRef.current.cameras.delete(panelId);
+      cameraSyncRef.current.appliedSnapshots.delete(panelId);
+      onStructureReadyRef.current?.(panelId, source?.id ?? '', false);
     };
-  }, [panelId, source?.format, source?.id, source?.label, structureUrl, viewerReady]);
+  }, [loadRetry, panelId, source?.format, source?.id, source?.label, structureUrl, viewerReady]);
 
   useEffect(() => {
     cameraSyncRef.current.enabled = cameraSyncEnabled;
@@ -786,6 +875,11 @@ function VariantStructurePanel({
     }
     const items = structureSelectionItems(structureMapping.byCanonical, selectedPosition, selectedPosition);
     if (!items.length) {
+      // Keep the token pending while the mapping artifact is still loading.
+      if (structureMapping.byCanonical.size > 0) appliedSelectionTokenRef.current = selectionToken;
+      return;
+    }
+    if (selectionRevision === 0) {
       appliedSelectionTokenRef.current = selectionToken;
       return;
     }
@@ -852,7 +946,12 @@ function VariantStructurePanel({
           <StatePanel kind="empty" compact icon="box" title="Estructura no disponible" description="No hay un PDB o mmCIF publicado para esta vista." className="variant-viewport-state" />
         )}
         {viewerState === 'error' && (
-          <StatePanel kind="error" compact title="No se pudo cargar la estructura" description={viewerError} className="variant-viewport-state" />
+          <StatePanel kind="error" compact title="No se pudo cargar la estructura" description={viewerError} className="variant-viewport-state">
+            <button type="button" onClick={() => {
+              retryStructureUrl?.();
+              setLoadRetry((current) => current + 1);
+            }}>Reintentar</button>
+          </StatePanel>
         )}
         {Number.isInteger(selectedPosition) && (
           <div class="variant-structure-selection" aria-live="polite">
@@ -866,6 +965,13 @@ function VariantStructurePanel({
 }
 
 function SequenceStrip({ sequence, selectedPosition, variantsByPosition, onSelect }) {
+  const selectedResidueRef = useRef(null);
+
+  useEffect(() => {
+    if (!Number.isInteger(selectedPosition)) return;
+    selectedResidueRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
+  }, [selectedPosition]);
+
   return (
     <div class="variant-sequence-scroll" role="group" aria-label="Secuencia canónica; selecciona un residuo para consultar una variante" tabIndex={0}>
       <div class="variant-sequence-track">
@@ -877,6 +983,7 @@ function SequenceStrip({ sequence, selectedPosition, variantsByPosition, onSelec
           return (
             <button
               key={`${position}-${aa}`}
+              ref={selected ? selectedResidueRef : null}
               type="button"
               class={`variant-sequence-residue ${selected ? 'is-selected' : ''} ${hasVariant ? 'has-variant' : ''}`}
               onClick={() => onSelect(position)}
@@ -1045,13 +1152,14 @@ function AnnotationPanel({
   mutantSource,
   variantArtifacts,
 }) {
-  const residue = selectedResidue(sequence, selectedPosition);
+  const displayPosition = Number.isInteger(selectedPosition) ? selectedPosition : selectedVariant?.aa_position;
+  const residue = selectedResidue(sequence, displayPosition);
   const ddg = publishedDdg(variantRecord, annotation?.values, provenance);
   const replicas = replicateCount(replicateRecords, selectedVariant, variantRecord);
   const detailRows = variantDetailRows(variantRecord, annotation?.values, provenance);
   const selectedVariantLabel = selectedVariant ? variantLabel(selectedVariant) : 'Sin variante';
   const domain = publishedTextValue(annotation, ['uniprot_domain']);
-  const hasVariantSelection = Number.isInteger(selectedPosition);
+  const hasVariantSelection = Boolean(selectedVariant) || Number.isInteger(selectedPosition);
   const panelArtifacts = [referenceSource?.artifact, mutantSource?.artifact, ...variantArtifacts].filter(Boolean).filter((artifact, index, items) => (
     items.findIndex((candidate) => candidate.id === artifact.id) === index
   ));
@@ -1066,9 +1174,9 @@ function AnnotationPanel({
           <div class="variant-residue-letter">{residue.one}</div>
           <div class="variant-residue-name">
             <strong>{residue.code ? `${residue.code} - ${residue.name}` : residue.name}</strong>
-            <span>{hasVariantSelection ? `${residue.one}${selectedPosition}` : 'Selecciona una posición'}</span>
+            <span>{hasVariantSelection ? `${residue.one}${displayPosition}` : 'Selecciona una posición'}</span>
           </div>
-          <strong class="variant-residue-position">{hasVariantSelection ? selectedPosition : '—'}</strong>
+          <strong class="variant-residue-position">{hasVariantSelection ? displayPosition : '—'}</strong>
         </section>
 
         {isConcrete(domain) && (
@@ -1129,10 +1237,82 @@ async function getAllVariantAnnotations(runId) {
   return response;
 }
 
+async function listAllRunsForBaseProtein(baseProteinId) {
+  const runs = [];
+  let offset = 0;
+  while (true) {
+    const page = await listRuns(200, offset, { baseProteinId });
+    runs.push(...page);
+    if (page.length < 200) return runs;
+    offset += page.length;
+  }
+}
+
+function variantDdgStage(run) {
+  return run?.stages?.find((stage) => stage.id === 'variant_ddg') ?? null;
+}
+
+function variantDdgArtifact(run) {
+  return variantDdgStage(run)?.artifacts?.find((artifact) => artifact.artifact_type === 'variant_annotations') ?? null;
+}
+
+function ddgRunPriority(run) {
+  const stage = variantDdgStage(run);
+  return (variantDdgArtifact(run) ? 4 : 0)
+    + (stage?.status === 'success' || stage?.status === 'reused' ? 2 : 0)
+    + (run?.status === 'success' || run?.status === 'reused' ? 1 : 0);
+}
+
+function latestFirst(left, right) {
+  return String(right?.created_at ?? '').localeCompare(String(left?.created_at ?? ''));
+}
+
+function associatedDdgRuns(runs, baseProteinId, accession) {
+  const candidates = (runs ?? [])
+    .filter((candidate) => {
+      const tracking = candidate.external_tracking;
+      return tracking?.run_type === 'ddg'
+        && tracking.base_protein_id === baseProteinId
+        && String(tracking.accession ?? '').trim().toUpperCase() === accession
+        && variantKey({ variant_id: tracking.variant });
+    })
+    .sort((left, right) => ddgRunPriority(right) - ddgRunPriority(left) || latestFirst(left, right));
+  const uniqueRuns = [];
+  const seenVariants = new Set();
+  for (const candidate of candidates) {
+    const key = variantKey({ variant_id: candidate.external_tracking.variant });
+    if (seenVariants.has(key)) continue;
+    seenVariants.add(key);
+    uniqueRuns.push(candidate);
+  }
+  return uniqueRuns;
+}
+
+async function loadDdgRunDetails(runs) {
+  const results = new Array(runs.length);
+  let nextIndex = 0;
+  const readNext = async () => {
+    while (nextIndex < runs.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      const run = runs[index];
+      const details = variantDdgArtifact(run) ? await loadDdgVariantDetails(run, getArtifactBlob) : {};
+      results[index] = { run, details };
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(4, runs.length) }, readNext));
+  return results;
+}
+
 export default function VariantComparison({ proteinId }) {
   const runId = typeof window === 'undefined' ? '' : new URLSearchParams(window.location.search).get('run') ?? '';
   const [protein, setProtein] = useState(null);
   const [run, setRun] = useState(null);
+  const [relatedVariantRun, setRelatedVariantRun] = useState(null);
+  const [relatedRuns, setRelatedRuns] = useState([]);
+  const [associatedDdgResults, setAssociatedDdgResults] = useState([]);
+  const [relatedRunsState, setRelatedRunsState] = useState('idle');
+  const [relatedRunsError, setRelatedRunsError] = useState('');
   const [annotations, setAnnotations] = useState([]);
   const [artifactDetails, setArtifactDetails] = useState({});
   const [state, setState] = useState('loading');
@@ -1142,7 +1322,11 @@ export default function VariantComparison({ proteinId }) {
   const [selectionRevision, setSelectionRevision] = useState(0);
   const [firstSourceKey, setFirstSourceKey] = useState('');
   const [secondSourceKey, setSecondSourceKey] = useState('');
+  const [readyStructureSources, setReadyStructureSources] = useState({ first: '', second: '' });
   const [cameraSyncEnabled, setCameraSyncEnabled] = useState(true);
+  const isExternalWildType = run?.external_tracking?.run_type === 'base';
+  const baseProteinId = run?.external_tracking?.base_protein_id || run?.protein_id || '';
+  const accession = String(run?.external_tracking?.accession ?? run?.configuration?.scientific_accession ?? '').trim().toUpperCase();
   const selectionInitializedRef = useRef(false);
   const cameraSyncRef = useRef({
     enabled: true,
@@ -1176,7 +1360,7 @@ export default function VariantComparison({ proteinId }) {
         const [nextRun, annotationData] = await Promise.all([getRun(runId), getAllVariantAnnotations(runId)]);
         applyRun(nextRun);
         if (active) setAnnotations(annotationData.rows ?? []);
-        if (TERMINAL_RUN_STATUSES.has(nextRun.status)) {
+        if (runUpdatesFinished(nextRun)) {
           finished = true;
           controller?.abort();
         }
@@ -1189,11 +1373,11 @@ export default function VariantComparison({ proteinId }) {
       reconnectAttempts += 1;
       timer = window.setTimeout(async () => {
         await refreshSnapshot();
-        if (active && !finished && !TERMINAL_RUN_STATUSES.has(latestRun?.status)) void connectStream();
+        if (active && !finished && !runUpdatesFinished(latestRun)) void connectStream();
       }, delay);
     };
     const connectStream = async () => {
-      if (!active || finished || !runId || TERMINAL_RUN_STATUSES.has(latestRun?.status)) return;
+      if (!active || finished || !runId || runUpdatesFinished(latestRun)) return;
       controller?.abort();
       controller = new AbortController();
       try {
@@ -1205,7 +1389,7 @@ export default function VariantComparison({ proteinId }) {
             void getAllVariantAnnotations(runId).then((data) => {
               if (active) setAnnotations(data.rows ?? []);
             }).catch(() => undefined);
-            if (TERMINAL_RUN_STATUSES.has(snapshot.status)) {
+            if (runUpdatesFinished(snapshot)) {
               finished = true;
               controller.abort();
             }
@@ -1227,17 +1411,33 @@ export default function VariantComparison({ proteinId }) {
         return;
       }
       try {
-        const [proteinData, runData, annotationData] = await Promise.all([
-          getProtein(proteinId),
-          getRun(runId),
+        const runData = await getRun(runId);
+        const sequenceProteinId = runData.external_tracking?.run_type === 'base'
+          ? runData.external_tracking.base_protein_id || proteinId
+          : proteinId;
+        const [proteinData, annotationData] = await Promise.all([
+          getProtein(sequenceProteinId),
           getAllVariantAnnotations(runId),
         ]);
         if (!active) return;
+        let matchingRun = null;
+        const runHasStructure = allArtifacts(runData).some(isConcreteStructureArtifact);
+        const tracking = runData.external_tracking;
+        if (!runHasStructure && tracking?.run_type === 'ddg' && tracking.base_protein_id) {
+          try {
+            const relatedRuns = await listRuns(200, 0, { baseProteinId: tracking.base_protein_id });
+            matchingRun = matchingMutantRun(relatedRuns, tracking);
+          } catch {
+            // The DDG result remains usable when its related-run lookup is unavailable.
+          }
+        }
+        if (!active) return;
         setProtein(proteinData);
         setAnnotations(annotationData.rows ?? []);
+        setRelatedVariantRun(matchingRun);
         applyRun(runData);
         setState('ready');
-        if (!TERMINAL_RUN_STATUSES.has(runData.status)) void connectStream();
+        if (!runUpdatesFinished(runData)) void connectStream();
         else finished = true;
       } catch (requestError) {
         if (!active) return;
@@ -1257,6 +1457,37 @@ export default function VariantComparison({ proteinId }) {
 
   useEffect(() => {
     let active = true;
+    setRelatedRuns([]);
+    setAssociatedDdgResults([]);
+    setRelatedRunsError('');
+    if (!isExternalWildType || !baseProteinId) {
+      setRelatedRunsState('idle');
+      return () => { active = false; };
+    }
+
+    setRelatedRunsState('loading');
+    const load = async () => {
+      try {
+        const nextRelatedRuns = await listAllRunsForBaseProtein(baseProteinId);
+        if (!active) return;
+        const ddgRuns = associatedDdgRuns(nextRelatedRuns, baseProteinId, accession);
+        setRelatedRuns(nextRelatedRuns);
+        const nextResults = await loadDdgRunDetails(ddgRuns);
+        if (!active) return;
+        setAssociatedDdgResults(nextResults);
+        setRelatedRunsState('ready');
+      } catch (requestError) {
+        if (!active) return;
+        setRelatedRunsError(userErrorMessage(requestError, 'No se pudieron cargar los resultados publicados de las variantes.'));
+        setRelatedRunsState('error');
+      }
+    };
+    void load();
+    return () => { active = false; };
+  }, [accession, baseProteinId, isExternalWildType]);
+
+  useEffect(() => {
+    let active = true;
     setArtifactDetails({});
     if (!run) return () => { active = false; };
     loadAnalysisArtifactDetails(run, 'ddg', getArtifactBlob)
@@ -1270,21 +1501,58 @@ export default function VariantComparison({ proteinId }) {
   }, [run?.id, run?.stages?.map((stage) => (stage.artifacts ?? []).map((artifact) => artifact.id).join(',')).join(':')]);
 
   const annotationRows = useMemo(() => mergeAnnotationRows(annotations), [annotations]);
-  const detailVariants = artifactDetails.variant_annotations ?? [];
+  const associatedVariantRecords = useMemo(
+    () => [
+      ...(artifactDetails.variant_annotations ?? []),
+      ...associatedDdgResults.flatMap((result) => result.details.variant_annotations ?? []),
+    ],
+    [artifactDetails.variant_annotations, associatedDdgResults],
+  );
+  const detailVariants = isExternalWildType ? associatedVariantRecords : artifactDetails.variant_annotations ?? [];
   const requestedVariants = useMemo(() => [
     ...(run?.requested_variants ?? []),
     ...(run?.configuration?.normalized_variants ?? []),
     ...(artifactDetails.variant_set ?? []),
-  ], [artifactDetails.variant_set, run?.configuration?.normalized_variants, run?.requested_variants]);
+    ...(isExternalWildType ? associatedDdgResults.map(({ run: ddgRun }) => ({
+      variant_id: ddgRun.external_tracking?.variant,
+    })) : []),
+  ], [artifactDetails.variant_set, associatedDdgResults, isExternalWildType, run?.configuration?.normalized_variants, run?.requested_variants]);
   const variants = useMemo(() => mergePublishedVariants(requestedVariants, detailVariants), [detailVariants, requestedVariants]);
+  const initialSelection = initialVariantSelection(variants, selectedVariantKey, selectionInitializedRef.current);
+  const activeVariantKey = initialSelection ? variantKey(initialSelection) : '';
+  const activeSelectedPosition = selectedPosition ?? initialSelection?.aa_position ?? null;
+  const variantSelectionOptions = [
+    { value: '', label: 'Selecciona una variante' },
+    ...variants.map((variant) => ({
+      value: variantKey(variant),
+      label: variantLabel(variant),
+    })),
+  ];
   const variantsByPosition = useMemo(() => indexVariantsByPosition(variants), [variants]);
-  const ddgStage = (run?.stages ?? []).find((stage) => stage.id === 'variant_ddg') ?? null;
-  const variantRecord = useMemo(() => variantRecordFor(detailVariants, selectedVariantKey), [detailVariants, selectedVariantKey]);
-  const selectedVariant = useMemo(() => {
-    if (!selectedVariantKey) return null;
-    return variants.find((variant) => variantKey(variant) === selectedVariantKey) ?? null;
-  }, [selectedVariantKey, variants]);
-  const structureSourceSet = useMemo(() => structureSources(run, variants), [run, variants]);
+  const selectedVariant = initialSelection;
+  const selectedDdgResult = isExternalWildType
+    ? associatedDdgResults.find(({ run: ddgRun }) => variantKey({ variant_id: ddgRun.external_tracking?.variant }) === activeVariantKey) ?? null
+    : null;
+  const activeDdgRun = selectedDdgResult?.run ?? run;
+  const activeDdgDetails = selectedDdgResult?.details ?? artifactDetails;
+  const activeDetailVariants = activeDdgDetails.variant_annotations ?? detailVariants;
+  const ddgStage = variantDdgStage(activeDdgRun);
+  const variantRecord = useMemo(
+    () => variantRecordFor(activeDetailVariants, activeVariantKey) ?? variantRecordFor(detailVariants, activeVariantKey),
+    [activeDetailVariants, activeVariantKey, detailVariants],
+  );
+  const activeMutantRun = isExternalWildType && selectedDdgResult
+    ? matchingMutantRun(relatedRuns, selectedDdgResult.run.external_tracking)
+    : relatedVariantRun;
+  const structureSourceSet = useMemo(() => {
+    const sources = structureSources(run, variants);
+    const fallbackSource = mutantRunStructureSource(activeMutantRun, variants);
+    if (isExternalWildType) {
+      return fallbackSource ? { ...sources, variants: [...sources.variants, fallbackSource] } : sources;
+    }
+    if (sources.reference || sources.variants.length || sources.variantDirectory) return sources;
+    return fallbackSource ? { ...sources, variants: [fallbackSource] } : sources;
+  }, [activeMutantRun, isExternalWildType, run, variants]);
   const referenceSource = structureSourceSet.reference;
   const archiveVariantSources = useVariantDirectorySources(structureSourceSet.variantDirectory, variants);
   const variantSources = useMemo(() => {
@@ -1311,10 +1579,10 @@ export default function VariantComparison({ proteinId }) {
     ?? referenceSource
     ?? allStructureSources[0]
     ?? null;
-  const selectedVariantSource = variantSources.find((source) => source.variantKey === selectedVariantKey) ?? null;
+  const selectedVariantSource = variantSources.find((source) => source.variantKey === activeVariantKey) ?? null;
   const secondSource = allStructureSources.find((source) => source.key === secondSourceKey)
     ?? selectedVariantSource
-    ?? (selectedVariantKey ? null : variantSources[0] ?? null);
+    ?? (activeVariantKey ? null : variantSources[0] ?? null);
   const firstSourceOptions = useMemo(
     () => distinctStructureOptions(structureSourceOptions, firstSource?.key, secondSource?.key),
     [firstSource?.key, secondSource?.key, structureSourceOptions],
@@ -1326,10 +1594,21 @@ export default function VariantComparison({ proteinId }) {
   const hasPairedStructures = canCompareStructureSources(firstSource, secondSource);
   const firstStructure = useStructureUrl(firstSource);
   const secondStructure = useStructureUrl(secondSource);
-  const structureMapping = useMemo(() => structureMappingMaps(run?.configuration?.structure_mapping ?? {}), [run?.configuration?.structure_mapping]);
+  const cameraSyncReady = areStructureSourcesReady(readyStructureSources, firstSource, secondSource);
+  const markStructureReady = (panelId, sourceId, ready) => {
+    setReadyStructureSources((current) => {
+      const nextSourceId = ready ? String(sourceId ?? '') : '';
+      if (current[panelId] === nextSourceId) return current;
+      return { ...current, [panelId]: nextSourceId };
+    });
+  };
+  const structureMapping = useMemo(() => structureMappingMaps(structureMappingFromArtifactRows(
+    run?.configuration?.structure_mapping,
+    artifactDetails?.structure_mapping,
+  )), [artifactDetails?.structure_mapping, run?.configuration?.structure_mapping]);
   const selectedPositionAnnotation = selectedPosition ? annotationRows.get(selectedPosition) : null;
   const selectedRecord = selectedVariant ? variantRecord ?? variantRecordFor(detailVariants, selectedVariant) : null;
-  const provenance = artifactDetails.provenance?.[0] ?? artifactDetails.rosetta_metadata?.[0] ?? null;
+  const provenance = activeDdgDetails.provenance?.[0] ?? activeDdgDetails.rosetta_metadata?.[0] ?? null;
   const variantArtifacts = useMemo(
     () => (ddgStage?.artifacts ?? []).filter(isScientistVisibleVariantArtifact),
     [ddgStage],
@@ -1344,7 +1623,7 @@ export default function VariantComparison({ proteinId }) {
   }, [referenceSource?.key, structureSourceKeys, variantSources]);
 
   useEffect(() => {
-    if (!selectedVariantKey) return;
+    if (!activeVariantKey) return;
     const nextSourceKey = selectedVariantSource?.key ?? '';
     if (nextSourceKey && nextSourceKey === firstSource?.key) {
       const alternative = allStructureSources.find((source) => source.key !== firstSource.key);
@@ -1352,7 +1631,7 @@ export default function VariantComparison({ proteinId }) {
       return;
     }
     setSecondSourceKey(nextSourceKey);
-  }, [allStructureSources, firstSource?.key, selectedVariantKey, selectedVariantSource?.key]);
+  }, [activeVariantKey, allStructureSources, firstSource?.key, selectedVariantSource?.key]);
 
   useEffect(() => {
     if (!firstSource?.key || !secondSource?.key || firstSource.key !== secondSource.key) return;
@@ -1362,11 +1641,13 @@ export default function VariantComparison({ proteinId }) {
 
   useEffect(() => {
     selectionInitializedRef.current = false;
+    setRelatedVariantRun(null);
     setSelectedVariantKey('');
     setSelectedPosition(null);
     setSelectionRevision(0);
     setFirstSourceKey('');
     setSecondSourceKey('');
+    setReadyStructureSources({ first: '', second: '' });
   }, [proteinId, runId]);
 
   useEffect(() => {
@@ -1375,12 +1656,27 @@ export default function VariantComparison({ proteinId }) {
     const firstVariant = variants[0];
     setSelectedVariantKey(variantKey(firstVariant));
     setSelectedPosition(firstVariant.aa_position);
+    setSelectionRevision((current) => current === 0 ? 1 : current);
   }, [variants]);
 
-  const selectPosition = (position) => {
-    const isDeselecting = selectedPosition === position;
+  const selectVariant = (key) => {
+    selectionInitializedRef.current = true;
     setSelectionRevision((current) => current + 1);
-    setSelectedPosition((current) => (current === position ? null : position));
+    if (!key) {
+      setSelectedVariantKey('');
+      setSelectedPosition(null);
+      return;
+    }
+    const variant = variants.find((item) => variantKey(item) === key);
+    if (!variant) return;
+    setSelectedVariantKey(key);
+    setSelectedPosition(variant.aa_position);
+  };
+  const selectPosition = (position) => {
+    selectionInitializedRef.current = true;
+    const isDeselecting = activeSelectedPosition === position;
+    setSelectionRevision((current) => current + 1);
+    setSelectedPosition(isDeselecting ? null : position);
     if (isDeselecting) {
       setSelectedVariantKey('');
       return;
@@ -1389,6 +1685,7 @@ export default function VariantComparison({ proteinId }) {
     setSelectedVariantKey(variant ? variantKey(variant) : '');
   };
   const selectSource = (key, setSourceKey, otherSource) => {
+    selectionInitializedRef.current = true;
     if (key === otherSource?.key) return;
     const source = allStructureSources.find((item) => item.key === key);
     if (source?.kind === 'variant' && source.variantKey) {
@@ -1407,11 +1704,14 @@ export default function VariantComparison({ proteinId }) {
     selectSource(key, setSecondSourceKey, firstSource);
   };
 
-  if (state === 'loading') {
+  if (state === 'loading' || (isExternalWildType && ['idle', 'loading'].includes(relatedRunsState))) {
     return <section class="variant-page"><StatePanel kind="loading" fill title="Cargando variantes" description="Consultando la corrida y sus resultados publicados." /></section>;
   }
   if (state === 'error') {
     return <section class="variant-page"><StatePanel kind="error" fill title="No se pudo cargar la vista de variantes" description={error} /></section>;
+  }
+  if (isExternalWildType && relatedRunsState === 'error') {
+    return <section class="variant-page"><StatePanel kind="error" fill title="No se pudieron cargar las variantes" description={relatedRunsError} /></section>;
   }
 
   const hasPublishedVariantRun = variants.length > 0;
@@ -1423,14 +1723,24 @@ export default function VariantComparison({ proteinId }) {
     );
   }
 
-  const annotationForPanel = selectedVariant?.aa_position ? annotationRows.get(selectedVariant.aa_position) : selectedPositionAnnotation;
-  const activeVariant = selectedVariant ?? (selectedPosition ? variants.find((variant) => variant.aa_position === selectedPosition) : null);
+  const annotationForPanel = activeSelectedPosition ? annotationRows.get(activeSelectedPosition) : selectedPositionAnnotation;
+  const activeVariant = selectedVariant ?? (activeSelectedPosition ? variants.find((variant) => variant.aa_position === activeSelectedPosition) : null);
   return (
-    <section class="variant-page" aria-label="ΔΔG de variante">
+    <section class="variant-page" aria-label={isExternalWildType ? 'ΔΔG de variantes' : 'ΔΔG de variante'}>
       <div class="variant-chain-card">
+        <div class="variant-selection-row">
+          <span class="variant-selection-label">Variante evaluada</span>
+          <VariantSelect
+            id="variant-evaluation"
+            label="Variante evaluada"
+            options={variantSelectionOptions}
+            value={activeVariantKey}
+            onChange={selectVariant}
+          />
+        </div>
         <SequenceStrip
           sequence={protein?.sequence}
-          selectedPosition={selectedPosition}
+          selectedPosition={activeSelectedPosition}
           variantsByPosition={variantsByPosition}
           onSelect={selectPosition}
         />
@@ -1450,11 +1760,13 @@ export default function VariantComparison({ proteinId }) {
               onSourceChange={selectFirstSource}
               structureUrl={firstStructure.url}
               structureState={firstStructure.state}
+              retryStructureUrl={firstStructure.retry}
               structureMapping={structureMapping}
-              selectedPosition={selectedPosition}
+              selectedPosition={activeSelectedPosition}
               selectionRevision={selectionRevision}
               highlightColor={firstSource.kind === 'variant' ? MUTANT_HIGHLIGHT_COLOR : REFERENCE_HIGHLIGHT_COLOR}
               onPick={selectPosition}
+              onStructureReady={markStructureReady}
               cameraSyncRef={cameraSyncRef}
               cameraSyncEnabled={cameraSyncEnabled && hasPairedStructures}
             />
@@ -1469,11 +1781,13 @@ export default function VariantComparison({ proteinId }) {
               onSourceChange={selectSecondSource}
               structureUrl={secondStructure.url}
               structureState={secondStructure.state}
+              retryStructureUrl={secondStructure.retry}
               structureMapping={structureMapping}
-              selectedPosition={selectedPosition}
+              selectedPosition={activeSelectedPosition}
               selectionRevision={selectionRevision}
               highlightColor={secondSource.kind === 'variant' ? MUTANT_HIGHLIGHT_COLOR : REFERENCE_HIGHLIGHT_COLOR}
               onPick={selectPosition}
+              onStructureReady={markStructureReady}
               cameraSyncRef={cameraSyncRef}
               cameraSyncEnabled={cameraSyncEnabled}
             />
@@ -1481,9 +1795,15 @@ export default function VariantComparison({ proteinId }) {
           {hasPairedStructures && firstSource && secondSource && (
             <button
               type="button"
-              class={`variant-camera-sync ${cameraSyncEnabled ? 'is-active' : ''}`}
-              aria-label={cameraSyncEnabled ? 'Desactivar sincronización de cámaras' : 'Activar sincronización de cámaras'}
+              class={`variant-camera-sync ${cameraSyncEnabled && cameraSyncReady ? 'is-active' : ''} ${!cameraSyncReady ? 'is-pending' : ''}`.trim()}
+              aria-label={!cameraSyncReady
+                ? 'Sincronización pendiente: espera a que carguen ambos modelos'
+                : cameraSyncEnabled ? 'Desactivar sincronización de cámaras' : 'Activar sincronización de cámaras'}
               aria-pressed={cameraSyncEnabled}
+              disabled={!cameraSyncReady}
+              title={!cameraSyncReady
+                ? 'La sincronización se activará cuando ambos modelos terminen de cargar.'
+                : cameraSyncEnabled ? 'Sincronización de cámaras activa' : 'Sincronización de cámaras desactivada'}
               onClick={() => setCameraSyncEnabled((current) => !current)}
             >
               ⇄
@@ -1496,14 +1816,16 @@ export default function VariantComparison({ proteinId }) {
 
         <AnnotationPanel
           sequence={protein?.sequence}
-          selectedPosition={selectedPosition}
+          selectedPosition={activeSelectedPosition}
           selectedVariant={activeVariant}
           annotation={annotationForPanel}
           variantRecord={selectedRecord}
-          replicateRecords={artifactDetails.ddg_replicates ?? []}
+          replicateRecords={activeDdgDetails.ddg_replicates ?? []}
           provenance={provenance}
           referenceSource={referenceSource}
-          mutantSource={secondSource?.kind === 'variant' ? secondSource : null}
+          mutantSource={secondSource?.kind === 'variant'
+            ? secondSource
+            : firstSource?.kind === 'variant' ? firstSource : null}
           variantArtifacts={variantArtifacts}
         />
       </div>

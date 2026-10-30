@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   membraneStatus,
+  hasPublishedTopologyData,
   normalizeTopologyClass,
   structureSelectionItems,
   topologyClassProbability,
@@ -36,6 +37,24 @@ test('groups contiguous regions without joining separated runs', () => {
     { topologyClass: 'outside', start: 5, end: 5, count: 1 },
   ]);
   assert.deepEqual([...topologyCounts(rows)], [['signal_peptide', 2], ['outside', 2]]);
+});
+
+test('unknown residues are not presented as predicted topology regions', () => {
+  assert.deepEqual(topologyRegions([
+    { position: 1, topologyClass: 'unknown' },
+    { position: 2, topologyClass: 'unknown' },
+    { position: 3, topologyClass: 'outside' },
+    { position: 4, topologyClass: 'unknown' },
+  ]), [{ topologyClass: 'outside', start: 3, end: 3, count: 1 }]);
+});
+
+test('detects topology only when a published annotation or TMbed artifact has a known class', () => {
+  assert.equal(hasPublishedTopologyData([], []), false);
+  assert.equal(hasPublishedTopologyData([], [{ tmbed_label: 'unknown' }]), false);
+  assert.equal(hasPublishedTopologyData([
+    { values: { tmbed_topology: 'outside' } },
+  ], []), true);
+  assert.equal(hasPublishedTopologyData([], [{ tmbed_topology: 'tm_alpha' }]), true);
 });
 
 test('maps a selected topology region to every mapped structure residue', () => {

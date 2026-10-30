@@ -47,7 +47,8 @@ const {
         const run = await getRun(runId);
         const currentRunId = new URLSearchParams(window.location.search).get('run');
         if (currentRunId !== runId) return;
-        const hidden = !hasConfiguredVariants(run);
+        const isExternalWildType = run.external_tracking?.run_type === 'base';
+        const hidden = !hasConfiguredVariants(run) && !isExternalWildType;
         link.hidden = hidden;
         link.toggleAttribute('aria-hidden', hidden);
       } catch {

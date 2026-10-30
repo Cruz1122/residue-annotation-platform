@@ -30,6 +30,33 @@ export function canCompareStructureSources(firstSource, secondSource) {
   );
 }
 
+export function areStructureSourcesReady(readySourceIds, firstSource, secondSource) {
+  return Boolean(
+    firstSource?.id
+      && secondSource?.id
+      && firstSource.id !== secondSource.id
+      && readySourceIds?.first === firstSource.id
+      && readySourceIds?.second === secondSource.id,
+  );
+}
+
+export function matchingMutantRun(runs, ddgTracking) {
+  if (
+    ddgTracking?.run_type !== 'ddg'
+      || !ddgTracking.base_protein_id
+      || !ddgTracking.accession
+      || !ddgTracking.variant
+  ) return null;
+
+  return (runs ?? []).find((run) => {
+    const tracking = run?.external_tracking;
+    return tracking?.run_type === 'mutant'
+      && tracking.base_protein_id === ddgTracking.base_protein_id
+      && tracking.accession === ddgTracking.accession
+      && tracking.variant === ddgTracking.variant;
+  }) ?? null;
+}
+
 function decode(bytes) {
   return textDecoder.decode(bytes).replace(/\0+$/, '');
 }

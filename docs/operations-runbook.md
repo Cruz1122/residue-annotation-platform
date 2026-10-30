@@ -180,9 +180,15 @@ docker compose config --services
 docker compose -f compose.yml config
 docker compose up -d db
 docker compose run --rm migrate
-docker compose --profile vpn up -d backend worker-vpn frontend
+docker compose --profile vpn up -d backend worker-vpn-snapshots worker-vpn worker-vpn-executor frontend
 curl --fail-with-body http://localhost:8742/api/v1/health/db
 ```
+
+`worker-vpn-snapshots` refreshes remote stage state without waiting for artifact
+downloads. `worker-vpn` reads and publishes verified MN5 results in read-only
+mode; `worker-vpn-executor` handles ordinary application runs. Deploy the two
+tracking workers together so live stage progress continues while large PDBs
+and other result files are being published.
 
 For an approved native deployment on a MareNostrum host, use the native
 profile instead of the VPN worker:
@@ -227,7 +233,11 @@ secret-like names, binary files, special files, symlinks, traversal, backslash,
 percent-encoded, control-character, and duplicated-separator paths are
 rejected before any remote file is opened. Directory listings are non-recursive
 and bounded by `MN5_MAX_ENTRIES`; previews are bounded by
-`MN5_MAX_PREVIEW_BYTES`.
+`MN5_MAX_PREVIEW_BYTES`. The VPN campaign tracker uses a bounded 2 MiB cap for
+verified small result files, including PDB and mmCIF structures; tune it through
+`MN5_EXTERNAL_ARTIFACT_MAX_BYTES` only when a reviewed manifest needs a larger
+file. The tracker processes 16 executions per pass so artifact downloads do not
+block progress snapshots for the entire imported campaign.
 
 For Windows development, validate the host VPN route and whether Docker/WSL2
 can reach the approved SSH endpoint before enabling the SSH Compose overlay.

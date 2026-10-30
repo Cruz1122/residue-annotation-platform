@@ -29,6 +29,27 @@ def _parser() -> argparse.ArgumentParser:
     mn5_import.add_argument("--source-root", required=True, type=Path)
     mn5_import.add_argument("--direct-root", required=True, type=Path)
     mn5_import.add_argument("--email", required=True, help="owner account for imported runs")
+    campaign = commands.add_parser(
+        "import-mn5-campaign",
+        help="preview or import the verified MN5 variant campaign",
+    )
+    campaign.add_argument("--email", required=True, help="target account email")
+    campaign.add_argument("--since", default="20261025", help="earliest run date (YYYYMMDD)")
+    campaign.add_argument(
+        "--apply", action="store_true", help="persist after inventory reconciliation"
+    )
+    campaign.add_argument(
+        "--base-lineages-only",
+        action="store_true",
+        help="inventory and import only reference-sequence runs in the configured lineages",
+    )
+    campaign.add_argument(
+        "--remote-run-id",
+        action="append",
+        default=[],
+        help="restrict a base-lineage preview to this exact MN5 run ID (repeatable)",
+    )
+    campaign.add_argument("--inventory-file", type=Path, default=None)
     return parser
 
 
@@ -38,6 +59,11 @@ def main(
     session_factory: SessionFactory | None = None,
 ) -> int:
     args = _parser().parse_args(argv)
+    if args.command == "import-mn5-campaign":
+        from app.features.runs.mn5_campaign_import import main as campaign_main
+
+        original_argv = list(argv) if argv is not None else sys.argv[1:]
+        return campaign_main(original_argv[1:])
     factory = session_factory or SessionLocal
     with factory() as session:
         if args.command == "import-mn5":

@@ -8,6 +8,7 @@ import {
   parseAnalysisArtifact,
   presentationRowsFromArtifacts,
   recordsForPosition,
+  structureMappingFromArtifactRows,
   summarizeArtifactRecord,
 } from './analysis-artifacts.js';
 
@@ -25,6 +26,80 @@ test('reads common JSON result envelopes and locates canonical positions', () =>
     evolution_per_residue: parseAnalysisArtifact(JSON.stringify({ rows: [{ aa_position: 7, reliable: true }] }), 'application/json'),
   };
   assert.deepEqual(recordsForPosition(details, 'evolution_per_residue', 7), [{ aa_position: 7, reliable: true }]);
+});
+
+test('normalizes the published MN5 structure mapping for structure views', () => {
+  const records = parseAnalysisArtifact(
+    'aa_position\taa_ref\tchain\tresseq\ticode\tpdb_aa\tmapping_status\n12\tG\tB\t110\tNA\tG\texact\n13\tL\tB\t111\tA\tL\texact\n',
+    'text/tab-separated-values',
+  );
+  assert.deepEqual(structureMappingFromArtifactRows({}, records).canonical_to_structure, [
+    { canonical_position: 12, aa: 'G', chain: 'B', residue_number: 110, insertion_code: '', mapping_status: 'exact' },
+    { canonical_position: 13, aa: 'L', chain: 'B', residue_number: 111, insertion_code: 'A', mapping_status: 'exact' },
+  ]);
+  assert.deepEqual(structureMappingFromArtifactRows({ canonical_to_structure: [{ canonical_position: 1 }] }, records), {
+    canonical_to_structure: [{ canonical_position: 1 }],
+  });
+});
+
+test('loads structure mappings only from the relaxation stage', async () => {
+  const requested = [];
+  const run = {
+    stages: [
+      { id: 'structure_modeling', artifacts: [{ id: 'wrong-map', artifact_type: 'structure_mapping', size: 128, media_type: 'text/tab-separated-values' }] },
+      { id: 'protein_relaxation_energy', artifacts: [{ id: 'published-map', artifact_type: 'structure_mapping', size: 128, media_type: 'text/tab-separated-values' }] },
+    ],
+  };
+  const details = await loadAnalysisArtifactDetails(run, 'topology', async (id) => {
+    requested.push(id);
+    return { text: async () => 'aa_position\taa_ref\tchain\tresseq\ticode\tpdb_aa\tmapping_status\n1\tM\tA\t1\tNA\tM\texact\n' };
+  });
+  assert.deepEqual(requested, ['published-map']);
+  assert.equal(details.structure_mapping[0].aa_position, '1');
+});
+
+test('loads the relaxation structure mapping in the scientific evidence view', async () => {
+  const requested = [];
+  const run = {
+    stages: [
+      { id: 'protein_relaxation_energy', artifacts: [{ id: 'published-map', artifact_type: 'structure_mapping', size: 128, media_type: 'text/tab-separated-values' }] },
+      { id: 'uniprot_features', artifacts: [{ id: 'published-features', artifact_type: 'functional_features_long', size: 128, media_type: 'text/tab-separated-values' }] },
+    ],
+  };
+  const details = await loadAnalysisArtifactDetails(run, 'scientific-evidence', async (id) => {
+    requested.push(id);
+    const content = id === 'published-map'
+      ? 'aa_position\taa_ref\tchain\tresseq\ticode\tmapping_status\n1\tM\tA\t1\tNA\texact\n'
+      : 'aa_position\taa_ref\tfeature_type\n1\tM\tSignal peptide\n';
+    return new Blob([content], { type: 'text/tab-separated-values' });
+  });
+
+  assert.deepEqual(requested.sort(), ['published-features', 'published-map']);
+  assert.equal(details.structure_mapping[0].aa_position, '1');
+  assert.equal(details.functional_features_long[0].feature_type, 'Signal peptide');
+});
+
+test('loads protein identity metadata only from the identity stage', async () => {
+  const requested = [];
+  const run = {
+    stages: [
+      {
+        id: 'protein_identity',
+        artifacts: [{ id: 'identity', artifact_type: 'protein_identity', size: 600, media_type: 'text/tab-separated-values' }],
+      },
+      {
+        id: 'variant_predictors',
+        artifacts: [{ id: 'other-identity', artifact_type: 'protein_identity', size: 600, media_type: 'text/tab-separated-values' }],
+      },
+    ],
+  };
+  const details = await loadAnalysisArtifactDetails(run, 'identity', async (id) => {
+    requested.push(id);
+    return new Blob(['protein_id\tgene_symbol\tuniprot_accession\nP22309\tUGT1A1\tP22309\n']);
+  });
+
+  assert.deepEqual(requested, ['identity']);
+  assert.deepEqual(details.protein_identity, [{ protein_id: 'P22309', gene_symbol: 'UGT1A1', uniprot_accession: 'P22309' }]);
 });
 
 test('projects numeric ddg values by canonical position with native row units', () => {

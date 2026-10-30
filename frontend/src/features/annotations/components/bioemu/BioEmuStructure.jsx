@@ -12,6 +12,7 @@ import {
 import { loadBioEmuTrajectory } from '@features/annotations/bioemu-trajectory.js';
 import { followBioEmuCameraTarget, updateBioEmuFrame } from '@features/annotations/bioemu-structure-state.js';
 import { getZoomOptimizedCanvas3dProps } from '@features/annotations/zoom-rendering.js';
+import { waitForCanvasDraw } from '@features/annotations/components/shared/canvas-render-readiness.js';
 
 const FOCUS_OPTIONS = { extraRadius: 4, durationMs: 180, easing: 'cubic-out', trajectory: 'linear' };
 
@@ -75,6 +76,7 @@ export default function BioEmuStructure({
     let chainResidueMap = new Map();
     let applyFrame = null;
     let restoreTrajectoryData = null;
+    const renderController = new AbortController();
 
     const resolvePositionFromLoci = async (loci, structureLib) => {
       if (!structureLib.StructureElement.Loci.is(loci)) return;
@@ -120,6 +122,7 @@ export default function BioEmuStructure({
 
     async function initialize() {
       try {
+        setViewerState(xtcBytes ? 'loading-trajectory' : 'loading-topology');
         const [{ Viewer }, loadedStructureLib, modelApi] = await Promise.all([
           import('molstar/lib/apps/viewer/app'),
           import('molstar/lib/mol-model/structure'),
@@ -157,6 +160,8 @@ export default function BioEmuStructure({
 
         let trajectoryError = '';
         let trajectoryFailureState = null;
+        let finalViewerState = 'ready';
+        let trajectoryReadyPayload = null;
         if (xtcBytes) {
           setViewerState('loading-trajectory');
           try {
@@ -179,7 +184,7 @@ export default function BioEmuStructure({
               if (disposed) return;
               await loadStaticTopology();
               if (disposed) return;
-              setViewerState('incompatible');
+              finalViewerState = 'incompatible';
             } else {
               const modelRef = loaded.preset?.model?.ref;
               if (!modelRef) throw new Error('No se encontró el modelo de índice de trayectoria en el estado de Mol*.');
@@ -242,12 +247,11 @@ export default function BioEmuStructure({
                   throw error;
                 }
               };
-              onReadyRef.current?.({
+              trajectoryReadyPayload = {
                 frameCount,
                 applyFrame,
                 maxInterpolationSteps: interpolatedTrajectory.maxSubsteps,
-              });
-              setViewerState('ready');
+              };
             }
           } catch (error) {
             if (disposed) return;
@@ -260,7 +264,7 @@ export default function BioEmuStructure({
             if (disposed) return;
             await loadStaticTopology();
             if (disposed) return;
-            setViewerState(trajectoryIssue.state === 'incompatible' ? 'incompatible' : 'trajectory-error');
+            finalViewerState = trajectoryIssue.state === 'incompatible' ? 'incompatible' : 'trajectory-error';
           }
         } else {
           setViewerState('loading-topology');
@@ -268,14 +272,14 @@ export default function BioEmuStructure({
           if (disposed) return;
           if (compatibilityError) {
             setViewerError(compatibilityError);
-            setViewerState('incompatible');
+            finalViewerState = 'incompatible';
             onIssueRef.current?.({ state: 'incompatible', message: compatibilityError });
           } else if (externalIssueRef.current?.state === 'error') {
             setViewerError(externalIssueRef.current.message);
-            setViewerState('trajectory-error');
+            finalViewerState = 'trajectory-error';
             onIssueRef.current?.(externalIssueRef.current);
           } else {
-            setViewerState('trajectory-missing');
+            finalViewerState = 'trajectory-missing';
             onIssueRef.current?.({ state: 'trajectory-missing', message: '' });
           }
         }
@@ -291,7 +295,12 @@ export default function BioEmuStructure({
         viewer.plugin.canvas3d?.requestResize?.();
         if (Number.isInteger(selectionRef.current)) selectPosition(selectionRef.current, true);
         else viewer.plugin.managers.camera.reset?.(undefined, 180, FOCUS_OPTIONS);
-        if (trajectoryError) setViewerState(trajectoryFailureState === 'error' ? 'trajectory-error' : 'incompatible');
+        await waitForCanvasDraw(viewer.plugin.canvas3d, { signal: renderController.signal });
+        if (disposed) return;
+        if (trajectoryReadyPayload) onReadyRef.current?.(trajectoryReadyPayload);
+        setViewerState(trajectoryError
+          ? (trajectoryFailureState === 'error' ? 'trajectory-error' : 'incompatible')
+          : finalViewerState);
       } catch (error) {
         if (disposed) return;
         const message = 'No se pudo cargar la estructura de referencia en el visor molecular.';
@@ -304,6 +313,7 @@ export default function BioEmuStructure({
     void initialize();
     return () => {
       disposed = true;
+      renderController.abort();
       clickSubscription?.unsubscribe?.();
       restoreTrajectoryData?.();
       try { viewer?.dispose?.(); } catch { /* Mol* may already have released its WebGL context. */ }

@@ -36,7 +36,12 @@ export function runPhase(run) {
     return phase('Corrida completada', 'Los resultados publicados están disponibles.', 'success');
   }
   if (run?.status === 'running' || stages.some((stage) => stage.status === 'running')) {
-    return phase('Corrida en ejecución', 'Hay stages activos en el pipeline.', 'running');
+    const activeStages = stages.filter((stage) => stage.status === 'running').length;
+    return phase(
+      'Corrida en ejecución',
+      activeStages > 0 ? 'Hay stages activos en el pipeline.' : '',
+      'running',
+    );
   }
   if (preflightRunning) {
     return phase('Validación de prerrequisitos', 'Se comprueban secuencia, estructura y configuración.', 'waiting', 'overlay');

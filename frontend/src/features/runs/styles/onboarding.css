@@ -1,14 +1,14 @@
 .auth-page.onboarding-page {
-  align-content: center;
+  align-content: safe center;
   gap: 24px;
+  isolation: isolate;
   padding-block: clamp(28px, 5vw, 64px);
+  --onboarding-halo-threshold: 6px;
+  --onboarding-halo-blur: 48px;
 }
 .onboarding-head { width: min(820px, 100%); text-align: center; }
-.onboarding-back { display: block; width: fit-content; margin: 0 auto 18px; color: var(--muted); font-size: 10px; font-weight: 650; text-underline-offset: 3px; }
-.onboarding-back:hover { color: var(--green-dark); }
-.onboarding-kicker { color: var(--green-dark); font-size: 10px; font-weight: 750; letter-spacing: .12em; text-transform: uppercase; }
 .onboarding-title {
-  margin: 8px 0 0;
+  margin: 0;
   max-width: min(1100px, 100%);
   font-size: clamp(30px, 4.2vw, 48px);
   line-height: 1.08;
@@ -17,7 +17,16 @@
 }
 .onboarding-title.is-variants { font-size: clamp(30px, 4.2vw, 48px); }
 .onboarding-lede { margin: 10px auto 0; max-width: 640px; color: var(--muted); font-size: 13px; line-height: 1.55; }
-.auth-button.onboarding-action { width: min(360px, 100%); min-height: 52px; margin-top: 24px; font-size: 12px; }
+.onboarding-actions {
+  width: min(500px, 100%);
+  margin: 24px auto 0;
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  gap: 12px;
+}
+.auth-button.onboarding-action { flex: 1; width: auto; max-width: 360px; min-width: 0; min-height: 52px; margin: 0; font-size: 12px; }
+.auth-button.onboarding-back-action { min-width: 120px; min-height: 52px; }
 .auth-page.onboarding-page .auth-button.onboarding-action:disabled {
   opacity: 1;
   background: var(--muted);
@@ -27,7 +36,40 @@
 .auth-page.onboarding-page .auth-notice { width: min(560px, 100%); }
 .auth-page.onboarding-page .auth-notice-error { background: #f2ebeb; }
 .auth-page.onboarding-page .auth-notice-success { background: #e3ede7; }
-.variant-stage, .variant-selection, .variant-alt-field { position: relative; }
+
+/* Keep the dotted canvas visible while softening the area around key content. */
+.auth-page.onboarding-page .auth-button,
+.auth-page.onboarding-page .auth-notice,
+.variant-stage,
+.variant-selection,
+.variant-alt-field { position: relative; }
+
+.upload-card::before,
+.auth-page.onboarding-page .auth-button::before,
+.auth-page.onboarding-page .auth-notice::before,
+.variant-stage::before,
+.variant-selection::before,
+.variant-alt-field::before {
+  content: '';
+  position: absolute;
+  inset: calc(-1 * var(--onboarding-halo-threshold));
+  z-index: -1;
+  border-radius: 30px;
+  background: var(--canvas);
+  filter: blur(var(--onboarding-halo-blur));
+  pointer-events: none;
+}
+
+.onboarding-title,
+.onboarding-lede,
+.upload-copy,
+.variant-compose-arrow {
+  text-shadow:
+    0 0 6px var(--canvas),
+    0 0 16px var(--canvas),
+    0 0 34px var(--canvas),
+    0 0 64px var(--canvas);
+}
 
 .upload-options {
   width: min(820px, 100%);
@@ -85,8 +127,22 @@
 .upload-card.is-loading .upload-icon { color: var(--green-dark); opacity: 1; }
 .upload-card.is-loading::after { display: none; }
 .upload-card.is-done .upload-icon { color: var(--green-dark); }
-.upload-card.is-done:not(:hover) .upload-progress { opacity: 1; }
-.upload-card.is-done:hover .upload-progress { opacity: 1; }
+.upload-card.is-done {
+  flex-direction: column;
+  gap: 10px;
+}
+.upload-card.is-done .upload-copy {
+  width: 100%;
+  align-items: center;
+  text-align: center;
+}
+.upload-card.is-done .upload-copy strong,
+.upload-card.is-done .upload-copy small { display: none; }
+.upload-card.is-done .upload-copy span {
+  max-width: 100%;
+  margin-top: 0;
+}
+.upload-card.is-done .upload-progress { display: none; }
 .upload-progress {
   position: absolute;
   left: 12px;
@@ -252,7 +308,7 @@
 
 .onboarding-title.structure-choice__title {
   max-width: 620px;
-  margin: 8px auto 0;
+  margin: 0 auto;
   font-size: clamp(28px, 4.2vw, 46px);
   line-height: 1.13;
   letter-spacing: -.035em;
@@ -273,5 +329,10 @@
 }
 @media (max-width: 560px) {
   .structure-choice__actions { flex-direction: column; align-items: center; }
-  .auth-button.structure-choice__button { width: min(100%, 330px); }
+  .auth-button.structure-choice__button,
+  .auth-button.onboarding-back-action { width: min(100%, 330px); }
+}
+@media (max-width: 420px) {
+  .onboarding-actions { gap: 8px; }
+  .auth-button.onboarding-back-action { min-width: 100px; padding-inline: 10px; }
 }

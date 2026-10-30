@@ -23,10 +23,33 @@
 }
 
 .variant-chain-card {
+  position: relative;
+  z-index: 9;
   flex: 0 0 auto;
   width: 100%;
   margin: 0 0 8px;
-  overflow: hidden;
+  overflow: visible;
+}
+
+.variant-selection-row {
+  min-height: 38px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.variant-selection-label {
+  flex: 0 0 auto;
+  color: #4b5965;
+  font-size: 10px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.variant-selection-row > .variant-select {
+  width: min(260px, 60%);
 }
 
 .variant-sequence-scroll {
@@ -169,6 +192,13 @@
 .variant-camera-sync.is-active {
   border-color: var(--green);
   color: var(--green-dark);
+}
+
+.variant-camera-sync.is-pending,
+.variant-camera-sync:disabled {
+  color: var(--muted);
+  cursor: progress;
+  opacity: .72;
 }
 
 .variant-structure-card {
@@ -460,11 +490,14 @@
   right: 0;
   z-index: 20;
   min-width: 100%;
+  max-height: min(60svh, 360px);
   padding: 4px;
   border: 1px solid var(--line-strong);
   border-radius: 5px;
   background: #fff;
   box-shadow: 0 10px 28px rgba(17, 33, 38, .16);
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .variant-select-options button {
@@ -663,6 +696,7 @@
 
 @media (max-width: 680px) {
   .variant-page { padding: 12px; }
+  .variant-selection-row > .variant-select { flex: 1 1 160px; width: min(260px, 70%); }
   .variant-structures { grid-template-columns: 1fr; height: auto; min-height: 0; }
   .variant-structure-card { height: min(70svh, 540px); min-height: 380px; }
   .variant-structure-card + .variant-structure-card { margin-top: var(--gap, 10px); }

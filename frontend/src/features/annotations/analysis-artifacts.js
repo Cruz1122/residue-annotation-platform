@@ -4,12 +4,13 @@ const MAX_INLINE_ARTIFACT_BYTES = 2 * 1024 * 1024;
 const MAX_DECOMPRESSED_ARTIFACT_BYTES = 32 * 1024 * 1024;
 
 export const ANALYSIS_DETAIL_ARTIFACTS = {
-  topology: ['tmbed_per_residue', 'tm_segments', 'span_metadata'],
-  frustration: ['frustratometer_conformers', 'frustratometer_per_residue', 'frustration_per_residue', 'frustraiseq_per_residue', 'metadata', 'closure', 'frames_index'],
-  conservation: ['evolution_per_residue', 'metadata'],
-  'scientific-evidence': ['ldlc_statin_evidence', 'functional_features_long', 'mavedb_details', 'pgx_per_position', 'pgx_alleles', 'predictor_per_position', 'predictor_substitutions', 'clinvar_per_position', 'clinvar_variants'],
-  ddg: ['variant_annotations', 'ddg_replicates', 'provenance', 'rosetta_metadata', 'variant_set'],
-  contacts: ['contact_residue_summary', 'contacts_long', 'provenance'],
+  identity: ['protein_identity'],
+  topology: ['tmbed_per_residue', 'tm_segments', 'span_metadata', 'structure_mapping'],
+  frustration: ['frustratometer_conformers', 'frustratometer_per_residue', 'frustration_per_residue', 'frustraiseq_per_residue', 'metadata', 'closure', 'frames_index', 'structure_mapping'],
+  conservation: ['evolution_per_residue', 'metadata', 'structure_mapping'],
+  'scientific-evidence': ['ldlc_statin_evidence', 'functional_features_long', 'mavedb_details', 'pgx_per_position', 'pgx_alleles', 'predictor_per_position', 'predictor_substitutions', 'clinvar_per_position', 'clinvar_variants', 'structure_mapping'],
+  ddg: ['variant_annotations', 'ddg_replicates', 'provenance', 'rosetta_metadata', 'variant_set', 'structure_mapping'],
+  contacts: ['contact_residue_summary', 'contacts_long', 'provenance', 'structure_mapping'],
 };
 
 function parseDelimitedLine(line, delimiter) {
@@ -64,6 +65,35 @@ export function parseAnalysisArtifact(text, mediaType = '') {
     const cells = parseDelimitedLine(line, delimiter);
     return Object.fromEntries(headers.map((header, index) => [header, cells[index]?.trim() ?? '']));
   });
+}
+
+export function structureMappingFromArtifactRows(configurationMapping, records) {
+  const configuredPairs = configurationMapping?.canonical_to_structure;
+  if (Array.isArray(configuredPairs) && configuredPairs.length) return configurationMapping;
+
+  const canonicalToStructure = (records ?? []).flatMap((record) => {
+    const canonicalPosition = Number(record?.canonical_position ?? record?.aa_position);
+    const residueNumber = record?.residue_number ?? record?.resseq ?? record?.auth_seq_id ?? record?.label_seq_id;
+    if (!Number.isInteger(canonicalPosition) || canonicalPosition < 1 || residueNumber === null || residueNumber === undefined || residueNumber === '') return [];
+    const insertionCode = String(record?.insertion_code ?? record?.icode ?? '').trim();
+    return [{
+      canonical_position: canonicalPosition,
+      aa: String(record?.aa ?? record?.aa_ref ?? '').trim().toUpperCase(),
+      chain: String(record?.chain ?? record?.auth_asym_id ?? record?.label_asym_id ?? 'A').trim() || 'A',
+      residue_number: Number(residueNumber),
+      insertion_code: ['', '.', 'NA'].includes(insertionCode.toUpperCase()) ? '' : insertionCode,
+      mapping_status: String(record?.mapping_status ?? ''),
+    }];
+  }).filter((pair) => Number.isInteger(pair.residue_number));
+
+  if (!canonicalToStructure.length) return configurationMapping ?? {};
+  return {
+    ...(configurationMapping ?? {}),
+    canonical_to_structure: canonicalToStructure,
+    mapped_positions: canonicalToStructure.length,
+    chain: canonicalToStructure[0].chain,
+    source: 'protein_relaxation_energy/structure_mapping.tsv',
+  };
 }
 
 export async function loadInferredVariantCount(run, getBlob) {
@@ -132,12 +162,17 @@ export async function loadAnalysisArtifactDetails(run, analysis, getBlob) {
       const isConformationalEvidence = analysis === 'frustration'
         && stage.id === 'conformational_ensemble'
         && ['metadata', 'frames_index'].includes(artifact.artifact_type);
+      const isForeignIdentityArtifact = analysis === 'identity'
+        && artifact.artifact_type === 'protein_identity'
+        && stage.id !== 'protein_identity';
+      if (isForeignIdentityArtifact) return false;
       // A normal run contains provenance artifacts from several stages. The
       // contacts view must use the provenance that belongs to the Arpeggio
       // stage, otherwise an unrelated stage can overwrite its parameters.
       const isContactsEvidence = analysis === 'contacts'
         && ['contact_residue_summary', 'contacts_long', 'provenance'].includes(artifact.artifact_type);
       if (isContactsEvidence && stage.id !== 'structural_contacts') return false;
+      if (artifact.artifact_type === 'structure_mapping' && stage.id !== 'protein_relaxation_energy') return false;
       const evidenceArtifactStages = {
         ldlc_statin_evidence: ['functional_region_evidence'],
         functional_features_long: ['uniprot_features'],
@@ -149,7 +184,8 @@ export async function loadAnalysisArtifactDetails(run, analysis, getBlob) {
         clinvar_per_position: ['clinvar'],
         clinvar_variants: ['clinvar'],
       };
-      if (analysis === 'scientific-evidence' && !evidenceArtifactStages[artifact.artifact_type]?.includes(stage.id)) return false;
+      const expectedEvidenceStages = evidenceArtifactStages[artifact.artifact_type];
+      if (analysis === 'scientific-evidence' && expectedEvidenceStages && !expectedEvidenceStages.includes(stage.id)) return false;
       // ``metadata`` is a shared artifact name across stages. Conservation
       // must read the metadata published by its own stage, otherwise a later
       // predictor/feature metadata file can silently replace its method and
@@ -168,6 +204,28 @@ export async function loadAnalysisArtifactDetails(run, analysis, getBlob) {
       ? `conformational_ensemble_${artifact.artifact_type}`
       : artifact.artifact_type;
     return [type, parseAnalysisArtifact(await readArtifactText(blob, artifact), artifact.media_type)];
+  }));
+  const details = {};
+  for (const result of settled) {
+    if (result.status !== 'fulfilled') continue;
+    const [type, rows] = result.value;
+    details[type] = rows;
+  }
+  return details;
+}
+
+export async function loadDdgVariantDetails(run, getBlob) {
+  const wanted = new Set(['variant_annotations', 'ddg_replicates', 'provenance', 'rosetta_metadata']);
+  const artifacts = (run?.stages ?? [])
+    .filter((stage) => stage.id === 'variant_ddg')
+    .flatMap((stage) => (stage.artifacts ?? []).filter((artifact) => (
+      wanted.has(artifact.artifact_type)
+      && Number.isFinite(artifact.size)
+      && artifact.size <= MAX_INLINE_ARTIFACT_BYTES
+    )));
+  const settled = await Promise.allSettled(artifacts.map(async (artifact) => {
+    const blob = await getBlob(artifact.id, 'original');
+    return [artifact.artifact_type, parseAnalysisArtifact(await readArtifactText(blob, artifact), artifact.media_type)];
   }));
   const details = {};
   for (const result of settled) {

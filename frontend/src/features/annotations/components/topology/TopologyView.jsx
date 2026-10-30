@@ -11,12 +11,18 @@ import {
   getUploadObjectUrl,
 } from '@shared/api/client';
 import { userErrorMessage } from '@shared/lib/error-presentation';
-import { loadAnalysisArtifactDetails } from '@features/annotations/analysis-artifacts.js';
+import {
+  runStagePublicationSignature,
+} from '@features/runs/run-updates.js';
+import { loadAnalysisArtifactDetails, structureMappingFromArtifactRows } from '@features/annotations/analysis-artifacts.js';
 import { acquireStructureUrl } from '@features/annotations/structure-url-cache.js';
 import { isStructureArtifact, structureFormat } from '@features/annotations/structure-format.js';
 import { getZoomOptimizedCanvas3dProps } from '@features/annotations/zoom-rendering.js';
+import { waitForCanvasDraw } from '@features/annotations/components/shared/canvas-render-readiness.js';
+import { sequenceProteinForRun } from '@features/stages/components/info/information-presentation.js';
 import { AA3, AA_NAMES, hexToColorInt, mergeAnnotationRows } from '@features/annotations/viewer-presentation.js';
 import {
+  hasPublishedTopologyData,
   normalizeTopologyClass,
   structureSelectionItems,
   TOPOLOGY_CLASSES,
@@ -49,7 +55,7 @@ async function getAllAnnotations(runId) {
 
 function structureSource(run) {
   const artifacts = (run?.stages ?? []).flatMap((stage) => stage.artifacts ?? []);
-  const preferredTypes = ['selected_reference_pdb', 'rosettamp_relaxed_pdb', 'foldx_relaxed_pdb', 'model_cif'];
+  const preferredTypes = ['model_cif', 'foldx_relaxed_pdb', 'selected_reference_pdb', 'rosettamp_relaxed_pdb'];
   const artifact = preferredTypes
     .map((type) => artifacts.find((item) => item.artifact_type === type))
     .find(Boolean) ?? artifacts.find(isStructureArtifact);
@@ -80,7 +86,7 @@ function structureMappingMaps(mapping) {
   const byStructure = new Map();
   for (const pair of mapping?.canonical_to_structure ?? []) {
     const canonicalPosition = Number(pair?.canonical_position ?? pair?.aa_position);
-    const residueNumber = pair?.residue_number ?? pair?.auth_seq_id ?? pair?.label_seq_id;
+    const residueNumber = pair?.residue_number ?? pair?.resseq ?? pair?.auth_seq_id ?? pair?.label_seq_id;
     if (!Number.isInteger(canonicalPosition) || canonicalPosition < 1 || residueNumber === null || residueNumber === undefined || residueNumber === '') continue;
     const key = residueKey(pair?.chain ?? pair?.auth_asym_id ?? pair?.label_asym_id ?? 'A', residueNumber, pair?.insertion_code ?? pair?.icode ?? '');
     if (byCanonical.has(canonicalPosition) || byStructure.has(key)) continue;
@@ -123,7 +129,7 @@ function topologyRows(sequence, annotationByPosition, artifactDetails) {
   });
 }
 
-function SequenceStrip({ rows, selectedStart, selectedEnd, onSelect }) {
+function SequenceStrip({ rows, selectedStart, selectedEnd, sequenceLabel, onSelect }) {
   const trackRef = useRef(null);
   const selectionEnd = Number.isInteger(selectedEnd) ? selectedEnd : selectedStart;
 
@@ -137,7 +143,7 @@ function SequenceStrip({ rows, selectedStart, selectedEnd, onSelect }) {
   }, [selectedStart]);
 
   return (
-    <div class="frustration-sequence-scroll" role="group" aria-label="Secuencia canónica coloreada por topología TMbed" tabIndex={0}>
+    <div class="frustration-sequence-scroll" role="group" aria-label={sequenceLabel} tabIndex={0}>
       <div ref={trackRef} class="frustration-sequence-track">
         {rows.map((row) => {
           const info = TOPOLOGY_CLASSES[row.topologyClass];
@@ -217,6 +223,7 @@ function TopologyStructure({
     setViewerError(structureError ? 'No se pudo descargar la estructura molecular publicada.' : '');
     if (!structureUrl || !hostRef.current) return undefined;
     let disposed = false;
+    const renderController = new AbortController();
     let clickSubscription;
     let viewerInstance = null;
     let themeProvider = null;
@@ -348,6 +355,8 @@ function TopologyStructure({
           });
           if (position !== null) onPickRef.current(position);
         });
+        await waitForCanvasDraw(canvas3d, { signal: renderController.signal });
+        if (disposed) return disposeViewer();
         if (!disposed) setViewerState('ready');
       } catch (error) {
         console.error(error);
@@ -361,6 +370,7 @@ function TopologyStructure({
     void loadViewer();
     return () => {
       disposed = true;
+      renderController.abort();
       clickSubscription?.unsubscribe?.();
       disposeViewer();
     };
@@ -440,7 +450,7 @@ function Disclosure({ title, meta, description, open = false, children }) {
   );
 }
 
-function AnnotationPanel({ rows, selectedPosition, selectedEnd, sequence, segments, onSelectRange }) {
+function AnnotationPanel({ rows, selectedPosition, selectedEnd, sequence, segments, topologyPublicationPending, onSelectRange }) {
   const selectedRow = rows.find((row) => row.position === selectedPosition) ?? null;
   const selectedResidue = residueAt(sequence, selectedPosition);
   const info = TOPOLOGY_CLASSES[selectedRow?.topologyClass ?? 'unknown'];
@@ -500,8 +510,22 @@ function AnnotationPanel({ rows, selectedPosition, selectedEnd, sequence, segmen
           </Disclosure>
         )}
 
-        <Disclosure title="Regiones topológicas" meta={`${regions.length} regiones`} description="Tramos contiguos con la misma clase predicha por TMbed.">
+        <Disclosure
+          title="Regiones topológicas"
+          meta={regions.length ? `${regions.length} ${regions.length === 1 ? 'región' : 'regiones'}` : undefined}
+          description="Tramos contiguos con la misma clase predicha por TMbed."
+        >
           <div class="topology-region-list">
+            {regions.length === 0 && (
+              <StatePanel
+                kind={topologyPublicationPending ? 'loading' : 'empty'}
+                compact
+                title={topologyPublicationPending ? 'Cargando topología' : 'No hay regiones topológicas'}
+                description={topologyPublicationPending
+                  ? 'Consultando los resultados publicados por TMbed.'
+                  : 'No hay clasificaciones topológicas publicadas para esta corrida.'}
+              />
+            )}
             {regions.map((region) => {
               const regionInfo = TOPOLOGY_CLASSES[region.topologyClass];
               const selected = selectedPosition === region.start && selectedEnd === region.end;
@@ -531,6 +555,7 @@ function AnnotationPanel({ rows, selectedPosition, selectedEnd, sequence, segmen
 export default function TopologyView({ proteinId }) {
   const runId = typeof window === 'undefined' ? '' : new URLSearchParams(window.location.search).get('run') ?? '';
   const [protein, setProtein] = useState(null);
+  const [runProtein, setRunProtein] = useState(null);
   const [run, setRun] = useState(null);
   const [annotations, setAnnotations] = useState([]);
   const [artifactDetails, setArtifactDetails] = useState({});
@@ -544,6 +569,7 @@ export default function TopologyView({ proteinId }) {
   const [membraneState, setMembraneState] = useState('not_applicable');
   const [membraneVisible, setMembraneVisible] = useState(true);
   const selectionInitializedRef = useRef(false);
+  const latestRunRef = useRef(null);
   const selectedPosition = selection?.start ?? null;
   const selectedEnd = selection?.end ?? null;
 
@@ -564,8 +590,7 @@ export default function TopologyView({ proteinId }) {
     let active = true;
     async function load() {
       if (!runId) {
-        setState('error');
-        setError('Selecciona una corrida desde el historial o la vista de progreso para consultar su topología.');
+        setState('no-run');
         return;
       }
       try {
@@ -574,9 +599,14 @@ export default function TopologyView({ proteinId }) {
           getRun(runId),
           getAllAnnotations(runId),
         ]);
+        const runProteinData = runData.protein_id && runData.protein_id !== proteinData.id
+          ? await getProtein(runData.protein_id)
+          : null;
         const details = await loadAnalysisArtifactDetails(runData, 'topology', getArtifactBlob);
         if (!active) return;
+        latestRunRef.current = runData;
         setProtein(proteinData);
+        setRunProtein(runProteinData);
         setRun(runData);
         setAnnotations(annotationData.rows ?? []);
         setAnnotationsTruncated(Boolean(annotationData.truncated));
@@ -591,6 +621,52 @@ export default function TopologyView({ proteinId }) {
     void load();
     return () => { active = false; };
   }, [proteinId, runId]);
+
+  useEffect(() => {
+    if (!runId || !run?.external_tracking?.tracking_active) return undefined;
+    let active = true;
+    let refreshing = false;
+
+    const refresh = async () => {
+      if (refreshing || document.visibilityState !== 'visible') return;
+      refreshing = true;
+      try {
+        const nextRun = await getRun(runId);
+        if (!active) return;
+        const publicationChanged = runStagePublicationSignature(
+          latestRunRef.current,
+          ['membrane_topology'],
+        ) !== runStagePublicationSignature(nextRun, ['membrane_topology']);
+        latestRunRef.current = nextRun;
+        setRun(nextRun);
+        if (!publicationChanged) return;
+
+        const [annotationData, details] = await Promise.all([
+          getAllAnnotations(runId),
+          loadAnalysisArtifactDetails(nextRun, 'topology', getArtifactBlob),
+        ]);
+        if (!active) return;
+        setAnnotations(annotationData.rows ?? []);
+        setAnnotationsTruncated(Boolean(annotationData.truncated));
+        setArtifactDetails(details);
+      } catch {
+        // Keep the last confirmed topology while MN5 or the local API is unavailable.
+      } finally {
+        refreshing = false;
+      }
+    };
+
+    const timer = window.setInterval(() => { void refresh(); }, 5000);
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') void refresh();
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, [proteinId, runId, run?.external_tracking?.tracking_active]);
 
   const structureRequest = useMemo(() => structureSource(run), [run]);
   useEffect(() => {
@@ -613,11 +689,27 @@ export default function TopologyView({ proteinId }) {
     };
   }, [structureRequest?.id]);
 
-  const annotationByPosition = useMemo(() => mergeAnnotationRows(annotations), [annotations]);
-  const rows = useMemo(() => topologyRows(protein?.sequence, annotationByPosition, artifactDetails), [annotationByPosition, artifactDetails, protein?.sequence]);
+  const topologyAnnotations = useMemo(
+    () => annotations.filter((row) => row.stage_id === 'membrane_topology'),
+    [annotations],
+  );
+  const annotationByPosition = useMemo(() => mergeAnnotationRows(topologyAnnotations), [topologyAnnotations]);
+  const sequenceProtein = sequenceProteinForRun(run, protein, runProtein);
+  const sequence = sequenceProtein?.sequence ?? '';
+  const sequenceLabel = run?.external_tracking?.run_type === 'mutant'
+    ? 'Secuencia mutante coloreada por topología TMbed'
+    : 'Secuencia canónica coloreada por topología TMbed';
+  const rows = useMemo(() => topologyRows(sequence, annotationByPosition, artifactDetails), [annotationByPosition, artifactDetails, sequence]);
+  const hasTopologyData = useMemo(
+    () => hasPublishedTopologyData(topologyAnnotations, artifactDetails?.tmbed_per_residue),
+    [topologyAnnotations, artifactDetails?.tmbed_per_residue],
+  );
   const mapping = useMemo(
-    () => structureMappingMaps(run?.configuration?.structure_mapping ?? {}),
-    [run?.configuration?.structure_mapping],
+    () => structureMappingMaps(structureMappingFromArtifactRows(
+      run?.configuration?.structure_mapping,
+      artifactDetails?.structure_mapping,
+    )),
+    [artifactDetails?.structure_mapping, run?.configuration?.structure_mapping],
   );
   const colorMap = useMemo(() => {
     const colors = new Map();
@@ -630,6 +722,10 @@ export default function TopologyView({ proteinId }) {
   const segments = artifactDetails?.tm_segments ?? [];
   const spanMetadata = artifactDetails?.span_metadata?.[0] ?? null;
   const showMembrane = segments.length > 0 || Number(spanMetadata?.segment_count) > 0;
+  const topologyStage = run?.stages?.find((stage) => stage.id === 'membrane_topology');
+  const topologyPublicationPending = run?.external_tracking?.tracking_active
+    && topologyStage?.status === 'success'
+    && !hasTopologyData;
   const presentClasses = useMemo(() => {
     const observed = new Set(rows.map((row) => row.topologyClass));
     return ['tm_alpha', 'tm_beta', 'outside', 'inside', 'signal_peptide', 'unknown'].filter((topologyClass) => observed.has(topologyClass));
@@ -657,18 +753,19 @@ export default function TopologyView({ proteinId }) {
   }, [rows, selectedPosition]);
 
   if (state === 'loading') return <section class="frustration-page"><StatePanel kind="loading" fill title="Cargando topología" description="Consultando la corrida y los resultados publicados por TMbed." /></section>;
+  if (state === 'no-run') return <section class="frustration-page"><StatePanel kind="empty" fill icon="workflow" title="No hay una corrida seleccionada" description="Selecciona una corrida desde el historial o la vista de progreso para consultar su topología."><a class="protein-open" href="/proteins/">Mis proteínas</a></StatePanel></section>;
   if (state === 'error') return <section class="frustration-page"><StatePanel kind="error" fill title="No se pudo cargar la topología" description={error} /></section>;
 
-  const selectedResidue = residueAt(protein?.sequence, selectedPosition);
+  const selectedResidue = residueAt(sequence, selectedPosition);
   const selectedResidueLabel = Number.isInteger(selectedPosition)
     ? selectedPosition === selectedEnd
       ? `${selectedResidue.one}${selectedPosition}`
-      : `${selectedResidue.one}${selectedPosition}–${residueAt(protein?.sequence, selectedEnd).one}${selectedEnd}`
+      : `${selectedResidue.one}${selectedPosition}–${residueAt(sequence, selectedEnd).one}${selectedEnd}`
     : '—';
   return (
     <section class="frustration-page topology-page" aria-label="Topología de membrana">
       <div class="frustration-chain-card">
-        <SequenceStrip rows={rows} selectedStart={selectedPosition} selectedEnd={selectedEnd} onSelect={toggleSelectedPosition} />
+      <SequenceStrip rows={rows} selectedStart={selectedPosition} selectedEnd={selectedEnd} sequenceLabel={sequenceLabel} onSelect={toggleSelectedPosition} />
       </div>
 
       {annotationsTruncated && <p class="frustration-live-message" role="status">La cobertura de anotaciones es parcial; los residuos sin resultado se muestran como “Sin dato”.</p>}
@@ -705,8 +802,9 @@ export default function TopologyView({ proteinId }) {
           rows={rows}
           selectedPosition={selectedPosition}
           selectedEnd={selectedEnd}
-          sequence={protein?.sequence}
+          sequence={sequence}
           segments={segments}
+          topologyPublicationPending={topologyPublicationPending}
           onSelectRange={selectRange}
         />
       </div>

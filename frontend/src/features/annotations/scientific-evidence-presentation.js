@@ -82,6 +82,11 @@ function stageArtifactWasRead(stages, details, [stageId, artifactType]) {
   return Object.hasOwn(details ?? {}, artifactType) && Array.isArray(details[artifactType]);
 }
 
+function stageArtifactsWereRead(stages, details, requirements, requireAll = true) {
+  const wasRead = requirements.map((requirement) => stageArtifactWasRead(stages, details, requirement));
+  return requireAll ? wasRead.every(Boolean) : wasRead.some(Boolean);
+}
+
 function stageHasPublishedArtifact(stages, [stageId, artifactType]) {
   const stage = (stages ?? []).find((item) => item.id === stageId);
   return ['success', 'reused'].includes(stage?.status)
@@ -118,7 +123,8 @@ export function availableScientificEvidenceModes(stages, details, annotationRows
         || (annotationRows ?? []).some((record) => hasVerifiedMavedbCoverage(record));
     }
     const requirements = MODE_ARTIFACT_REQUIREMENTS[value] ?? [];
-    if (!requirements.length || !requirements.every((requirement) => stageArtifactWasRead(stages, details, requirement))) return false;
+    const allCuratedSources = value !== 'evidence-curated';
+    if (!requirements.length || !stageArtifactsWereRead(stages, details, requirements, allCuratedSources)) return false;
     if (value === 'evidence-pgx') {
       return (details.pgx_per_position ?? []).some((record) => hasPharmacogenomicEvidence(record) || !hasUnavailableReason(record?.na_reason));
     }
@@ -216,7 +222,7 @@ export function scientificEvidenceRows(details, stages, sequence, annotationRows
   };
   const evaluable = Object.fromEntries(Object.entries(MODE_ARTIFACT_REQUIREMENTS).map(([mode, requirements]) => [
     mode,
-    requirements.every((requirement) => stageArtifactWasRead(stages, details, requirement)),
+    stageArtifactsWereRead(stages, details, requirements, mode !== 'evidence-curated'),
   ]));
   const maveRequirement = MODE_ARTIFACT_REQUIREMENTS['evidence-experimental'][0];
   const maveSourcePublished = stageHasPublishedArtifact(stages, maveRequirement);

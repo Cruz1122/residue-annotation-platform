@@ -426,10 +426,16 @@ export function getRun(runId: string): Promise<Run> {
   return request<Run>(`/runs/${encodeURIComponent(runId)}`);
 }
 
-export function listRuns(limit = 200, offset = 0): Promise<Run[]> {
+export function listRuns(
+  limit = 200,
+  offset = 0,
+  filters: { baseProteinId?: string } = {},
+): Promise<Run[]> {
   const boundedLimit = Math.min(200, Math.max(1, Math.trunc(limit)));
   const boundedOffset = Math.max(0, Math.trunc(offset));
-  return request<Run[]>(`/runs?limit=${boundedLimit}&offset=${boundedOffset}`);
+  const params = new URLSearchParams({ limit: String(boundedLimit), offset: String(boundedOffset) });
+  if (filters.baseProteinId) params.set('base_protein_id', filters.baseProteinId);
+  return request<Run[]>(`/runs?${params.toString()}`);
 }
 
 function parseRunSnapshot(value: unknown): Run {

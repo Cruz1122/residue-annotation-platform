@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.core.auth import Principal, get_principal
 from app.core.config import Settings, get_settings
 from app.core.db import get_db
-from app.features.runs.models import Run, RunStage, StageResult
+from app.features.runs.models import ExternalRunTracking, Run, RunStage, StageResult
 from app.features.runs.schemas import AnnotationsResponse, RunCreate, RunRead, StageRead
 from app.features.runs.service import (
     create_run,
@@ -48,6 +48,7 @@ def create_run_endpoint(
 def list_runs(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
+    base_protein_id: str | None = Query(default=None, min_length=1, max_length=36),
     session: Session = Depends(get_db),
     principal: Principal = Depends(get_principal),
 ) -> list[RunRead]:
@@ -62,6 +63,7 @@ def list_runs(
             selectinload(Run.configuration),
             selectinload(Run.preparation),
             selectinload(Run.run_artifacts),
+            selectinload(Run.external_tracking),
             selectinload(Run.stages)
             .selectinload(RunStage.stage_result)
             .selectinload(StageResult.artifacts),
@@ -71,6 +73,10 @@ def list_runs(
         .offset(offset)
         .limit(limit)
     )
+    if base_protein_id is not None:
+        statement = statement.join(Run.external_tracking).where(
+            ExternalRunTracking.base_protein_id == base_protein_id
+        )
     if not principal.is_admin:
         statement = statement.where(
             (Run.owner_id == principal.user_id) | (Run.project_id == principal.project_id)
@@ -155,7 +161,11 @@ async def run_events(
                 event_id += 1
                 last_payload = encoded
                 yield f"id: {event_id}\nevent: snapshot\ndata: {encoded}\n\n"
-            if payload["status"] in {"success", "failed", "cancelled"}:
+            external_tracking = payload.get("external_tracking")
+            tracking_active = bool(
+                isinstance(external_tracking, dict) and external_tracking.get("tracking_active")
+            )
+            if payload["status"] in {"success", "failed", "cancelled"} and not tracking_active:
                 return
             yield ": heartbeat\n\n"
             await asyncio.sleep(2)

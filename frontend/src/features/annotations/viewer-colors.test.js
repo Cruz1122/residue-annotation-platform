@@ -227,6 +227,24 @@ test('annotation rows from several stages are merged without dropping provenance
   assert.equal(merged.qcByStage.evolutionary_conservation, 'verified');
 });
 
+test('requested substitution merges base-reference evidence only at that validated position', () => {
+  const variant = { aa_ref: 'A', aa_position: 4, aa_alt: 'T' };
+  const merged = mergeAnnotationRows([
+    { stage_id: 'uniprot_features', aa_position: 4, aa_ref: 'A', values: { uniprot_domain: 'Domain A' } },
+    { stage_id: 'scientific_evidence_visualization', aa_position: 4, aa_ref: 'T', values: { curated_evidence_status: 'present' } },
+  ], [variant]).get(4);
+  assert.equal(merged.aa_ref, 'A');
+  assert.equal(merged.values.curated_evidence_status, 'present');
+  assert.equal(annotationForResidue({ aaPosition: 4, one: 'T' }, new Map([[4, merged]]), [variant]), merged);
+  assert.equal(annotationForResidue({ aaPosition: 4, one: 'S' }, new Map([[4, merged]]), [variant]), null);
+
+  const unrelated = mergeAnnotationRows([
+    { stage_id: 'uniprot_features', aa_position: 4, aa_ref: 'A', values: { uniprot_domain: 'Domain A' } },
+    { stage_id: 'scientific_evidence_visualization', aa_position: 4, aa_ref: 'T', values: { curated_evidence_status: 'present' } },
+  ]).get(4);
+  assert.equal(unrelated.values.curated_evidence_status, undefined);
+});
+
 test('canonical position follows sequence identity, not PDB numbering', () => {
   const chains = assignCanonicalPositions([
     {
@@ -248,6 +266,25 @@ test('canonical position follows sequence identity, not PDB numbering', () => {
     { id: 'A', residues: [{ chain: 'A', authSeqId: 1, insCode: '', one: 'M' }] },
   ], 'MA');
   assert.equal(mismatched[0].residues[0].aaPosition, null);
+});
+
+test('canonical mapping accepts only the validated alternate residue for a requested variant', () => {
+  const chains = assignCanonicalPositions([
+    {
+      id: 'A',
+      residues: [
+        { chain: 'A', authSeqId: 442, insCode: '', one: 'V' },
+        { chain: 'A', authSeqId: 443, insCode: '', one: 'T' },
+      ],
+    },
+  ], `${'V'.repeat(442)}A`, {
+    canonical_to_structure: [
+      { canonical_position: 443, chain: 'A', residue_number: 443, aa: 'A' },
+    ],
+  }, [{ aa_ref: 'A', aa_position: 443, aa_alt: 'T' }]);
+
+  assert.equal(chains[0].residues[0].aaPosition, null);
+  assert.equal(chains[0].residues[1].aaPosition, 443);
 });
 
 test('canonical position stays absent when the backend did not publish a mapping', () => {

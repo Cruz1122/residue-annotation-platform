@@ -281,8 +281,7 @@ def _handle_preflight_failure(
     if current is None:
         return
     logger.warning(
-        "stage_preflight_failed run_id=%s stage_id=%s retryable=%s "
-        "error_code=%s message=%s",
+        "stage_preflight_failed run_id=%s stage_id=%s retryable=%s error_code=%s message=%s",
         current.run_id,
         current.stage_id,
         failure.retryable,
@@ -459,8 +458,10 @@ def recover_stale_stages(session: Session, settings: Settings) -> set[str]:
     stale = list(
         session.scalars(
             select(RunStage)
+            .join(Run, Run.id == RunStage.run_id)
             .options(selectinload(RunStage.run))
             .where(RunStage.status.in_([RunStageStatus.QUEUED, RunStageStatus.RUNNING]))
+            .where(Run.is_external_import.is_(False))
             .where(or_(RunStage.lease_expires_at.is_(None), RunStage.lease_expires_at < now))
         )
     )
@@ -506,11 +507,13 @@ def refresh_ready_states(session: Session, run_ids: set[str] | None = None) -> N
         return
     query = (
         select(RunStage)
+        .join(Run, Run.id == RunStage.run_id)
         .options(
             selectinload(RunStage.run).selectinload(Run.stages),
             selectinload(RunStage.run).selectinload(Run.configuration),
         )
         .where(RunStage.status == RunStageStatus.PENDING)
+        .where(Run.is_external_import.is_(False))
     )
     if run_ids is not None:
         query = query.where(RunStage.run_id.in_(run_ids))
@@ -577,6 +580,7 @@ def _claim_statement():
             selectinload(RunStage.run).selectinload(Run.protein),
         )
         .where(RunStage.status == RunStageStatus.READY)
+        .where(Run.is_external_import.is_(False))
         .where(
             or_(
                 RunStage.preflight_status != "blocked",
@@ -901,6 +905,7 @@ def _remote_stage_claim_statement(now: datetime):
         # This legacy query must not observe every stage row of that shared
         # allocation and accidentally submit/cancel it multiple times.
         .where(Run.remote_job_id.is_(None))
+        .where(Run.is_external_import.is_(False))
         .where(RunStage.status.in_([RunStageStatus.QUEUED, RunStageStatus.RUNNING]))
         .where(Run.status.in_([RunStatus.PENDING, RunStatus.RUNNING, RunStatus.CANCEL_REQUESTED]))
         .where(
@@ -952,6 +957,7 @@ def _remote_inflight_count(session: Session) -> int:
             .join(Run, Run.id == RunStage.run_id)
             .where(RunStage.slurm_job_id.is_not(None))
             .where(Run.remote_job_id.is_(None))
+            .where(Run.is_external_import.is_(False))
             .where(RunStage.status.in_([RunStageStatus.QUEUED, RunStageStatus.RUNNING]))
             .where(
                 Run.status.in_([RunStatus.PENDING, RunStatus.RUNNING, RunStatus.CANCEL_REQUESTED])
@@ -972,6 +978,7 @@ def _remote_run_claim_statement(now: datetime):
             selectinload(Run.preparation),
         )
         .where(Run.remote_job_id.is_not(None))
+        .where(Run.is_external_import.is_(False))
         .where(Run.status.in_([RunStatus.PENDING, RunStatus.RUNNING, RunStatus.CANCEL_REQUESTED]))
         .where(
             or_(
@@ -1034,6 +1041,7 @@ def _claim_ready_run_statement(now: datetime):
             selectinload(Run.preparation),
         )
         .where(Run.remote_job_id.is_(None))
+        .where(Run.is_external_import.is_(False))
         .where(Run.status == RunStatus.PENDING)
         .where(
             exists(
@@ -1088,10 +1096,14 @@ def _finalize_runs(session: Session, run_ids: set[str]) -> None:
 
 def _finalize_active_runs(session: Session) -> None:
     active_runs = list(
-        session.scalars(select(Run).where(Run.status.in_([RunStatus.PENDING, RunStatus.RUNNING])))
+        session.scalars(
+            select(Run)
+            .where(Run.is_external_import.is_(False))
+            .where(Run.status.in_([RunStatus.PENDING, RunStatus.RUNNING]))
+        )
     )
     for run in active_runs:
-            finalize_run(session, run)
+        finalize_run(session, run)
 
 
 def _active_selected_run_stages(run: Run) -> list[RunStage]:
@@ -1148,9 +1160,7 @@ def _prepare_shared_run_for_execution(
     snapshots = preparation.snapshots if preparation is not None else {}
     if not isinstance(snapshots, dict):
         snapshots = {}
-    missing = tuple(
-        item for item in prefetch if item not in satisfied or item not in snapshots
-    )
+    missing = tuple(item for item in prefetch if item not in satisfied or item not in snapshots)
     aggregate = StagePreflight(
         stage_id="run",
         required_requirements=required,
@@ -1576,6 +1586,14 @@ def _process_remote(session: Session, settings: Settings) -> bool:
 
 def process_one(session: Session, executor: ScientificStageExecutor | None = None) -> bool:
     settings = get_settings()
+    if settings.mn5_external_snapshot_only:
+        from app.features.runs.mn5_tracking import sync_due_external_snapshots
+
+        return sync_due_external_snapshots(session, settings) > 0
+    if settings.mn5_external_tracking_only:
+        from app.features.runs.mn5_tracking import sync_due_external_runs
+
+        return sync_due_external_runs(session, settings) > 0
     recovered = recover_stale_stages(session, settings)
     if recovered:
         refresh_ready_states(session, recovered)

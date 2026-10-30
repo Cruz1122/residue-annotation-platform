@@ -1,12 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
-import { getArtifactObjectUrl, getProtein, getRun, getUploadObjectUrl, subscribeRunEvents } from '@shared/api/client';
+import { getArtifactBlob, getArtifactObjectUrl, getProtein, getRun, getUploadObjectUrl, listRuns, subscribeRunEvents } from '@shared/api/client';
 import StatePanel from '@shared/components/feedback/StatePanel.jsx';
 import MetricSelect from '@features/annotations/components/shared/MetricSelect.jsx';
 import { acquireStructureUrl } from '@features/annotations/structure-url-cache.js';
 import { getZoomOptimizedCanvas3dProps } from '@features/annotations/zoom-rendering.js';
+import { waitForCanvasDraw } from '@features/annotations/components/shared/canvas-render-readiness.js';
+import { runUpdatesFinished } from '@features/runs/run-updates.js';
 import { runFailureMessage, userErrorMessage } from '@shared/lib/error-presentation';
 import {
   defaultStructureOption,
+  sequenceProteinForRun,
   structureGenerationFailed,
   structureGenerationPending,
   structureOptionsForRun,
@@ -15,7 +18,6 @@ import 'molstar/build/viewer/molstar.css';
 import '@features/annotations/styles/frustration-comparison.css';
 import '@features/stages/styles/info.css';
 
-const RUN_TERMINAL = new Set(['success', 'failed', 'cancelled']);
 const AF3_CONFIDENCE_SCALE = [
   { label: 'Sin dato', color: '#aaaaaa' },
   { label: 'Muy baja · ≤50', color: '#ff7d45' },
@@ -46,26 +48,54 @@ function formatVariant(variant) {
     : '';
 }
 
-function scientificFacts(run, protein, structure) {
+function scientificFacts(run, protein, structure, sequenceProtein) {
   const configuration = run?.configuration ?? {};
-  const sequence = String(protein?.sequence ?? '');
-  const sequenceLength = Number(protein?.length) || sequence.length;
+  const structureRun = structure?.sourceRun ?? run;
+  const structureConfiguration = structureRun?.configuration ?? configuration;
+  const sequence = String(sequenceProtein?.sequence ?? '');
+  const sequenceLength = Number(sequenceProtein?.length) || sequence.length;
   const variants = (configuration.normalized_variants ?? run?.requested_variants ?? [])
     .map(formatVariant)
     .filter(Boolean);
   const mappingPairs = structure?.kind === 'alphafold3'
     ? null
-    : configuration.structure_mapping?.canonical_to_structure;
+    : structureConfiguration.structure_mapping?.canonical_to_structure;
   const mappedResidues = Array.isArray(mappingPairs) ? mappingPairs.length : null;
   return [
     ["Acceso científico", accessionFor(run, protein)],
     ["Longitud de secuencia", sequenceLength > 0 ? `${sequenceLength.toLocaleString('es-CO')} aminoácidos` : ''],
     ["Estructura mostrada", structure?.label ?? ''],
     ["Formato estructural", structure?.format === 'mmcif' ? 'mmCIF' : structure?.format?.toUpperCase() ?? ''],
-    ["Cadena seleccionada", structure?.kind === 'alphafold3' ? '' : configuration.structure_chain ?? ''],
+    ["Cadena seleccionada", structure?.kind === 'alphafold3' ? '' : structureConfiguration.structure_chain ?? ''],
     ["Residuos mapeados en la estructura de entrada", mappedResidues > 0 ? mappedResidues.toLocaleString('es-CO') : ''],
     ["Variantes solicitadas", variants.length ? variants.join(', ') : ''],
   ].filter(([, value]) => value !== null && value !== undefined && String(value).trim() !== '');
+}
+
+function sameVariantMutationRun(run, candidate) {
+  const tracking = run?.external_tracking;
+  const candidateTracking = candidate?.external_tracking;
+  return tracking?.run_type === 'ddg'
+    && Boolean(tracking.variant)
+    && candidateTracking?.run_type === 'mutant'
+    && candidateTracking.base_protein_id === tracking.base_protein_id
+    && candidateTracking.accession?.toUpperCase() === tracking.accession?.toUpperCase()
+    && candidateTracking.variant?.toUpperCase() === tracking.variant.toUpperCase();
+}
+
+async function relatedMutationRuns(run) {
+  if (run?.external_tracking?.run_type !== 'ddg' || !run.external_tracking.variant) return [];
+  const runs = [];
+  let offset = 0;
+  while (true) {
+    const page = await listRuns(200, offset, { baseProteinId: run.external_tracking.base_protein_id });
+    runs.push(...page);
+    if (page.length < 200) break;
+    offset += page.length;
+  }
+  return runs
+    .filter((candidate) => sameVariantMutationRun(run, candidate))
+    .sort((left, right) => String(right.created_at ?? '').localeCompare(String(left.created_at ?? '')));
 }
 
 function sequenceSelectionItems(selectedPositions, structure, structureMapping) {
@@ -91,7 +121,7 @@ function sequenceSelectionItems(selectedPositions, structure, structureMapping) 
   return positions.flatMap((position) => byCanonical.has(position) ? [byCanonical.get(position)] : []);
 }
 
-function SequenceStrip({ sequence, selectedPositions, onTogglePosition, onClearSelection }) {
+function SequenceStrip({ sequence, sequenceLabel, selectedPositions, onTogglePosition, onClearSelection }) {
   if (!sequence) return null;
   return (
     <div class="info-sequence-selection">
@@ -103,7 +133,7 @@ function SequenceStrip({ sequence, selectedPositions, onTogglePosition, onClearS
         </span>
         {selectedPositions.size > 0 && <button type="button" class="info-sequence-clear" onClick={onClearSelection}>Limpiar selección</button>}
       </div>
-      <div class="frustration-sequence-scroll" role="group" aria-label={`Secuencia canónica de ${sequence.length} aminoácidos`}>
+      <div class="frustration-sequence-scroll" role="group" aria-label={`${sequenceLabel} de ${sequence.length} aminoácidos`}>
         <div class="frustration-sequence-track">
           {[...sequence].map((aminoAcid, index) => {
             const position = index + 1;
@@ -141,6 +171,7 @@ function StructureViewport({ structure, structureMapping, selectedPositions, gen
     }
 
     let disposed = false;
+    const renderController = new AbortController();
     let viewer = null;
     viewerRef.current = null;
     const lease = acquireStructureUrl(structure.value, () => (
@@ -190,6 +221,8 @@ function StructureViewport({ structure, structureMapping, selectedPositions, gen
 
         viewer.plugin.canvas3d?.setProps(getZoomOptimizedCanvas3dProps());
         await viewer.loadStructureFromUrl(url, structure.format, false, { label: structure.label });
+        await waitForCanvasDraw(viewer.plugin.canvas3d, { signal: renderController.signal });
+        if (disposed) return disposeViewer();
         if (!disposed) setState('ready');
       } catch {
         disposeViewer();
@@ -200,6 +233,7 @@ function StructureViewport({ structure, structureMapping, selectedPositions, gen
     void loadStructure();
     return () => {
       disposed = true;
+      renderController.abort();
       disposeViewer();
       lease.release();
     };
@@ -277,7 +311,10 @@ function GeneralInformation({ facts }) {
 
 export default function InformationView({ proteinId }) {
   const [run, setRun] = useState(null);
+  const [relatedRuns, setRelatedRuns] = useState([]);
   const [protein, setProtein] = useState(null);
+  const [runProtein, setRunProtein] = useState(null);
+  const [runProteinError, setRunProteinError] = useState('');
   const [state, setState] = useState('loading');
   const [error, setError] = useState('');
   const [refreshWarning, setRefreshWarning] = useState('');
@@ -296,6 +333,17 @@ export default function InformationView({ proteinId }) {
   }, [proteinId]);
 
   useEffect(() => {
+    setRunProtein(null);
+    setRunProteinError('');
+    if (!run?.protein_id || run.protein_id === proteinId) return undefined;
+    let active = true;
+    getProtein(run.protein_id)
+      .then((result) => { if (active) setRunProtein(result); })
+      .catch(() => { if (active) setRunProteinError('No se pudo cargar la secuencia de esta corrida.'); });
+    return () => { active = false; };
+  }, [proteinId, run?.protein_id]);
+
+  useEffect(() => {
     setRun(null);
     setState('loading');
     setSelectedStructureValue('');
@@ -308,8 +356,7 @@ export default function InformationView({ proteinId }) {
     let active = true;
     let timer = null;
     let streamController = null;
-    let fallbackAttempts = 0;
-    let latestStatus = null;
+    let latestRun = null;
 
     const clearTimer = () => {
       if (timer !== null) window.clearTimeout(timer);
@@ -317,18 +364,14 @@ export default function InformationView({ proteinId }) {
     };
 
     const scheduleFallback = (load, delay = 4000) => {
-      if (!active || RUN_TERMINAL.has(latestStatus) || fallbackAttempts >= 3) {
-        if (active && fallbackAttempts >= 3) setRefreshWarning('La actualización automática se detuvo; recarga para consultar el estado actual.');
-        return;
-      }
-      fallbackAttempts += 1;
+      if (!active || runUpdatesFinished(latestRun)) return;
       clearTimer();
       timer = window.setTimeout(load, delay);
     };
 
     const applySnapshot = (snapshot) => {
       if (!active || !snapshot) return;
-      latestStatus = snapshot.status;
+      latestRun = snapshot;
       setRun(snapshot);
       setState('ready');
       setError('');
@@ -336,7 +379,7 @@ export default function InformationView({ proteinId }) {
     };
 
     const connectStream = async (load) => {
-      if (!active || RUN_TERMINAL.has(latestStatus)) return;
+      if (!active || runUpdatesFinished(latestRun)) return;
       streamController?.abort();
       const controller = new AbortController();
       streamController = controller;
@@ -345,17 +388,17 @@ export default function InformationView({ proteinId }) {
           signal: controller.signal,
           onSnapshot: (snapshot) => {
             applySnapshot(snapshot);
-            if (RUN_TERMINAL.has(snapshot?.status)) {
+            if (runUpdatesFinished(snapshot)) {
               clearTimer();
               controller.abort();
             }
           },
         });
-        if (active && !controller.signal.aborted && !RUN_TERMINAL.has(latestStatus)) scheduleFallback(load);
+        if (active && !controller.signal.aborted && !runUpdatesFinished(latestRun)) scheduleFallback(load, 5000);
       } catch (streamError) {
-        if (!active || controller.signal.aborted || RUN_TERMINAL.has(latestStatus)) return;
+        if (!active || controller.signal.aborted || runUpdatesFinished(latestRun)) return;
         setRefreshWarning(runLoadError(streamError, 'La actualización en vivo no está disponible.'));
-        scheduleFallback(load);
+        scheduleFallback(load, 5000);
       }
     };
 
@@ -365,12 +408,12 @@ export default function InformationView({ proteinId }) {
         const snapshot = await getRun(runId);
         applySnapshot(snapshot);
         clearTimer();
-        if (!RUN_TERMINAL.has(snapshot?.status)) await connectStream(load);
+        if (!runUpdatesFinished(snapshot)) await connectStream(load);
       } catch (requestError) {
         if (!active) return;
         setState('error');
         setError(runLoadError(requestError, 'No se pudo cargar la corrida.'));
-        scheduleFallback(load);
+        scheduleFallback(load, 5000);
       }
     };
 
@@ -382,10 +425,80 @@ export default function InformationView({ proteinId }) {
     };
   }, [runId]);
 
-  const structureOptions = useMemo(() => structureOptionsForRun(run), [run]);
+  useEffect(() => {
+    setRelatedRuns([]);
+    if (run?.external_tracking?.run_type !== 'ddg' || !run.external_tracking.variant) return undefined;
+
+    let active = true;
+    const controllers = new Set();
+    const timers = new Set();
+
+    const replaceRelatedRun = (snapshot) => {
+      if (!active || !snapshot) return;
+      setRelatedRuns((current) => current.map((item) => item.id === snapshot.id ? snapshot : item));
+    };
+
+    const delay = () => new Promise((resolve) => {
+      const timer = window.setTimeout(() => {
+        timers.delete(timer);
+        resolve();
+      }, 5000);
+      timers.add(timer);
+    });
+
+    const watchRelatedRun = async (initialRun) => {
+      let current = initialRun;
+      while (active && !runUpdatesFinished(current)) {
+        const controller = new AbortController();
+        controllers.add(controller);
+        try {
+          await subscribeRunEvents(current.id, {
+            signal: controller.signal,
+            onSnapshot: (snapshot) => {
+              current = snapshot;
+              replaceRelatedRun(snapshot);
+              if (runUpdatesFinished(snapshot)) controller.abort();
+            },
+          });
+        } catch {
+          // A later read below keeps related publications visible if SSE drops.
+        } finally {
+          controllers.delete(controller);
+        }
+        if (!active || runUpdatesFinished(current)) break;
+        await delay();
+        if (!active) break;
+        try {
+          current = await getRun(current.id);
+          replaceRelatedRun(current);
+        } catch {
+          // Preserve the last confirmed related-run snapshot during a disconnect.
+        }
+      }
+    };
+
+    relatedMutationRuns(run)
+      .then((mutations) => {
+        if (!active) return;
+        setRelatedRuns(mutations);
+        mutations.forEach((mutation) => { void watchRelatedRun(mutation); });
+      })
+      .catch(() => {
+        // The current run remains usable when related-run lookup is unavailable.
+      });
+
+    return () => {
+      active = false;
+      controllers.forEach((controller) => controller.abort());
+      timers.forEach((timer) => window.clearTimeout(timer));
+    };
+  }, [run?.id, run?.external_tracking?.base_protein_id, run?.external_tracking?.accession, run?.external_tracking?.variant, run?.external_tracking?.run_type]);
+
+  const structureOptions = useMemo(() => structureOptionsForRun(run, relatedRuns), [run, relatedRuns]);
   const defaultStructure = defaultStructureOption(structureOptions);
   const selectedStructure = structureOptions.find((option) => option.value === selectedStructureValue) ?? defaultStructure;
-  const facts = scientificFacts(run, protein, selectedStructure);
+  const sequenceProtein = sequenceProteinForRun(run, protein, runProtein);
+  const facts = scientificFacts(run, protein, selectedStructure, sequenceProtein);
   const generatingStructure = structureGenerationPending(run);
   const failedStructureGeneration = structureGenerationFailed(run);
   const toggleSelectedPosition = (position) => {
@@ -407,11 +520,13 @@ export default function InformationView({ proteinId }) {
   return (
     <section class="frustration-page info-view" aria-label="Información de la proteína">
       {refreshWarning && <div class="info-refresh-warning" role="status">{refreshWarning}</div>}
+      {runProteinError && <div class="info-refresh-warning" role="alert">{runProteinError}</div>}
 
-      {protein?.sequence && (
+      {sequenceProtein?.sequence && (
         <div class="frustration-chain-card info-sequence-card">
           <SequenceStrip
-            sequence={protein.sequence}
+            sequence={sequenceProtein.sequence}
+            sequenceLabel={run.external_tracking?.run_type === 'mutant' ? 'Secuencia de la mutante' : 'Secuencia de la proteína'}
             selectedPositions={selectedPositions}
             onTogglePosition={toggleSelectedPosition}
             onClearSelection={() => setSelectedPositions(new Set())}
@@ -436,7 +551,7 @@ export default function InformationView({ proteinId }) {
           </header>
           <StructureViewport
             structure={selectedStructure}
-            structureMapping={run?.configuration?.structure_mapping}
+            structureMapping={selectedStructure?.sourceRun?.configuration?.structure_mapping ?? run?.configuration?.structure_mapping}
             selectedPositions={selectedPositions}
             generationPending={generatingStructure}
             generationFailed={failedStructureGeneration}

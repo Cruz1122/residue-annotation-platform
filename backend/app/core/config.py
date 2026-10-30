@@ -171,6 +171,16 @@ class Settings(BaseSettings):
     mn5_root: str = "/gpfs/projects/bsc08/bsc001997/vcfs_1000geno/hilo_integrado_anotacion"
     mn5_max_entries: int = Field(default=100, ge=1, le=10_000)
     mn5_max_preview_bytes: int = Field(default=64_000, ge=1)
+    mn5_max_artifact_bytes: int = Field(
+        default=32 * 1024 * 1024,
+        ge=1,
+        le=64 * 1024 * 1024,
+    )
+    mn5_external_sync_interval_seconds: int = Field(default=15, ge=5, le=600)
+    mn5_external_sync_batch_size: int = Field(default=288, ge=1, le=2_000)
+    mn5_external_sync_parallelism: int = Field(default=8, ge=1, le=32)
+    mn5_external_tracking_only: bool = False
+    mn5_external_snapshot_only: bool = False
 
     @property
     def cors_origin_list(self) -> list[str]:

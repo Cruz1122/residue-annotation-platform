@@ -14,6 +14,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -41,6 +42,9 @@ class Run(Base):
         ForeignKey("proteins.id", ondelete="RESTRICT"), index=True
     )
     status: Mapped[str] = mapped_column(String(32), index=True, default="pending")
+    is_external_import: Mapped[bool] = mapped_column(
+        default=False, server_default="false", nullable=False, index=True
+    )
     owner_id: Mapped[str] = mapped_column(String(128), index=True)
     project_id: Mapped[str] = mapped_column(String(128), index=True)
     requested_variants: Mapped[list[dict[str, object]]] = mapped_column(JSON, default=list)
@@ -80,6 +84,59 @@ class Run(Base):
         uselist=False,
         cascade="all, delete-orphan",
     )
+    external_tracking: Mapped[ExternalRunTracking | None] = relationship(
+        back_populates="run",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
+
+
+class ExternalRunTracking(Base):
+    """Read-only link from one platform run to one external execution."""
+
+    __tablename__ = "external_run_tracking"
+    __table_args__ = (
+        UniqueConstraint("run_id", name="uq_external_run_tracking_run_id"),
+        UniqueConstraint("source", "remote_run_id", name="uq_external_run_tracking_remote"),
+        Index("ix_external_run_tracking_due", "next_sync_at", "claim_expires_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("runs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    source: Mapped[str] = mapped_column(String(32), nullable=False, default="mn5")
+    remote_run_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    # Stored as a path relative to the configured project root. It is never
+    # returned by the public API.
+    remote_path: Mapped[str] = mapped_column(String(1024), nullable=False)
+    run_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    base_protein_id: Mapped[str] = mapped_column(
+        ForeignKey("proteins.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    accession: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    variant: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    display_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    published_cache_keys: Mapped[dict[str, str]] = mapped_column(
+        JSON, nullable=False, default=dict, server_default=text("'{}'")
+    )
+    publication_cursor: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    connection_status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="connected", server_default="connected"
+    )
+    sync_error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    next_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    claim_token: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    claim_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    run: Mapped[Run] = relationship(back_populates="external_tracking")
+    base_protein: Mapped[Protein] = relationship()
 
 
 class Upload(Base):

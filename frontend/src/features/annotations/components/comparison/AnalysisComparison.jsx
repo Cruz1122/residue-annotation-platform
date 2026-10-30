@@ -12,7 +12,7 @@ import {
   getUploadObjectUrl,
 } from '@shared/api/client';
 import { userErrorMessage } from '@shared/lib/error-presentation';
-import { loadAnalysisArtifactDetails } from '@features/annotations/analysis-artifacts.js';
+import { loadAnalysisArtifactDetails, structureMappingFromArtifactRows } from '@features/annotations/analysis-artifacts.js';
 import { acquireStructureUrl } from '@features/annotations/structure-url-cache.js';
 import { isStructureArtifact, structureFormat } from '@features/annotations/structure-format.js';
 import { AA3, AA_NAMES, hexToColorInt, oneLetter } from '@features/annotations/viewer-presentation.js';
@@ -20,6 +20,8 @@ import { structureSelectionItems } from '@features/annotations/topology-presenta
 import { buildComparisonRibbon, createComparisonMeshGeometry } from '@features/annotations/comparison-mesh.js';
 import { comparisonCameraAction, comparisonChannelSignature } from '@features/annotations/comparison-camera.js';
 import { getZoomOptimizedCanvas3dProps } from '@features/annotations/zoom-rendering.js';
+import { waitForCanvasDraw } from '@features/annotations/components/shared/canvas-render-readiness.js';
+import { sequenceProteinForRun } from '@features/stages/components/info/information-presentation.js';
 import {
   COMPARISON_MISSING_COLOR,
   buildAvailableComparisonAnalyses,
@@ -55,7 +57,7 @@ async function getAllAnnotations(runId) {
 
 function structureSource(run) {
   const artifacts = (run?.stages ?? []).flatMap((stage) => stage.artifacts ?? []);
-  const preferredTypes = ['selected_reference_pdb', 'rosettamp_relaxed_pdb', 'foldx_relaxed_pdb', 'model_cif'];
+  const preferredTypes = ['model_cif', 'foldx_relaxed_pdb', 'selected_reference_pdb', 'rosettamp_relaxed_pdb'];
   const artifact = preferredTypes.map((type) => artifacts.find((item) => item.artifact_type === type)).find(Boolean)
     ?? artifacts.find(isStructureArtifact);
   if (artifact) {
@@ -214,14 +216,14 @@ function FrustrationMetricSelect({ analysis, value, onChange }) {
   );
 }
 
-function SequenceStrip({ composition, selectedPosition, onSelect }) {
+function SequenceStrip({ composition, sequenceLabel, selectedPosition, onSelect }) {
   const trackRef = useRef(null);
   useEffect(() => {
     if (!selectedPosition) return;
     trackRef.current?.querySelector(`[data-position="${selectedPosition}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
   }, [selectedPosition]);
   return (
-    <div class="comparison-sequence-scroll" role="group" aria-label="Secuencia canónica con canales de análisis" tabIndex={0}>
+    <div class="comparison-sequence-scroll" role="group" aria-label={sequenceLabel} tabIndex={0}>
       <div ref={trackRef} class="comparison-sequence-track">
         {composition.residues.map((residue) => (
           <button
@@ -404,6 +406,7 @@ function ComparisonStructure({ structureRequest, composition, mapping, sequence,
   useEffect(() => {
     if (!structureRequest || !hostRef.current) return undefined;
     let disposed = false;
+    const renderController = new AbortController();
     let clickSubscription;
     let viewerInstance;
     const lease = acquireStructureUrl(structureRequest.id, structureRequest.loadUrl);
@@ -611,6 +614,8 @@ function ComparisonStructure({ structureRequest, composition, mapping, sequence,
           });
           if (position !== null) onSelectRef.current(position);
         });
+        await waitForCanvasDraw(canvas, { signal: renderController.signal });
+        if (disposed) return;
         setViewerState('ready');
       } catch (error) {
         console.error(error);
@@ -623,6 +628,7 @@ function ComparisonStructure({ structureRequest, composition, mapping, sequence,
     void load();
     return () => {
       disposed = true;
+      renderController.abort();
       updateRequestRef.current += 1;
       clickSubscription?.unsubscribe?.();
       lease.release();
@@ -678,6 +684,7 @@ function ComparisonStructure({ structureRequest, composition, mapping, sequence,
 export default function AnalysisComparison({ proteinId }) {
   const runId = typeof window === 'undefined' ? '' : new URLSearchParams(window.location.search).get('run') ?? '';
   const [protein, setProtein] = useState(null);
+  const [runProtein, setRunProtein] = useState(null);
   const [run, setRun] = useState(null);
   const [annotations, setAnnotations] = useState([]);
   const [detailsByAnalysis, setDetailsByAnalysis] = useState({});
@@ -693,17 +700,24 @@ export default function AnalysisComparison({ proteinId }) {
 
   useEffect(() => {
     let active = true;
+    setProtein(null);
+    setRunProtein(null);
+    setRun(null);
+    setState('loading');
     async function load() {
       if (!runId) {
-        setState('error');
-        setError('Selecciona una corrida desde el historial o la vista de progreso para comparar sus análisis.');
+        setState('no-run');
         return;
       }
       try {
         const [proteinData, runData, annotationData] = await Promise.all([getProtein(proteinId), getRun(runId), getAllAnnotations(runId)]);
+        const runProteinData = runData.protein_id && runData.protein_id !== proteinData.id
+          ? await getProtein(runData.protein_id)
+          : null;
         const detailEntries = await Promise.all(ANALYSIS_IDS.map(async (id) => [id, await loadAnalysisArtifactDetails(runData, id, getArtifactBlob)]));
         if (!active) return;
         setProtein(proteinData);
+        setRunProtein(runProteinData);
         setRun(runData);
         setAnnotations(annotationData.rows ?? []);
         setAnnotationsTruncated(Boolean(annotationData.truncated));
@@ -719,7 +733,12 @@ export default function AnalysisComparison({ proteinId }) {
     return () => { active = false; };
   }, [proteinId, runId]);
 
-  const available = useMemo(() => buildAvailableComparisonAnalyses({ sequence: protein?.sequence ?? '', annotations, detailsByAnalysis }), [annotations, detailsByAnalysis, protein?.sequence]);
+  const sequenceProtein = sequenceProteinForRun(run, protein, runProtein);
+  const sequence = sequenceProtein?.sequence ?? '';
+  const sequenceLabel = run?.external_tracking?.run_type === 'mutant'
+    ? 'Secuencia mutante con canales de análisis'
+    : 'Secuencia canónica con canales de análisis';
+  const available = useMemo(() => buildAvailableComparisonAnalyses({ sequence, annotations, detailsByAnalysis }), [annotations, detailsByAnalysis, sequence]);
   const frustrationAnalysis = available.find(({ id }) => id === 'frustration') ?? null;
   useEffect(() => {
     if (!frustrationAnalysis?.tracks.some(({ id }) => id === frustrationMetricId)) {
@@ -739,8 +758,11 @@ export default function AnalysisComparison({ proteinId }) {
   }, [available]);
 
   const presentationAnalyses = useMemo(() => selectFrustrationMetric(available, frustrationMetricId), [available, frustrationMetricId]);
-  const composition = useMemo(() => composeComparisonSignals({ sequence: protein?.sequence ?? '', analyses: presentationAnalyses, activeIds }), [activeIds, presentationAnalyses, protein?.sequence]);
-  const mapping = useMemo(() => structureMappingMaps(run?.configuration?.structure_mapping ?? {}), [run?.configuration?.structure_mapping]);
+  const composition = useMemo(() => composeComparisonSignals({ sequence, analyses: presentationAnalyses, activeIds }), [activeIds, presentationAnalyses, sequence]);
+  const mapping = useMemo(() => structureMappingMaps(structureMappingFromArtifactRows(
+    run?.configuration?.structure_mapping,
+    detailsByAnalysis?.topology?.structure_mapping,
+  )), [detailsByAnalysis?.topology?.structure_mapping, run?.configuration?.structure_mapping]);
   const structureRequest = useMemo(() => structureSource(run), [run]);
   const topologyActive = activeIds.includes('topology');
   const membraneAvailable = (detailsByAnalysis?.topology?.tm_segments?.length ?? 0) > 0
@@ -751,12 +773,13 @@ export default function AnalysisComparison({ proteinId }) {
   useEffect(() => { setMembraneVisible(true); setMembraneState('not_applicable'); setSelectedPosition(null); initializedRef.current = false; }, [proteinId, runId]);
 
   if (state === 'loading') return <section class="frustration-page comparison-page"><StatePanel kind="loading" fill title="Cargando comparación" description="Consultando los artefactos y metadatos publicados por la corrida." /></section>;
+  if (state === 'no-run') return <section class="frustration-page comparison-page"><StatePanel kind="empty" fill icon="workflow" title="No hay una corrida seleccionada" description="Selecciona una corrida desde el historial o la vista de progreso para comparar sus análisis."><a class="protein-open" href="/proteins/">Mis proteínas</a></StatePanel></section>;
   if (state === 'error') return <section class="frustration-page comparison-page"><StatePanel kind="error" fill title="No se pudo cargar la comparación" description={error} /></section>;
 
   return (
     <section class="frustration-page comparison-page" aria-label="Comparación de análisis">
       <div class="comparison-top-card">
-        <SequenceStrip composition={composition} selectedPosition={selectedPosition} onSelect={togglePosition} />
+        <SequenceStrip composition={composition} sequenceLabel={sequenceLabel} selectedPosition={selectedPosition} onSelect={togglePosition} />
       </div>
 
       {annotationsTruncated && <p class="frustration-live-message" role="status">La cobertura de anotaciones es parcial; los valores ausentes se mantienen como “Sin dato publicado”.</p>}
@@ -768,7 +791,7 @@ export default function AnalysisComparison({ proteinId }) {
             structureRequest={structureRequest}
             composition={composition}
             mapping={mapping}
-            sequence={protein?.sequence ?? ''}
+            sequence={sequence}
             selectedPosition={selectedPosition}
             onSelect={togglePosition}
             membraneAvailable={membraneAvailable}
@@ -783,7 +806,7 @@ export default function AnalysisComparison({ proteinId }) {
           </div>
           <AnalysisLegends active={composition.active} />
         </main>
-        <ResiduePanel sequence={protein?.sequence ?? ''} selectedPosition={selectedPosition} composition={composition} availableAnalyses={available} />
+        <ResiduePanel sequence={sequence} selectedPosition={selectedPosition} composition={composition} availableAnalyses={available} />
       </div>
     </section>
   );

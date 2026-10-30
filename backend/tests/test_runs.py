@@ -1,6 +1,8 @@
+from datetime import UTC, datetime, timedelta
+
 from app.features.annotations.service import insert_annotation_rows
 from app.features.auth.models import AuditEvent
-from app.features.runs.models import ActiveRunSlot, Run, RunStage, StageResult
+from app.features.runs.models import ActiveRunSlot, ExternalRunTracking, Run, RunStage, StageResult
 from app.features.runs.service import transition_stage
 from app.features.runs.state import RunStageStatus
 from app.features.runs.worker_service import process_one, refresh_ready_states
@@ -123,6 +125,47 @@ def test_run_history_supports_authorized_pagination(client):
     assert {item["id"] for item in first_page.json() + second_page.json()} == set(run_ids)
 
 
+def test_external_run_history_filter_keeps_project_access_scoped(client, session):
+    project_a = {"X-User-Id": "filter-user-a", "X-Project-Id": "filter-project-a"}
+    project_b = {"X-User-Id": "filter-user-b", "X-Project-Id": "filter-project-b"}
+    protein_a = client.post("/api/v1/proteins", headers=project_a, json={"sequence": SEQUENCE})
+    protein_b = client.post(
+        "/api/v1/proteins", headers=project_b, json={"sequence": SEQUENCE.lower()}
+    )
+    assert protein_a.status_code == 201
+    assert protein_b.status_code == 200
+    assert protein_a.json()["id"] == protein_b.json()["id"]
+    base_protein_id = protein_a.json()["id"]
+
+    run_ids = []
+    for headers, suffix in ((project_a, "a"), (project_b, "b")):
+        response = client.post(
+            "/api/v1/runs", headers=headers, json={"protein_id": base_protein_id}
+        )
+        assert response.status_code == 201
+        run_ids.append(response.json()["id"])
+        session.add(
+            ExternalRunTracking(
+                run_id=response.json()["id"],
+                remote_run_id=f"external-{suffix}",
+                remote_path=f"Q8NBP7/external-{suffix}",
+                run_type="ddg",
+                base_protein_id=base_protein_id,
+                accession="Q8NBP7",
+                variant="L41Q",
+                display_name=f"DDG Q8NBP7 L41Q {suffix}",
+            )
+        )
+    session.commit()
+
+    a_response = client.get(f"/api/v1/runs?base_protein_id={base_protein_id}", headers=project_a)
+    b_response = client.get(f"/api/v1/runs?base_protein_id={base_protein_id}", headers=project_b)
+
+    assert a_response.status_code == b_response.status_code == 200
+    assert [run["id"] for run in a_response.json()] == [run_ids[0]]
+    assert [run["id"] for run in b_response.json()] == [run_ids[1]]
+
+
 def test_cpu_only_remote_run_uses_selected_stage_resources(client):
     from app.core.config import Settings, get_settings
     from app.main import app
@@ -197,6 +240,47 @@ def test_run_not_found_does_not_invent_progress(client):
     assert response.json()["detail"] == "Run not found"
 
 
+def test_external_run_response_shows_unselected_registry_stages_as_disabled(client, session):
+    protein_id = _create_protein(client)
+    created = client.post("/api/v1/runs", json={"protein_id": protein_id})
+    assert created.status_code == 201
+    run_id = created.json()["id"]
+    run = session.get(Run, run_id)
+    assert run is not None and run.configuration is not None
+
+    selected_ids = {"protein_identity", "structure_modeling"}
+    run.configuration.selected_stage_ids = sorted(selected_ids)
+    for stage in list(run.stages):
+        if stage.stage_id not in selected_ids and stage.stage_id != "structural_frustration":
+            session.delete(stage)
+        elif stage.stage_id == "structural_frustration":
+            stage.status = RunStageStatus.SUCCESS
+    run.is_external_import = True
+    run.external_tracking = ExternalRunTracking(
+        source="mn5",
+        remote_run_id="P11712_base_20261026T010203000001Z",
+        remote_path="runs/P11712_base_20261026T010203000001Z",
+        run_type="base",
+        base_protein_id=protein_id,
+        accession="P11712",
+        display_name="P11712",
+    )
+    session.commit()
+
+    response = client.get(f"/api/v1/runs/{run_id}")
+
+    assert response.status_code == 200
+    payload = response.json()
+    stages = {stage["id"]: stage for stage in payload["pipeline_stages"]}
+    assert len(stages) == len(STAGE_DEFINITIONS) == 19
+    assert stages["conformational_ensemble"]["status"] == "disabled"
+    assert stages["ensemble_frustration"]["status"] == "disabled"
+    assert stages["structural_frustration"]["status"] == "success"
+    assert stages["protein_identity"]["status"] != "disabled"
+    persisted_count = len(session.query(RunStage).filter_by(run_id=run_id).all())
+    assert len(payload["stages"]) == persisted_count == 3
+
+
 def test_run_events_emits_the_persisted_terminal_snapshot(client):
     protein_id = _create_protein(client)
     created = client.post("/api/v1/runs", json={"protein_id": protein_id})
@@ -243,6 +327,46 @@ def test_run_events_refreshes_from_the_current_persisted_snapshot(monkeypatch, c
     assert response.text.count("event: snapshot") == 2
     assert '"status":"pending"' in response.text
     assert '"status":"cancelled"' in response.text
+
+
+def test_run_events_keeps_terminal_external_run_open_until_tracking_finishes(
+    monkeypatch, client, session
+):
+    protein_id = _create_protein(client)
+    created = client.post("/api/v1/runs", json={"protein_id": protein_id})
+    assert created.status_code == 201
+    run_id = created.json()["id"]
+    run = session.get(Run, run_id)
+    assert run is not None
+    run.status = "success"
+    run.external_tracking = ExternalRunTracking(
+        source="mn5",
+        remote_run_id="P11712_external_20261025T010203000001Z",
+        remote_path="runs/P11712_external_20261025T010203000001Z",
+        run_type="mutant",
+        base_protein_id=protein_id,
+        accession="P11712",
+        variant="A1V",
+        display_name="P11712-A1V",
+        next_sync_at=datetime.now(UTC) + timedelta(seconds=15),
+    )
+    session.commit()
+
+    async def finish_tracking(_: float) -> None:
+        tracking = session.scalar(
+            select(ExternalRunTracking).where(ExternalRunTracking.run_id == run_id)
+        )
+        assert tracking is not None
+        tracking.next_sync_at = None
+        session.commit()
+
+    monkeypatch.setattr("app.features.runs.router.asyncio.sleep", finish_tracking)
+    response = client.get(f"/api/v1/runs/{run_id}/events")
+
+    assert response.status_code == 200
+    assert response.text.count("event: snapshot") == 2
+    assert '"tracking_active":true' in response.text
+    assert '"tracking_active":false' in response.text
 
 
 def test_variants_are_normalized_and_duplicate_positions_are_rejected(client):

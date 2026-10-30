@@ -95,11 +95,21 @@ test('BioEmu artifact resolver scopes topology, trajectory, metadata, and metric
     { id: 'other_stage', artifacts: [{ id: 'foreign', artifact_type: 'metadata' }] },
   ] };
   assert.deepEqual(resolveBioEmuArtifacts(run), {
-    stage: run.stages[0], topology, trajectory, finalDirectory: null, metadata, frameIndex: frames, conformerMetrics: metrics,
+    stage: run.stages[0], topology, referencePdb: null, trajectory, finalDirectory: null, metadata, frameIndex: frames, conformerMetrics: metrics,
   });
   const withoutXtc = resolveBioEmuArtifacts({ stages: [{ id: 'conformational_ensemble', artifacts: [topology, metadata] }] });
   assert.equal(withoutXtc.trajectory, null);
   assert.equal(withoutXtc.metadata, metadata);
+});
+
+test('BioEmu can use the run relaxed PDB as a reference when no conformer topology was published', () => {
+  const relaxed = { id: 'relaxed', artifact_type: 'rosettamp_relaxed_pdb', media_type: 'application/octet-stream' };
+  const selected = { id: 'selected', artifact_type: 'selected_reference_pdb', media_type: 'application/octet-stream' };
+  const model = { id: 'model', artifact_type: 'model_cif', media_type: 'chemical/x-mmcif' };
+  const artifacts = resolveBioEmuArtifacts({ stages: [{ id: 'protein_relaxation_energy', artifacts: [selected, model, relaxed] }] });
+
+  assert.equal(artifacts.topology, null);
+  assert.equal(artifacts.referencePdb, relaxed);
 });
 
 test('resolves the final directory TAR and selects the newest successful run with a published topology source', () => {
@@ -202,6 +212,27 @@ test('PDB summary counts first-model atoms and residues and maps an exact chain 
   assert.equal(validatePdbSequenceCompatibility('AC', summary, { sequenceLength: 2 }), '');
   assert.match(validatePdbSequenceCompatibility('AG', summary, { sequenceLength: 2 }), /no coincide/);
   assert.match(validatePdbSequenceCompatibility('AC', summary, { sequenceLength: 3 }), /publica una secuencia de 3/);
+});
+
+test('maps a unique exact subsequence for a static structure preview without accepting it for trajectory playback', () => {
+  const pdb = [
+    pdbAtom(1, 'GLY', 'A', 25, 1),
+    pdbAtom(2, 'ALA', 'A', 26, 1),
+    pdbAtom(3, 'CYS', 'A', 27, 1),
+    pdbAtom(4, 'ASP', 'A', 28, 1),
+  ].join('\n');
+  const summary = parsePdbSummary(pdb);
+  const mapped = findSequenceChain(summary, 'AC');
+
+  assert.equal(mapped.sequence, 'AC');
+  assert.equal(mapped.sequenceOffset, 1);
+  assert.deepEqual(mapped.residues.map((residue) => residue.authSequenceId), ['26', '27']);
+  assert.match(validatePdbSequenceCompatibility('AC', summary, null), /no coincide/);
+});
+
+test('does not map an ambiguous repeated subsequence to one PDB region', () => {
+  const summary = { chains: [{ chainId: 'A', sequence: 'ACAC', residues: Array(4).fill({}) }] };
+  assert.equal(findSequenceChain(summary, 'AC'), null);
 });
 
 test('Mol* atom-count incompatibility becomes an understandable stop state', () => {

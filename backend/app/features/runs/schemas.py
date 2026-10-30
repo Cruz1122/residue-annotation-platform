@@ -141,6 +141,23 @@ class RunPreparationRead(BaseModel):
     finished_at: datetime | None = None
 
 
+class ExternalRunTrackingRead(BaseModel):
+    """Safe, additive public fields for a remotely tracked run."""
+
+    source: str
+    remote_run_id: str
+    run_type: Literal["ddg", "mutant", "base"]
+    base_protein_id: str
+    accession: str
+    variant: str | None = None
+    display_name: str
+    last_synced_at: datetime | None = None
+    last_attempt_at: datetime | None = None
+    connection_status: Literal["connected", "unavailable"]
+    sync_error_code: str | None = None
+    tracking_active: bool = False
+
+
 class RunRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -149,6 +166,8 @@ class RunRead(BaseModel):
     status: str
     requested_variants: list[dict[str, object]]
     remote_job_id: str | None = None
+    is_external_import: bool = False
+    external_tracking: ExternalRunTrackingRead | None = None
     error_code: str | None = None
     error_message: str | None = None
     configuration: RunConfigurationRead | None = None
@@ -158,6 +177,7 @@ class RunRead(BaseModel):
     started_at: datetime | None = None
     finished_at: datetime | None = None
     stages: list[StageRead]
+    pipeline_stages: list[StageRead] = Field(default_factory=list)
     uploads: list["UploadRead"] = Field(default_factory=list)
 
 

@@ -14,12 +14,14 @@ import threading
 import time
 from collections.abc import Callable, Generator
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from app.core.auth import Principal
 from app.core.config import Settings
 from app.core.db import Base, get_db
 from app.features.annotations import models as _annotations  # noqa: F401
+from app.features.artifacts.storage import ArtifactStore
 from app.features.auth import models as _auth  # noqa: F401
 from app.features.auth.models import RateLimitBucket, RefreshToken, User, UserRole
 from app.features.auth.service import (
@@ -37,8 +39,9 @@ from app.features.auth.service import (
 )
 from app.features.proteins import models as _proteins  # noqa: F401
 from app.features.proteins.models import Protein
+from app.features.runs import mn5_tracking as tracking_module
 from app.features.runs import models as _runs  # noqa: F401
-from app.features.runs.models import ActiveRunSlot, Run, RunStage
+from app.features.runs.models import ActiveRunSlot, Artifact, Run, RunStage, StageResult
 from app.features.runs.schemas import RunCreate
 from app.features.runs.service import create_run, get_owned_run, request_cancel, transition_stage
 from app.features.runs.state import RunStageStatus
@@ -132,6 +135,116 @@ def test_concurrent_run_creation_keeps_one_slot():
     with TestSession() as session:
         assert session.scalar(select(func.count()).select_from(Run)) == 1
         assert session.scalar(select(func.count()).select_from(ActiveRunSlot)) == 1
+
+
+def test_concurrent_conflicting_external_artifact_cannot_replace_shared_blob(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    with TestSession() as session:
+        protein = _protein(session)
+        stage_result = StageResult(
+            protein_id=protein.id,
+            stage_id="protein_identity",
+            cache_key="a" * 64,
+            status=RunStageStatus.SUCCESS,
+            provenance={},
+            owner_id=protein.owner_id,
+            project_id=protein.project_id,
+        )
+        session.add(stage_result)
+        session.commit()
+        protein_id = protein.id
+        stage_result_id = stage_result.id
+
+    store = ArtifactStore(Settings(app_env="test", artifact_root=tmp_path / "artifacts"))
+    cache_key = "a" * 64
+    storage_key = tracking_module._storage_key(
+        protein_id,
+        "protein_identity",
+        cache_key,
+        "summary",
+        "summary.txt",
+    )
+    destination = store.resolve(storage_key)
+    payloads = {
+        "artifact-a": b"first verified publication\n",
+        "artifact-b": b"conflicting verified publication\n",
+    }
+    specs = {
+        name: {
+            "artifact_type": "summary",
+            "remote_path": f"results/protein_identity/{cache_key}/summary.txt",
+            "size": len(payload),
+            "sha256": hashlib.sha256(payload).hexdigest(),
+        }
+        for name, payload in payloads.items()
+    }
+    both_observed_absent = threading.Barrier(2, timeout=30)
+    first_artifact_attached = threading.Event()
+    results: dict[str, bool] = {}
+    errors: list[BaseException] = []
+    original_path_exists = Path.exists
+    original_mkstemp = tracking_module.tempfile.mkstemp
+    original_attach = tracking_module._attach_stage_artifact
+
+    def synchronized_path_exists(path: Path) -> bool:
+        exists = original_path_exists(path)
+        if path == destination:
+            assert not exists
+            both_observed_absent.wait()
+        return exists
+
+    def wait_for_first_artifact(*args, **kwargs):
+        if threading.current_thread().name == "artifact-b" and not first_artifact_attached.wait(
+            timeout=30
+        ):
+            raise TimeoutError("first artifact was not attached")
+        return original_mkstemp(*args, **kwargs)
+
+    def signal_first_artifact(*args, **kwargs):
+        attached = original_attach(*args, **kwargs)
+        if threading.current_thread().name == "artifact-a":
+            first_artifact_attached.set()
+        return attached
+
+    monkeypatch.setattr(Path, "exists", synchronized_path_exists)
+    monkeypatch.setattr(tracking_module.tempfile, "mkstemp", wait_for_first_artifact)
+    monkeypatch.setattr(tracking_module, "_attach_stage_artifact", signal_first_artifact)
+
+    def persist(name: str) -> None:
+        try:
+            with TestSession() as session:
+                stage_result = session.get(StageResult, stage_result_id)
+                assert stage_result is not None
+                results[name] = tracking_module._persist_artifact(
+                    session,
+                    store,
+                    SimpleNamespace(protein_id=protein_id),
+                    stage_result=stage_result,
+                    stage_id="protein_identity",
+                    cache_key=cache_key,
+                    spec=specs[name],
+                    payload=payloads[name],
+                )
+                session.commit()
+        except BaseException as error:
+            errors.append(error)
+
+    threads = [
+        threading.Thread(target=persist, args=(name,), name=name)
+        for name in ("artifact-a", "artifact-b")
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    assert not any(thread.is_alive() for thread in threads), "artifact writer did not finish"
+    assert errors == []
+    assert sorted(results.values()) == [False, True]
+    with TestSession() as session:
+        artifact = session.query(Artifact).filter_by(storage_key=storage_key).one()
+        assert store.metadata(storage_key) == (artifact.size, artifact.sha256)
 
 
 def test_postgres_run_ownership_blocks_a_foreign_principal():

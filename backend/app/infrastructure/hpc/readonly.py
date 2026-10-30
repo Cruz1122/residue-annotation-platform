@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import errno
 import stat
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Protocol
+from typing import Literal, Protocol
 
 import paramiko
 
@@ -19,6 +20,8 @@ AUTHORIZED_MN5_ROOT = "/gpfs/projects/bsc08/bsc001997/vcfs_1000geno/hilo_integra
 _PREVIEW_SUFFIXES = frozenset(
     {
         ".pdb",
+        ".pred",
+        ".span",
         ".cif",
         ".mmcif",
         ".tsv",
@@ -32,6 +35,7 @@ _PREVIEW_SUFFIXES = frozenset(
         ".md",
     }
 )
+_COMPOUND_PREVIEW_SUFFIXES = frozenset({".tsv.gz"})
 _SENSITIVE_NAME_MARKERS = (
     "password",
     "passwd",
@@ -42,6 +46,20 @@ _SENSITIVE_NAME_MARKERS = (
     "id_ed25519",
     "authorized_keys",
     "known_hosts",
+)
+_SFTP_TRANSPORT_ERRNOS = frozenset(
+    {
+        errno.ECONNABORTED,
+        errno.ECONNREFUSED,
+        errno.ECONNRESET,
+        errno.EHOSTDOWN,
+        errno.EHOSTUNREACH,
+        errno.ENETDOWN,
+        errno.ENETUNREACH,
+        errno.ENOTCONN,
+        errno.EPIPE,
+        errno.ETIMEDOUT,
+    }
 )
 
 
@@ -68,7 +86,9 @@ def _validate_preview_path(relative_path: str) -> PurePosixPath:
     filename = path.name.lower()
     if any(marker in filename for marker in _SENSITIVE_NAME_MARKERS):
         raise InspectionError("sensitive files cannot be previewed")
-    if path.suffix.lower() not in _PREVIEW_SUFFIXES:
+    if path.suffix.lower() not in _PREVIEW_SUFFIXES and not any(
+        filename.endswith(suffix) for suffix in _COMPOUND_PREVIEW_SUFFIXES
+    ):
         raise InspectionError("file type is not allowed for preview")
     return path
 
@@ -83,9 +103,17 @@ class InspectionEntry:
 class ReadOnlyMN5Inspector(Protocol):
     def list(self, relative_dir: str = "") -> list[InspectionEntry]: ...
 
+    def inspect_kind(
+        self, relative_path: str
+    ) -> Literal["file", "directory", "symlink", "special", "missing"]: ...
+
     def stat(self, relative_path: str) -> InspectionEntry: ...
 
     def read_preview(self, relative_path: str, limit: int) -> bytes: ...
+
+    def read_many_previews(
+        self, relative_paths: list[str], limit: int
+    ) -> dict[str, bytes | None]: ...
 
 
 class LocalReadOnlyInspector:
@@ -137,6 +165,24 @@ class LocalReadOnlyInspector:
         entries.sort(key=lambda item: item.path)
         return entries
 
+    def inspect_kind(
+        self, relative_path: str
+    ) -> Literal["file", "directory", "symlink", "special", "missing"]:
+        relative = validate_relative_path(relative_path)
+        parent = self._resolve(str(relative.parent)) if str(relative.parent) != "." else self.root
+        candidate = parent / relative.name
+        try:
+            attributes = candidate.lstat()
+        except FileNotFoundError:
+            return "missing"
+        if candidate.is_symlink():
+            return "symlink"
+        if stat.S_ISDIR(attributes.st_mode):
+            return "directory"
+        if stat.S_ISREG(attributes.st_mode):
+            return "file"
+        return "special"
+
     def stat(self, relative_path: str) -> InspectionEntry:
         path = self._resolve(relative_path)
         item = path.stat()
@@ -152,6 +198,15 @@ class LocalReadOnlyInspector:
             raise InspectionError("not a regular file")
         with path.open("rb") as stream:
             return stream.read(limit)
+
+    def read_many_previews(self, relative_paths: list[str], limit: int) -> dict[str, bytes | None]:
+        results: dict[str, bytes | None] = {}
+        for path in relative_paths:
+            try:
+                results[path] = self.read_preview(path, limit)
+            except (FileNotFoundError, InspectionError):
+                results[path] = None
+        return results
 
 
 class NativeReadOnlyInspector(LocalReadOnlyInspector):
@@ -175,7 +230,7 @@ class NativeReadOnlyInspector(LocalReadOnlyInspector):
         super().__init__(
             root,
             max_entries=settings.mn5_max_entries,
-            max_preview_bytes=settings.mn5_max_preview_bytes,
+            max_preview_bytes=max(settings.mn5_max_preview_bytes, settings.mn5_max_artifact_bytes),
         )
 
 
@@ -229,7 +284,9 @@ class SFTPReadOnlyInspector:
                 allow_agent=False,
                 look_for_keys=False,
             )
-            return client, client.open_sftp()
+            sftp = client.open_sftp()
+            sftp.get_channel().settimeout(self.settings.hpc_command_timeout_seconds)
+            return client, sftp
         except InspectionError:
             client.close()
             raise
@@ -282,6 +339,35 @@ class SFTPReadOnlyInspector:
             sftp.close()
             client.close()
 
+    def inspect_kind(
+        self, relative_path: str
+    ) -> Literal["file", "directory", "symlink", "special", "missing"]:
+        relative = validate_relative_path(relative_path)
+        client, sftp = self._connect()
+        try:
+            remote_path = self._remote(str(relative))
+            parent = str(PurePosixPath(remote_path).parent)
+            self._assert_safe(sftp, str(self.root), parent)
+            try:
+                attributes = sftp.lstat(remote_path)
+            except FileNotFoundError:
+                return "missing"
+            mode = attributes.st_mode or 0
+            if stat.S_ISLNK(mode):
+                return "symlink"
+            if stat.S_ISDIR(mode):
+                return "directory"
+            if stat.S_ISREG(mode):
+                return "file"
+            return "special"
+        except InspectionError:
+            raise
+        except Exception as exc:
+            raise InspectionError("remote inspection is unavailable") from exc
+        finally:
+            sftp.close()
+            client.close()
+
     def stat(self, relative_path: str) -> InspectionEntry:
         client, sftp = self._connect()
         try:
@@ -322,6 +408,50 @@ class SFTPReadOnlyInspector:
             sftp.close()
             client.close()
 
+    def read_many_previews(self, relative_paths: list[str], limit: int) -> dict[str, bytes | None]:
+        """Read bounded regular files on one read-only SFTP connection."""
+
+        if limit < 1 or limit > max(
+            self.settings.mn5_max_preview_bytes, self.settings.mn5_max_artifact_bytes
+        ):
+            raise InspectionError("preview exceeds configured limit")
+        paths = [str(_validate_preview_path(path)) for path in relative_paths]
+        client, sftp = self._connect()
+        try:
+            results: dict[str, bytes | None] = {}
+            for relative_path in paths:
+                try:
+                    remote_path = self._remote(relative_path)
+                    self._assert_safe(sftp, str(self.root), remote_path)
+                    attributes = sftp.lstat(remote_path)
+                    if stat.S_ISLNK(attributes.st_mode or 0) or not stat.S_ISREG(
+                        attributes.st_mode or 0
+                    ):
+                        raise InspectionError("only regular files can be previewed")
+                    if attributes.st_size is None or attributes.st_size > limit:
+                        raise InspectionError("preview exceeds configured limit")
+                    with sftp.open(remote_path, "rb") as stream:
+                        content = stream.read(limit + 1)
+                    if len(content) > limit or len(content) != attributes.st_size:
+                        raise InspectionError("remote preview changed while being read")
+                    results[relative_path] = content
+                except OSError as exc:
+                    if isinstance(exc, (ConnectionError, TimeoutError)) or exc.errno in (
+                        _SFTP_TRANSPORT_ERRNOS
+                    ):
+                        raise InspectionError("remote inspection is unavailable") from exc
+                    results[relative_path] = None
+                except InspectionError:
+                    results[relative_path] = None
+            return results
+        except InspectionError:
+            raise
+        except Exception as exc:
+            raise InspectionError("remote inspection is unavailable") from exc
+        finally:
+            sftp.close()
+            client.close()
+
 
 class InMemoryReadOnlyInspector:
     """Test-only fixture adapter; it has no product endpoint or write method."""
@@ -330,6 +460,7 @@ class InMemoryReadOnlyInspector:
         self,
         files: dict[str, bytes],
         *,
+        directory_paths: list[str] | tuple[str, ...] = (),
         max_entries: int = 100,
         max_preview_bytes: int = 64_000,
     ):
@@ -344,6 +475,12 @@ class InMemoryReadOnlyInspector:
             while str(parent) != ".":
                 self.directories.add(str(parent))
                 parent = parent.parent
+        for path in directory_paths:
+            normalized = validate_relative_path(path)
+            directory = normalized
+            while str(directory) != ".":
+                self.directories.add(str(directory))
+                directory = directory.parent
         self.max_entries = max_entries
         self.max_preview_bytes = max_preview_bytes
 
@@ -366,6 +503,16 @@ class InMemoryReadOnlyInspector:
                 children[child_path] = InspectionEntry(child_path, len(value), False)
             else:
                 children[child_path] = InspectionEntry(child_path, 0, True)
+        for path in self.directories:
+            candidate = PurePosixPath(path)
+            try:
+                remaining = candidate.relative_to(base)
+            except ValueError:
+                continue
+            if not remaining.parts:
+                continue
+            child_path = str(base / remaining.parts[0]) if relative_dir else remaining.parts[0]
+            children[child_path] = InspectionEntry(child_path, 0, True)
         if len(children) > self.max_entries:
             raise InspectionError("directory listing exceeds configured limit")
         if relative_dir and relative_dir not in self.directories:
@@ -373,6 +520,16 @@ class InMemoryReadOnlyInspector:
         entries = list(children.values())
         entries.sort(key=lambda item: item.path)
         return entries
+
+    def inspect_kind(
+        self, relative_path: str
+    ) -> Literal["file", "directory", "symlink", "special", "missing"]:
+        normalized = str(validate_relative_path(relative_path))
+        if normalized in self.files:
+            return "file"
+        if normalized in self.directories:
+            return "directory"
+        return "missing"
 
     def stat(self, relative_path: str) -> InspectionEntry:
         normalized = str(validate_relative_path(relative_path))
@@ -389,6 +546,15 @@ class InMemoryReadOnlyInspector:
         self.stat(str(normalized))
         return self.files[str(normalized)][:limit]
 
+    def read_many_previews(self, relative_paths: list[str], limit: int) -> dict[str, bytes | None]:
+        result: dict[str, bytes | None] = {}
+        for path in relative_paths:
+            try:
+                result[path] = self.read_preview(path, limit)
+            except InspectionError:
+                result[path] = None
+        return result
+
 
 def build_read_only_inspector(settings: Settings) -> ReadOnlyMN5Inspector:
     """Select an explicitly enabled read-only driver.
@@ -404,7 +570,7 @@ def build_read_only_inspector(settings: Settings) -> ReadOnlyMN5Inspector:
         return InMemoryReadOnlyInspector(
             {},
             max_entries=settings.mn5_max_entries,
-            max_preview_bytes=settings.mn5_max_preview_bytes,
+            max_preview_bytes=max(settings.mn5_max_preview_bytes, settings.mn5_max_artifact_bytes),
         )
     if settings.mn5_inspection_mode == "ssh_sftp":
         return SFTPReadOnlyInspector(settings)

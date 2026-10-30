@@ -3,7 +3,10 @@
   display: grid;
   place-items: center;
   padding: clamp(18px, 4vw, 48px);
-  background: var(--canvas);
+  background-color: var(--canvas);
+  background-image: radial-gradient(circle, rgba(154, 160, 168, .5) 0 2px, transparent 2.1px);
+  background-size: 18px 18px;
+  background-position: center;
 }
 
 .auth-surface {

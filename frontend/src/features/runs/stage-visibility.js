@@ -34,6 +34,19 @@ export function presentRunStages(stages) {
   return presented;
 }
 
+export function visibleRunStages(run, stages) {
+  if (run?.is_external_import) return stages;
+
+  const selectedIds = new Set(run?.configuration?.selected_stage_ids ?? []);
+  return selectedIds.size
+    ? stages.filter((stage) => (
+      selectedIds.has(stage.id)
+      || stage.id === 'protein_identity'
+      || stage.status === 'disabled'
+    ))
+    : stages.filter((stage) => stage.status !== 'disabled');
+}
+
 export function progressSummary(stages) {
   const enabled = stages.filter((stage) => stage.status !== 'disabled');
   const completed = enabled.filter((stage) => RESOLVED.has(stage.status)).length;

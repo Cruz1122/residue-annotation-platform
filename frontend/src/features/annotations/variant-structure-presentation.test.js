@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  areStructureSourcesReady,
   canCompareStructureSources,
   distinctStructureOptions,
+  matchingMutantRun,
   parseVariantStructureArchive,
 } from './variant-structure-presentation.js';
 
@@ -24,6 +26,34 @@ test('does not offer the structure selected by the other comparison panel', () =
   );
   assert.equal(canCompareStructureSources({ key: 'reference' }, { key: 'reference' }), false);
   assert.equal(canCompareStructureSources({ key: 'reference' }, { key: 'structure:E21K' }), true);
+});
+
+test('marks camera synchronization ready only for the currently loaded pair', () => {
+  const reference = { id: 'reference-cif' };
+  const mutant = { id: 'q64h-cif' };
+  assert.equal(areStructureSourcesReady({ first: reference.id, second: '' }, reference, mutant), false);
+  assert.equal(areStructureSourcesReady({ first: reference.id, second: 'old-cif' }, reference, mutant), false);
+  assert.equal(areStructureSourcesReady({ first: reference.id, second: mutant.id }, reference, mutant), true);
+  assert.equal(areStructureSourcesReady({ first: reference.id, second: mutant.id }, reference, reference), false);
+});
+
+test('matches a DDG result only to its mutant run for the same base protein and variant', () => {
+  const tracking = {
+    run_type: 'ddg',
+    base_protein_id: 'base-protein',
+    accession: 'Q8WTV0',
+    variant: 'A477I',
+  };
+  const runs = [
+    { id: 'other-accession', external_tracking: { ...tracking, run_type: 'mutant', accession: 'Q9UNQ0' } },
+    { id: 'other-variant', external_tracking: { ...tracking, run_type: 'mutant', variant: 'A528T' } },
+    { id: 'other-base', external_tracking: { ...tracking, run_type: 'mutant', base_protein_id: 'another-base' } },
+    { id: 'matched', external_tracking: { ...tracking, run_type: 'mutant' } },
+  ];
+
+  assert.equal(matchingMutantRun(runs, tracking)?.id, 'matched');
+  assert.equal(matchingMutantRun(runs, { ...tracking, run_type: 'mutant' }), null);
+  assert.equal(matchingMutantRun(runs, { ...tracking, variant: null }), null);
 });
 
 function writeField(target, offset, length, value) {

@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   formatVariantNumber,
   formatPublishedNumber,
+  initialVariantSelection,
   indexVariantsByPosition,
   isScientistVisibleVariantArtifact,
   mergePublishedVariants,
@@ -55,6 +56,17 @@ test('merges requested and published variants without losing the published field
   assert.deepEqual(variants.map(variantKey), ['R43C', 'F402L']);
   assert.equal(variants[1].ddg_value, '1.84');
   assert.equal(variantRecordFor([{ variant_id: 'F402L', ddg_value: '1.84' }], 'F402L').ddg_value, '1.84');
+});
+
+test('starts with the first position-sorted variant while preserving explicit clears', () => {
+  const variants = mergePublishedVariants([], [
+    { variant_id: 'R43C' },
+    { variant_id: 'E31K' },
+  ]);
+  assert.equal(variants[0].variant_id, 'E31K');
+  assert.equal(variantKey(initialVariantSelection(variants, '', false)), 'E31K');
+  assert.equal(variantKey(initialVariantSelection(variants, 'R43C', false)), 'R43C');
+  assert.equal(initialVariantSelection(variants, '', true), null);
 });
 
 test('preserves the native ddg value and unit without inventing a conversion', () => {

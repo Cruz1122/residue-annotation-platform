@@ -23,6 +23,19 @@ const RUN_STATUS_TEXT = {
 };
 
 const RUNNING_STATUSES = new Set(['running', 'cancel_requested']);
+const CAMPAIGN_GENE_BY_ACCESSION = Object.freeze({
+  P02649: 'APOE',
+  P01130: 'LDLR',
+  P04035: 'HMGCR',
+  P08183: 'ABCB1',
+  P08684: 'CYP3A4',
+  P11712: 'CYP2C9',
+  P22309: 'UGT1A1',
+  Q8NBP7: 'PCSK9',
+  Q8WTV0: 'SCARB1',
+  Q9UNQ0: 'ABCG2',
+  Q9Y6L6: 'SLCO1B1',
+});
 
 function formatElapsed(milliseconds) {
   const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000));
@@ -38,6 +51,7 @@ export function runStatusLabel(status) {
 }
 
 export function runDurationText(run, now = Date.now()) {
+  if (run?.external_tracking) return '';
   if (!run?.started_at) return '';
   const started = new Date(run.started_at).getTime();
   if (!Number.isFinite(started)) return '';
@@ -62,6 +76,9 @@ export function runStatusClass(status) {
 }
 
 export function proteinDisplayName(protein) {
+  const accession = proteinAccession(protein);
+  if (CAMPAIGN_GENE_BY_ACCESSION[accession]) return CAMPAIGN_GENE_BY_ACCESSION[accession];
+
   const gene = aliasIdentifier(protein, 'gene');
   if (gene) return gene;
 
@@ -104,4 +121,72 @@ export function proteinSearchValues(protein, run = null) {
 export function proteinProgressHref(protein, run = null) {
   const path = `/proteins/${encodeURIComponent(protein?.id ?? '')}/progress/`;
   return run?.id ? `${path}?run=${encodeURIComponent(run.id)}` : path;
+}
+
+export function runBaseProteinId(run) {
+  return run?.external_tracking?.base_protein_id || run?.protein_id || '';
+}
+
+export function groupRunsByBaseProtein(runs) {
+  const groups = new Map();
+  for (const run of runs) {
+    const baseId = runBaseProteinId(run);
+    if (!baseId) continue;
+    const group = groups.get(baseId) ?? [];
+    group.push(run);
+    groups.set(baseId, group);
+  }
+  return groups;
+}
+
+const STRUCTURE_ARTIFACT_PRIORITY = [
+  'foldx_relaxed_pdb',
+  'rosettamp_relaxed_pdb',
+  'selected_reference_pdb',
+  'model_cif',
+];
+
+const STRUCTURE_ARTIFACT_TYPES = new Set(STRUCTURE_ARTIFACT_PRIORITY);
+
+function isProteinStructureArtifact(artifact) {
+  if (STRUCTURE_ARTIFACT_TYPES.has(artifact?.artifact_type)) return true;
+  const names = [
+    artifact?.download_filename,
+    artifact?.original_filename,
+    artifact?.filename,
+    artifact?.display_name,
+  ];
+  return names.some((name) => typeof name === 'string' && /\.(?:pdb|cif|mmcif)$/i.test(name));
+}
+
+export function runStructureArtifacts(run) {
+  return (run?.stages ?? [])
+    .flatMap((stage) => stage.artifacts ?? [])
+    .filter(isProteinStructureArtifact);
+}
+
+export function baseProteinStructureRuns(runs) {
+  return runs.filter((run) => {
+    const runType = run?.external_tracking?.run_type;
+    const isBaseSequenceRun = !run?.external_tracking || ['base', 'ddg'].includes(runType);
+    return isBaseSequenceRun && runStructureArtifacts(run).length > 0;
+  });
+}
+
+export function preferredStructureArtifact(run) {
+  const artifacts = runStructureArtifacts(run);
+  return STRUCTURE_ARTIFACT_PRIORITY
+    .map((artifactType) => artifacts.find((artifact) => artifact.artifact_type === artifactType))
+    .find(Boolean) ?? artifacts[0] ?? null;
+}
+
+export function isHiddenExternalRunSequenceProtein(proteinId, runs) {
+  const isDerivedSequence = runs.some((run) => (
+    run.external_tracking
+    && run.protein_id === proteinId
+    && run.protein_id !== run.external_tracking.base_protein_id
+  ));
+  const isProteinBase = runs.some((run) => run.external_tracking?.base_protein_id === proteinId);
+  const hasIndependentRun = runs.some((run) => !run.external_tracking && run.protein_id === proteinId);
+  return isDerivedSequence && !isProteinBase && !hasIndependentRun;
 }

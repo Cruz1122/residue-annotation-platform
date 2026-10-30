@@ -110,6 +110,12 @@ export function mergePublishedVariants(requested, records) {
   return [...merged.values()].sort((left, right) => left.aa_position - right.aa_position || variantKey(left).localeCompare(variantKey(right)));
 }
 
+export function initialVariantSelection(variants, selectedKey, initialized) {
+  const selected = (variants ?? []).find((variant) => variantKey(variant) === selectedKey);
+  if (selected) return selected;
+  return initialized ? null : variants?.[0] ?? null;
+}
+
 export function variantRecordFor(records, value) {
   const key = typeof value === 'string' ? value : variantKey(value);
   if (!key) return null;

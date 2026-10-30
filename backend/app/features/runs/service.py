@@ -38,6 +38,7 @@ from app.features.runs.models import (
 )
 from app.features.runs.schemas import (
     ArtifactRead,
+    ExternalRunTrackingRead,
     RunConfigurationRead,
     RunCreate,
     RunPreparationRead,
@@ -195,6 +196,38 @@ def _stage_read(stage: RunStage) -> StageRead:
     )
 
 
+def _pipeline_stage_reads(run: Run, persisted_reads: list[StageRead]) -> list[StageRead]:
+    if not run.is_external_import:
+        return persisted_reads
+
+    selected_ids = (
+        set(run.configuration.selected_stage_ids or [])
+        if run.configuration is not None
+        else set()
+    )
+    if not selected_ids:
+        selected_ids = {stage.id for stage in persisted_reads}
+
+    persisted = {stage.id: stage for stage in persisted_reads}
+    serialized: list[StageRead] = []
+    for definition in STAGE_DEFINITIONS:
+        stage = persisted.get(definition.id)
+        if stage is not None:
+            serialized.append(stage)
+            continue
+        serialized.append(
+            StageRead(
+                id=definition.id,
+                legacy_id=definition.legacy_id,
+                title=definition.title,
+                dependencies=list(definition.dependencies),
+                optional=definition.optional,
+                status="pending" if definition.id in selected_ids else "disabled",
+            )
+        )
+    return serialized
+
+
 _SENSITIVE_PROVENANCE_KEY_PARTS = (
     "accesskey",
     "apikey",
@@ -290,6 +323,7 @@ def _run_error(run: Run) -> tuple[str | None, str | None]:
 
 def serialize_run(run: Run) -> RunRead:
     run_error_code, run_error_message = _run_error(run)
+    stage_reads = [_stage_read(stage) for stage in run.stages]
     configuration = (
         RunConfigurationRead(
             id=run.configuration.id,
@@ -325,6 +359,25 @@ def serialize_run(run: Run) -> RunRead:
         status=run.status,
         requested_variants=run.requested_variants or [],
         remote_job_id=run.remote_job_id,
+        is_external_import=run.is_external_import,
+        external_tracking=(
+            ExternalRunTrackingRead(
+                source=run.external_tracking.source,
+                remote_run_id=run.external_tracking.remote_run_id,
+                run_type=run.external_tracking.run_type,
+                base_protein_id=run.external_tracking.base_protein_id,
+                accession=run.external_tracking.accession,
+                variant=run.external_tracking.variant,
+                display_name=run.external_tracking.display_name,
+                last_synced_at=run.external_tracking.last_synced_at,
+                last_attempt_at=run.external_tracking.last_attempt_at,
+                connection_status=run.external_tracking.connection_status,
+                sync_error_code=run.external_tracking.sync_error_code,
+                tracking_active=run.external_tracking.next_sync_at is not None,
+            )
+            if run.external_tracking is not None
+            else None
+        ),
         error_code=run_error_code,
         error_message=run_error_message,
         configuration=configuration,
@@ -355,13 +408,13 @@ def serialize_run(run: Run) -> RunRead:
             else None
         ),
         run_artifacts=[
-            ArtifactRead(**artifact_read_fields(artifact))
-            for artifact in run.run_artifacts
+            ArtifactRead(**artifact_read_fields(artifact)) for artifact in run.run_artifacts
         ],
         created_at=run.created_at,
         started_at=run.started_at,
         finished_at=run.finished_at,
-        stages=[_stage_read(stage) for stage in run.stages],
+        stages=stage_reads,
+        pipeline_stages=_pipeline_stage_reads(run, stage_reads),
         uploads=[
             UploadRead(
                 id=upload.id,
@@ -388,6 +441,7 @@ def get_owned_run(session: Session, run_id: str, principal: Principal) -> Run:
             selectinload(Run.configuration),
             selectinload(Run.preparation),
             selectinload(Run.run_artifacts),
+            selectinload(Run.external_tracking),
             selectinload(Run.uploads),
         )
         .where(Run.id == run_id)
@@ -898,6 +952,15 @@ def request_cancel(
     if locked_run is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
     run = locked_run
+    if run.is_external_import:
+        session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "external_run_cancellation_unavailable",
+                "message": "This run is monitored from MN5 and cannot be cancelled here.",
+            },
+        )
     if run.status in {RunStatus.SUCCESS, RunStatus.FAILED, RunStatus.CANCELLED}:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Run is already terminal")
     run.status = RunStatus.CANCEL_REQUESTED

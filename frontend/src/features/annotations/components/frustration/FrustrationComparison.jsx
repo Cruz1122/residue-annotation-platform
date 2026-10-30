@@ -11,16 +11,22 @@ import {
   subscribeRunEvents,
 } from '@shared/api/client';
 import { userErrorMessage } from '@shared/lib/error-presentation';
-import { loadAnalysisArtifactDetails } from '@features/annotations/analysis-artifacts.js';
+import { loadAnalysisArtifactDetails, structureMappingFromArtifactRows } from '@features/annotations/analysis-artifacts.js';
 import { annotationResultSignature } from '@features/annotations/annotation-result-signature.js';
 import { acquireStructureUrl } from '@features/annotations/structure-url-cache.js';
 import { isStructureArtifact, structureFormat } from '@features/annotations/structure-format.js';
 import { captureCameraSnapshot, sameCameraSnapshot } from '@features/annotations/camera-snapshot.js';
 import { getZoomOptimizedCanvas3dProps } from '@features/annotations/zoom-rendering.js';
+import { waitForCanvasDraw } from '@features/annotations/components/shared/canvas-render-readiness.js';
 import {
   FRUSTRATION_ARTIFACT_TYPES,
+  frustrationStructureSelection,
+  frustrationPositionMap,
   frustrationRecordsAtPosition,
   indexFrustrationArtifactDetails,
+  remapFrustrationAnnotations,
+  remapFrustrationArtifactDetails,
+  remapFrustrationStructureMaps,
 } from '@features/annotations/frustration-artifact-index.js';
 import MetricSelect from '@features/annotations/components/shared/MetricSelect.jsx';
 import {
@@ -125,10 +131,10 @@ const RESIDUE_CONTEXT_LABELS = {
 function structureSource(run) {
   const artifacts = (run?.stages ?? []).flatMap((stage) => stage.artifacts ?? []);
   const preferredTypes = [
+    'model_cif',
+    'foldx_relaxed_pdb',
     'selected_reference_pdb',
     'rosettamp_relaxed_pdb',
-    'foldx_relaxed_pdb',
-    'model_cif',
   ];
   const artifact = preferredTypes
     .map((type) => artifacts.find((item) => item.artifact_type === type))
@@ -455,6 +461,7 @@ function ComparisonStructurePanel({
   domain,
   structureByCanonical,
   canonicalByStructure,
+  sequenceLength,
   selectedPosition,
   selectedResidueLabel,
   focusSelectionOnCamera,
@@ -462,6 +469,10 @@ function ComparisonStructurePanel({
   cameraSyncRef,
   cameraSyncEnabled,
 }) {
+  const mappedStructureSelection = useMemo(
+    () => frustrationStructureSelection(canonicalByStructure, sequenceLength),
+    [canonicalByStructure, sequenceLength],
+  );
   const hostRef = useRef(null);
   const viewerRef = useRef(null);
   const themeNameRef = useRef('');
@@ -471,6 +482,11 @@ function ComparisonStructurePanel({
   const themeRevisionRef = useRef(0);
   const colorMapRef = useRef(colorMap);
   const canonicalByStructureRef = useRef(canonicalByStructure);
+  const mappedStructureSelectionRef = useRef(mappedStructureSelection);
+  const mappedSelectionApplyRef = useRef(null);
+  const appliedMappedSelectionSignatureRef = useRef('');
+  const mappedSelectionRequestRef = useRef(0);
+  const viewerReadyRef = useRef(false);
   const onPickRef = useRef(onPick);
   const cameraSyncEnabledRef = useRef(cameraSyncEnabled);
   const [viewerState, setViewerState] = useState(structureLoadError ? 'error' : structureUrl || structurePending ? 'loading' : 'unavailable');
@@ -478,6 +494,7 @@ function ComparisonStructurePanel({
 
   colorMapRef.current = colorMap;
   canonicalByStructureRef.current = canonicalByStructure;
+  mappedStructureSelectionRef.current = mappedStructureSelection;
   onPickRef.current = onPick;
   cameraSyncEnabledRef.current = cameraSyncEnabled;
   cameraSyncRef.current.enabled = cameraSyncEnabled;
@@ -556,6 +573,7 @@ function ComparisonStructurePanel({
       return undefined;
     }
     let disposed = false;
+    const renderController = new AbortController();
     let subscription;
     let cameraSubscription;
     let viewerInstance = null;
@@ -594,6 +612,10 @@ function ComparisonStructurePanel({
         });
         viewerInstance = viewer;
         viewerRef.current = viewer;
+        appliedMappedSelectionSignatureRef.current = '';
+        mappedSelectionApplyRef.current = null;
+        mappedSelectionRequestRef.current += 1;
+        viewerReadyRef.current = false;
         if (disposed) {
           disposeViewer(viewer);
           return;
@@ -613,10 +635,104 @@ function ComparisonStructurePanel({
         }
 
         const canvas3d = viewer.plugin.canvas3d;
-        const boundingSphere = canvas3d?.boundingSphereVisible ?? canvas3d?.boundingSphere;
-        canvas3d?.requestResize?.();
-        if (canvas3d?.camera && boundingSphere?.radius > 0) {
-          canvas3d.camera.focus(boundingSphere.center, boundingSphere.radius * 0.8, 180);
+        const components = viewer.plugin.managers.structure.component;
+        let mappedSelectionApiPromise;
+        let allSelectionApiPromise;
+        let selectionQueue = Promise.resolve();
+        const focusVisibleStructure = () => {
+          const boundingSphere = canvas3d?.boundingSphereVisible ?? canvas3d?.boundingSphere;
+          if (canvas3d?.camera && boundingSphere?.radius > 0) {
+            canvas3d.camera.focus(boundingSphere.center, boundingSphere.radius * 0.8, 180);
+          }
+        };
+        const applyMappedSelection = (selection) => {
+          const request = ++mappedSelectionRequestRef.current;
+          const selectionTask = selectionQueue.catch(() => {}).then(async () => {
+            if (disposed || viewerRef.current !== viewer || request !== mappedSelectionRequestRef.current) return;
+            if (appliedMappedSelectionSignatureRef.current === selection.signature) return;
+            const structures = viewer.plugin.managers.structure.hierarchy.current.structures;
+            if (!structures.length) return;
+            let selectionQuery;
+            if (selection.signature) {
+              mappedSelectionApiPromise ??= Promise.all([
+                import('molstar/lib/mol-plugin-state/helpers/structure-selection-query'),
+                import('molstar/lib/mol-script/language/builder'),
+              ]);
+              const [{ StructureSelectionQuery }, { MolScriptBuilder: MS }] = await mappedSelectionApiPromise;
+              if (disposed || viewerRef.current !== viewer || request !== mappedSelectionRequestRef.current) return;
+              selectionQuery = StructureSelectionQuery(
+                'Residuos de la corrida',
+                MS.struct.modifier.union(selection.groups.map((group) => {
+                  const residueTests = [
+                    MS.core.set.has([
+                      MS.set(...group.residueNumbers),
+                      MS.struct.atomProperty.macromolecular.auth_seq_id(),
+                    ]),
+                  ];
+                  if (group.insertionCode) {
+                    residueTests.push(MS.core.rel.eq([
+                      MS.struct.atomProperty.macromolecular.pdbx_PDB_ins_code(),
+                      group.insertionCode,
+                    ]));
+                  } else {
+                    residueTests.push(MS.core.set.has([
+                      MS.set('', '.', '?', 'NA'),
+                      MS.struct.atomProperty.macromolecular.pdbx_PDB_ins_code(),
+                    ]));
+                  }
+                  return MS.struct.generator.atomGroups({
+                    'chain-test': MS.core.rel.eq([
+                      MS.struct.atomProperty.macromolecular.auth_asym_id(),
+                      group.chain,
+                    ]),
+                    'residue-test': MS.core.logic.and(residueTests),
+                  });
+                })),
+                { isHidden: true },
+              );
+            } else {
+              allSelectionApiPromise ??= import('molstar/lib/mol-plugin-state/helpers/structure-selection-query');
+              const { StructureSelectionQueries } = await allSelectionApiPromise;
+              if (disposed || viewerRef.current !== viewer || request !== mappedSelectionRequestRef.current) return;
+              selectionQuery = StructureSelectionQueries.all;
+            }
+            await components.clear(structures);
+            await components.add({
+              selection: selectionQuery,
+              representation: 'cartoon',
+              options: {
+                checkExisting: false,
+                label: selection.signature ? 'Residuos de la corrida' : structureLabel,
+              },
+            }, structures);
+            if (disposed || viewerRef.current !== viewer) return;
+            await applyTheme();
+            canvas3d?.requestResize?.();
+            await waitForCanvasDraw(canvas3d, { signal: renderController.signal, requireNewDraw: true });
+            if (disposed || viewerRef.current !== viewer) return;
+            appliedMappedSelectionSignatureRef.current = selection.signature;
+            focusVisibleStructure();
+            if (viewerReadyRef.current && request === mappedSelectionRequestRef.current) {
+              setViewerError('');
+              setViewerState('ready');
+            }
+          });
+          selectionQueue = selectionTask.catch((error) => {
+            if (disposed || viewerRef.current !== viewer || request !== mappedSelectionRequestRef.current) return;
+            console.error(error);
+            setViewerError('No se pudo actualizar la selección de residuos de la corrida.');
+            setViewerState('error');
+          });
+          return selectionQueue;
+        };
+        mappedSelectionApplyRef.current = applyMappedSelection;
+        await applyMappedSelection(mappedStructureSelectionRef.current);
+        if (disposed) return disposeViewer(viewer);
+        if (!appliedMappedSelectionSignatureRef.current) {
+          canvas3d?.requestResize?.();
+          await waitForCanvasDraw(canvas3d, { signal: renderController.signal, requireNewDraw: true });
+          if (disposed) return disposeViewer(viewer);
+          focusVisibleStructure();
         }
 
         const registry = viewer.plugin.representation.structure.themes.colorThemeRegistry;
@@ -669,6 +785,8 @@ function ComparisonStructurePanel({
           disposeViewer(viewer);
           return;
         }
+        await waitForCanvasDraw(canvas3d, { signal: renderController.signal, requireNewDraw: true });
+        if (disposed) return disposeViewer(viewer);
 
         subscription = viewer.subscribe(viewer.plugin.behaviors.interaction.click, (event) => {
           const loci = event?.current?.loci;
@@ -690,10 +808,15 @@ function ComparisonStructurePanel({
           });
           if (position !== null) onPickRef.current(position);
         });
-        if (!disposed) setViewerState('ready');
+        if (!disposed) {
+          viewerReadyRef.current = true;
+          setViewerError('');
+          setViewerState('ready');
+        }
       } catch (error) {
         console.error(error);
         if (!disposed) {
+          viewerReadyRef.current = false;
           setViewerError('No se pudo interpretar la estructura molecular publicada.');
           setViewerState('error');
         }
@@ -703,9 +826,13 @@ function ComparisonStructurePanel({
     void loadViewer();
     return () => {
       disposed = true;
+      viewerReadyRef.current = false;
+      renderController.abort();
       subscription?.unsubscribe?.();
       cameraSubscription?.unsubscribe?.();
       cameraSyncRef.current.cameras.delete(panelId);
+      mappedSelectionRequestRef.current += 1;
+      mappedSelectionApplyRef.current = null;
       disposeViewer();
       themeNameRef.current = '';
       themeRegistryRef.current = null;
@@ -713,6 +840,12 @@ function ComparisonStructurePanel({
       themeProviderRef.current = null;
     };
   }, [panelId, structureFormatValue, structureLabel, structureLoadError, structurePending, structureUrl]);
+
+  useEffect(() => {
+    const applyMappedSelection = mappedSelectionApplyRef.current;
+    if (!['ready', 'error'].includes(viewerState) || !applyMappedSelection) return;
+    void applyMappedSelection(mappedStructureSelectionRef.current);
+  }, [mappedStructureSelection.signature, viewerState]);
 
   useEffect(() => {
     cameraSyncRef.current.enabled = cameraSyncEnabled;
@@ -774,12 +907,12 @@ function ComparisonStructurePanel({
         aria-label={structureUrl ? 'Estructura molecular coloreada' : structureLoadError ? 'No se pudo descargar la estructura molecular' : 'Sin estructura molecular disponible'}
       />
       <MetricScale methodKind={methodKind} method={method} domain={domain} />
-      {viewerState === 'loading' && !structureUrl && (
+      {viewerState === 'loading' && (
         <StatePanel
           kind="loading"
           compact
           title="Cargando estructura"
-          description="Descargando el modelo publicado de la corrida."
+          description="Preparando el modelo molecular publicado."
           className="frustration-viewport-state"
         />
       )}
@@ -880,6 +1013,7 @@ function MethodCard({
   structureError,
   structureFormatValue,
   structureLabel,
+  sequenceLength,
   selectedResidueLabel,
   domain,
   cameraSyncRef,
@@ -910,6 +1044,7 @@ function MethodCard({
         domain={structureProps.domain}
         structureByCanonical={structureProps.byCanonical}
         canonicalByStructure={structureProps.byStructure}
+        sequenceLength={sequenceLength}
         selectedPosition={selectedPosition}
         selectedResidueLabel={selectedResidueLabel}
         focusSelectionOnCamera={focusSelectionOnCamera}
@@ -1245,8 +1380,7 @@ export default function FrustrationComparison({ proteinId }) {
 
     async function load() {
       if (!runId) {
-        setState('error');
-        setError('Selecciona una corrida desde el historial o la vista de progreso para consultar sus resultados.');
+        setState('no-run');
         return;
       }
       try {
@@ -1320,10 +1454,35 @@ export default function FrustrationComparison({ proteinId }) {
     };
   }, [structureRequest?.id]);
 
-  const annotationByPosition = useMemo(() => mergeAnnotationRows(annotations), [annotations]);
-  const indexedArtifactDetails = useMemo(() => indexFrustrationArtifactDetails(artifactDetails), [artifactDetails]);
-  const structureMapping = run?.configuration?.structure_mapping ?? {};
-  const mapping = useMemo(() => structureMappingMaps(structureMapping), [structureMapping]);
+  const structureMappingSourceRows = useMemo(() => {
+    const artifactRows = artifactDetails?.structure_mapping;
+    if (Array.isArray(artifactRows) && artifactRows.length) return artifactRows;
+    const configuredPairs = run?.configuration?.structure_mapping?.canonical_to_structure;
+    if (Array.isArray(configuredPairs) && configuredPairs.length) return configuredPairs;
+    return artifactDetails?.frustration_per_residue ?? artifactDetails?.frustraiseq_per_residue ?? [];
+  }, [artifactDetails, run?.configuration?.structure_mapping?.canonical_to_structure]);
+  const sourceToRunPosition = useMemo(
+    () => frustrationPositionMap(protein?.sequence, structureMappingSourceRows),
+    [protein?.sequence, structureMappingSourceRows],
+  );
+  const alignedAnnotations = useMemo(
+    () => remapFrustrationAnnotations(annotations, protein?.sequence, sourceToRunPosition),
+    [annotations, protein?.sequence, sourceToRunPosition],
+  );
+  const annotationByPosition = useMemo(() => mergeAnnotationRows(alignedAnnotations), [alignedAnnotations]);
+  const alignedArtifactDetails = useMemo(
+    () => remapFrustrationArtifactDetails(artifactDetails, protein?.sequence),
+    [artifactDetails, protein?.sequence],
+  );
+  const indexedArtifactDetails = useMemo(() => indexFrustrationArtifactDetails(alignedArtifactDetails), [alignedArtifactDetails]);
+  const structureMapping = useMemo(() => structureMappingFromArtifactRows(
+    run?.configuration?.structure_mapping,
+    artifactDetails?.structure_mapping,
+  ), [artifactDetails?.structure_mapping, run?.configuration?.structure_mapping]);
+  const mapping = useMemo(
+    () => remapFrustrationStructureMaps(structureMappingMaps(structureMapping), sourceToRunPosition),
+    [sourceToRunPosition, structureMapping],
+  );
   const structuralRows = useMemo(
     () => sequenceRows(protein?.sequence, annotationByPosition, indexedArtifactDetails, structureMethod),
     [annotationByPosition, indexedArtifactDetails, protein?.sequence, structureMethod],
@@ -1380,6 +1539,9 @@ export default function FrustrationComparison({ proteinId }) {
   if (state === 'loading') {
     return <section class="frustration-page"><StatePanel kind="loading" fill title="Cargando frustración" description="Consultando la corrida y sus resultados publicados." /></section>;
   }
+  if (state === 'no-run') {
+    return <section class="frustration-page"><StatePanel kind="empty" fill icon="workflow" title="No hay una corrida seleccionada" description="Selecciona una corrida desde el historial o la vista de progreso para consultar sus resultados."><a class="protein-open" href="/proteins/">Mis proteínas</a></StatePanel></section>;
+  }
   if (state === 'error') {
     return <section class="frustration-page"><StatePanel kind="error" fill title="No se pudo cargar la vista de frustración" description={error} /></section>;
   }
@@ -1423,6 +1585,7 @@ export default function FrustrationComparison({ proteinId }) {
             structureError={structureLoadState === 'error'}
             structureFormatValue={structureRequest?.format}
             structureLabel={structureRequest?.label}
+            sequenceLength={protein?.sequence?.length ?? 0}
             selectedResidueLabel={selectedPosition === null ? '—' : formatResidueName(protein?.sequence, selectedPosition, annotationByPosition)}
             cameraSyncRef={cameraSyncRef}
             cameraSyncEnabled={cameraSyncEnabled}
@@ -1441,6 +1604,7 @@ export default function FrustrationComparison({ proteinId }) {
             structureError={structureLoadState === 'error'}
             structureFormatValue={structureRequest?.format}
             structureLabel={structureRequest?.label}
+            sequenceLength={protein?.sequence?.length ?? 0}
             selectedResidueLabel={selectedPosition === null ? '—' : formatResidueName(protein?.sequence, selectedPosition, annotationByPosition)}
             cameraSyncRef={cameraSyncRef}
             cameraSyncEnabled={cameraSyncEnabled}

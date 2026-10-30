@@ -15,7 +15,7 @@ class ManifestError(ValueError):
 
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
-_REMOTE_HASH_MAX_BYTES = 5_000_000
+REMOTE_HASH_MAX_BYTES = 5_000_000
 
 
 def _valid_size(value: Any) -> bool:
@@ -63,6 +63,7 @@ def validate_remote_manifest(
     expected_stage_id: str,
     *,
     annotations_required: bool = True,
+    allow_partial: bool = False,
 ) -> None:
     """Validate the stage-result-v1 manifest emitted by the MN5 pipeline.
 
@@ -70,7 +71,9 @@ def validate_remote_manifest(
     only produce structural/operational artifacts are allowed to omit it. The
     caller supplies that requirement from the local stage contract so a
     missing table cannot silently bypass validation for annotation-producing
-    stages.
+    stages. ``allow_partial`` lets the read-only tracker validate and ingest
+    individually hashed files from a partial manifest without treating the
+    stage publication as complete.
     """
 
     if manifest.get("schema") != "stage-result-v1":
@@ -79,7 +82,10 @@ def validate_remote_manifest(
         raise ManifestError("remote manifest stage does not match the requested stage")
     if manifest.get("status") != "success":
         raise ManifestError("only successful remote manifests can be published")
-    if manifest.get("partial") is True:
+    partial = manifest.get("partial", False)
+    if not isinstance(partial, bool):
+        raise ManifestError("remote manifest partial flag is invalid")
+    if partial and not allow_partial:
         raise ManifestError("partial remote manifests cannot be published")
     cache_key = manifest.get("cache_key")
     if not isinstance(cache_key, str) or not _SHA256.fullmatch(cache_key):
@@ -120,7 +126,7 @@ def validate_remote_manifest(
         size = artifact.get("size")
         external = artifact.get("external")
         directory_artifact = sha256 is None and size is None
-        unhashed_large_file = sha256 is None and _valid_size(size) and size > _REMOTE_HASH_MAX_BYTES
+        unhashed_large_file = sha256 is None and _valid_size(size) and size > REMOTE_HASH_MAX_BYTES
         if (
             not isinstance(path, str)
             or not path

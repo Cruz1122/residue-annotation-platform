@@ -2,11 +2,13 @@ import PackIcon from '@shared/components/icons/PackIcon.jsx';
 import StatePanel from '@shared/components/feedback/StatePanel.jsx';
 import AuthenticatedArtifactLink from '@features/artifacts/components/AuthenticatedArtifactLink.tsx';
 import { runFailureMessage } from '@shared/lib/error-presentation';
-import { proteinDisplayName } from '@features/proteins/protein-display.js';
+import { proteinAccession, proteinDisplayName } from '@features/proteins/protein-display.js';
+import { runResultsRoute } from '@features/runs/run-results-route.js';
 import '@features/proteins/styles/library.css';
+import { useMemo, useState } from 'preact/hooks';
 
 const STATUS_TEXT = {
-  pending: 'Preparando',
+  pending: 'Pendiente',
   running: 'En ejecución',
   success: 'Completada',
   failed: 'Fallida',
@@ -24,17 +26,69 @@ function formatDate(value) {
   }).format(date);
 }
 
+function runProteinId(run) {
+  return run.external_tracking?.base_protein_id ?? run.protein_id;
+}
+
+function runType(run) {
+  const externalType = run.external_tracking?.run_type;
+  if (externalType === 'ddg' || externalType === 'mutant'
+    || (run.configuration?.normalized_variants ?? run.requested_variants ?? []).length > 0) return 'p07';
+  return 'base';
+}
+
+const TYPE_TEXT = { p07: 'P07', base: 'Base' };
+
 export default function RunHistory({ runs, proteins }) {
+  const [proteinFilter, setProteinFilter] = useState('all');
+  const [typeFilter, setTypeFilter] = useState('all');
+  const [statusFilter, setStatusFilter] = useState('all');
   const proteinsById = new Map(proteins.map((protein) => [protein.id, protein]));
+  const proteinOptions = useMemo(() => [...new Set(runs.map(runProteinId))]
+    .map((id) => proteinsById.get(id))
+    .filter(Boolean)
+    .sort((left, right) => proteinAccession(left).localeCompare(proteinAccession(right))), [runs, proteins]);
+  const visibleRuns = useMemo(() => runs.filter((run) => (
+    (proteinFilter === 'all' || runProteinId(run) === proteinFilter)
+    && (typeFilter === 'all' || runType(run) === typeFilter)
+    && (statusFilter === 'all' || run.status === statusFilter)
+  )), [runs, proteinFilter, typeFilter, statusFilter]);
 
   return (
     <section class="run-history" aria-label="Historial de corridas">
       <header class="run-history-head">
-        <div>
-          <h2>Historial de corridas</h2>
-        </div>
-        <span class="run-history-count">{runs.length}</span>
+        <div><h2>Historial de corridas</h2></div>
+        <span class="run-history-count">{visibleRuns.length}</span>
       </header>
+      {runs.length > 0 && (
+        <div class="run-history-filters">
+          <label>
+            <span>Proteína</span>
+            <select aria-label="Filtrar por proteína" value={proteinFilter} onChange={(event) => setProteinFilter(event.currentTarget.value)}>
+              <option value="all">Todas las proteínas</option>
+              {proteinOptions.map((protein) => (
+                <option value={protein.id} key={protein.id}>
+                  {proteinAccession(protein)} · {proteinDisplayName(protein)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span>Tipo</span>
+            <select aria-label="Filtrar por tipo" value={typeFilter} onChange={(event) => setTypeFilter(event.currentTarget.value)}>
+              <option value="all">Todos los tipos</option>
+              {Object.entries(TYPE_TEXT).map(([value, label]) => <option value={value} key={value}>{label}</option>)}
+            </select>
+          </label>
+          <label>
+            <span>Estado</span>
+            <select aria-label="Filtrar por estado" value={statusFilter} onChange={(event) => setStatusFilter(event.currentTarget.value)}>
+              <option value="all">Todos los estados</option>
+              {Object.entries(STATUS_TEXT).map(([value, label]) => <option value={value} key={value}>{label}</option>)}
+            </select>
+          </label>
+        </div>
+      )}
       {runs.length === 0 && (
         <StatePanel
           kind="empty"
@@ -46,18 +100,31 @@ export default function RunHistory({ runs, proteins }) {
           description="Cuando inicies un análisis, sus ejecuciones aparecerán aquí."
         />
       )}
-      {runs.length > 0 && (
+      {runs.length > 0 && visibleRuns.length === 0 && (
+        <StatePanel
+          kind="empty"
+          compact
+          fill
+          icon="scan-search"
+          eyebrow="Sin resultados"
+          title="No hay corridas para estos filtros."
+          description="Cambia los filtros para ver otras corridas."
+        />
+      )}
+      {visibleRuns.length > 0 && (
         <div class="run-history-list">
-          {runs.map((run) => {
-            const protein = proteinsById.get(run.protein_id);
+          {visibleRuns.map((run) => {
+            const protein = proteinsById.get(runProteinId(run));
+            const tracking = run.external_tracking;
             const configuration = run.configuration;
             const variants = configuration?.normalized_variants ?? run.requested_variants ?? [];
+            const title = tracking?.display_name ?? proteinDisplayName(protein);
             return (
               <article class="run-history-card" key={run.id}>
                 <div class="run-history-main">
                   <div class="run-history-title">
                     <div>
-                      <strong>{proteinDisplayName(protein)}</strong>
+                      <strong title={title}>{title}</strong>
                       <span>{formatDate(run.created_at)}</span>
                     </div>
                     <span class={`run-history-status run-status-${run.status}`}>
@@ -65,7 +132,9 @@ export default function RunHistory({ runs, proteins }) {
                     </span>
                   </div>
                   <div class="run-history-meta">
-                    {variants.length > 0 && <span><PackIcon name="dna" kind="ui" />{variants.map((variant) => `${variant.aa_ref}${variant.aa_position}${variant.aa_alt}`).join(' · ')}</span>}
+                    {!tracking && variants.length > 0 && (
+                      <span><PackIcon name="dna" kind="ui" />{variants.map((variant) => `${variant.aa_ref}${variant.aa_position}${variant.aa_alt}`).join(' · ')}</span>
+                    )}
                     {configuration?.structure_source && <span><PackIcon name="box" kind="ui" />{configuration.structure_source === 'alphafold3' ? 'AlphaFold 3' : 'Estructura adjunta'}</span>}
                   </div>
                   {run.error_message && <p class="run-history-error" role="alert">{runFailureMessage(run.error_code, run.error_message)}</p>}
@@ -85,8 +154,8 @@ export default function RunHistory({ runs, proteins }) {
                     </div>
                   )}
                 </div>
-                <nav class="run-history-actions" aria-label={`Acciones de la corrida de ${proteinDisplayName(protein)}`}>
-                  <a href={`/proteins/${encodeURIComponent(run.protein_id)}/topology/?run=${encodeURIComponent(run.id)}`}>Abrir resultados</a>
+                <nav class="run-history-actions" aria-label={`Acciones de la corrida ${title}`}>
+                  <a href={`/proteins/${encodeURIComponent(run.protein_id)}/${runResultsRoute(run)}/?run=${encodeURIComponent(run.id)}`}>Abrir resultados</a>
                   <a href={`/proteins/${encodeURIComponent(run.protein_id)}/progress/?run=${encodeURIComponent(run.id)}`}>Ver progreso</a>
                 </nav>
               </article>

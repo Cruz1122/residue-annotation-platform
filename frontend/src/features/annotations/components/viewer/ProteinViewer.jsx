@@ -5,7 +5,7 @@ import { artifactDisplayName } from '@features/artifacts/artifact-display.js';
 import StatePanel from '@shared/components/feedback/StatePanel.jsx';
 import { getAnnotations, getArtifactBlob, getArtifactObjectUrl, getProtein, getRun, getUploadObjectUrl, subscribeRunEvents } from '@shared/api/client';
 import { userErrorMessage } from '@shared/lib/error-presentation';
-import { firstDetailValue, loadAnalysisArtifactDetails, presentationRowsFromArtifacts, recordsForPosition, summarizeArtifactRecord } from '@features/annotations/analysis-artifacts.js';
+import { firstDetailValue, loadAnalysisArtifactDetails, presentationRowsFromArtifacts, recordsForPosition, structureMappingFromArtifactRows, summarizeArtifactRecord } from '@features/annotations/analysis-artifacts.js';
 import { groupPredictorSubstitutions } from '@features/annotations/predictor-interpretation.js';
 import MetricSelect from '@features/annotations/components/shared/MetricSelect.jsx';
 import {
@@ -16,6 +16,9 @@ import {
 import { acquireStructureUrl } from '@features/annotations/structure-url-cache.js';
 import { isStructureArtifact, structureFormat } from '@features/annotations/structure-format.js';
 import { getZoomOptimizedCanvas3dProps } from '@features/annotations/zoom-rendering.js';
+import { waitForCanvasDraw } from '@features/annotations/components/shared/canvas-render-readiness.js';
+import { runUpdatesFinished } from '@features/runs/run-updates.js';
+import { runBelongsToProtein } from '@features/annotations/run-protein-context.js';
 import {
   CONSERVATION_SCALE,
   CONSERVATION_REFERENCE_URL,
@@ -76,7 +79,7 @@ function publishedField(row, key) {
 
 function structureSource(run) {
   const artifacts = (run?.stages ?? []).flatMap((stage) => stage.artifacts ?? []);
-  const preferredTypes = ['selected_reference_pdb', 'model_cif'];
+  const preferredTypes = ['model_cif', 'selected_reference_pdb', 'foldx_relaxed_pdb', 'rosettamp_relaxed_pdb'];
   const artifact = preferredTypes
     .map((type) => artifacts.find((item) => item.artifact_type === type))
     .find(Boolean) ?? artifacts.find(isStructureArtifact);
@@ -674,6 +677,7 @@ export default function ProteinViewer({ proteinId, analysis = 'topology' }) {
   const structureRef = useRef(null);
   const residueLociRef = useRef(new Map());
   const sequenceRef = useRef('');
+  const requestedVariantsRef = useRef([]);
   const rangeLociRef = useRef(new Map());
   const themeNamesRef = useRef({});
   const colorMapRef = useRef(new Map());
@@ -714,7 +718,12 @@ export default function ProteinViewer({ proteinId, analysis = 'topology' }) {
   }, [chains, chainId]);
 
   const applyParsedChains = (parsedChains) => {
-    const aligned = assignCanonicalPositions(parsedChains, sequenceRef.current, structureMappingRef.current);
+    const aligned = assignCanonicalPositions(
+      parsedChains,
+      sequenceRef.current,
+      structureMappingRef.current,
+      requestedVariantsRef.current,
+    );
     setChains(aligned);
     const configuredChain = structureChainRef.current;
     const preferredChain = configuredChain && aligned.some((chain) => chain.id === configuredChain)
@@ -740,6 +749,7 @@ export default function ProteinViewer({ proteinId, analysis = 'topology' }) {
     const applyRun = (runData) => {
       if (!active) return;
       latestRun = runData;
+      requestedVariantsRef.current = runData?.requested_variants ?? [];
       setRun(runData);
       const configuration = runData?.configuration;
       structureMappingRef.current = configuration?.structure_mapping ?? {};
@@ -772,7 +782,7 @@ export default function ProteinViewer({ proteinId, analysis = 'topology' }) {
           const [runData, annotationData] = await Promise.all([getRun(runId), getAnnotations(runId)]);
           applyRun(runData);
           if (active) setAnnotations(annotationData.rows ?? []);
-          if (!['success', 'failed', 'cancelled'].includes(runData.status)) connectStream();
+          if (!runUpdatesFinished(runData)) connectStream();
           else {
             finished = true;
             streamController?.abort();
@@ -786,7 +796,7 @@ export default function ProteinViewer({ proteinId, analysis = 'topology' }) {
     };
 
     const connectStream = async () => {
-      if (!active || !runId || finished || ['success', 'failed', 'cancelled'].includes(latestRun?.status)) return;
+      if (!active || !runId || finished || runUpdatesFinished(latestRun)) return;
       streamController?.abort();
       const controller = new AbortController();
       streamController = controller;
@@ -797,14 +807,14 @@ export default function ProteinViewer({ proteinId, analysis = 'topology' }) {
             latestRun = snapshot;
             applyRun(snapshot);
             void refreshAnnotations();
-            if (['success', 'failed', 'cancelled'].includes(snapshot.status)) {
+            if (runUpdatesFinished(snapshot)) {
               finished = true;
               controller.abort();
               if (timer) window.clearTimeout(timer);
             }
           },
         });
-        if (active && !finished && !['success', 'failed', 'cancelled'].includes(latestRun?.status)) schedulePolling();
+        if (active && !finished && !runUpdatesFinished(latestRun)) schedulePolling();
       } catch (streamError) {
         if (active && !controller.signal.aborted && !finished) {
           setViewerError(userErrorMessage(streamError, 'La actualización en vivo se desconectó; se reintentará automáticamente.'));
@@ -830,6 +840,9 @@ export default function ProteinViewer({ proteinId, analysis = 'topology' }) {
       runId ? getRun(runId) : Promise.resolve(null),
     ])
       .then(async ([proteinData, runData]) => {
+        if (runData && !runBelongsToProtein(runData, proteinId)) {
+          throw new Error('La corrida seleccionada no corresponde a esta proteína.');
+        }
         const annotationData = runData ? await getAnnotations(runData.id) : null;
         if (!active) return;
         sequenceRef.current = proteinData.sequence;
@@ -840,7 +853,7 @@ export default function ProteinViewer({ proteinId, analysis = 'topology' }) {
         setChainId(nextChains[0]?.id ?? '');
         applyRun(runData);
         setState('ready');
-        if (runData && !['success', 'failed', 'cancelled'].includes(runData.status)) void connectStream();
+        if (runData && !runUpdatesFinished(runData)) void connectStream();
         else if (runData) finished = true;
       })
       .catch((requestError) => {
@@ -879,6 +892,25 @@ export default function ProteinViewer({ proteinId, analysis = 'topology' }) {
       });
     return () => { active = false; };
   }, [analysis, artifactSignature, run?.id]);
+
+  const resolvedStructureMapping = useMemo(
+    () => structureMappingFromArtifactRows(run?.configuration?.structure_mapping, artifactDetails.structure_mapping),
+    [artifactDetails.structure_mapping, run?.configuration?.structure_mapping],
+  );
+
+  useEffect(() => {
+    structureMappingRef.current = resolvedStructureMapping;
+    structureChainRef.current = run?.configuration?.structure_chain ?? resolvedStructureMapping.chain ?? '';
+    setStructureMapping(resolvedStructureMapping);
+    if (structureParsed && sequenceRef.current) {
+      setChains((currentChains) => assignCanonicalPositions(
+        currentChains,
+        sequenceRef.current,
+        resolvedStructureMapping,
+        requestedVariantsRef.current,
+      ));
+    }
+  }, [resolvedStructureMapping, run?.configuration?.structure_chain, structureParsed]);
 
   const activeChain = chains.find((chain) => chain.id === chainId) ?? chains[0] ?? null;
   const residues = activeChain?.residues ?? [];
@@ -922,8 +954,8 @@ export default function ProteinViewer({ proteinId, analysis = 'topology' }) {
       : [...annotations, ...artifactRows, ...evidenceRows];
   }, [analysis, annotations, artifactDetails, protein?.sequence, run?.stages]);
   const annotationByPosition = useMemo(() => {
-    return mergeAnnotationRows(presentationRows);
-  }, [presentationRows]);
+    return mergeAnnotationRows(presentationRows, run?.requested_variants);
+  }, [presentationRows, run?.requested_variants]);
   const domain = useMemo(() => fixedDomainForMode(mode), [mode]);
   const modeAvailability = useMemo(
     () => viewerModeAvailability(presentationRows, {
@@ -934,11 +966,11 @@ export default function ProteinViewer({ proteinId, analysis = 'topology' }) {
     [analysis, mappingValid, presentationRows, structureRequest],
   );
   const colors = useMemo(
-    () => residues.map((residue) => residueDisplayColor(mode, residue, annotationForResidue(residue, annotationByPosition), domain)),
-    [residues, mode, annotationByPosition, domain],
+    () => residues.map((residue) => residueDisplayColor(mode, residue, annotationForResidue(residue, annotationByPosition, run?.requested_variants), domain)),
+    [residues, mode, annotationByPosition, domain, run?.requested_variants],
   );
   const activeResidue = selection.active === null ? null : residues[selection.active] ?? null;
-  const activeAnnotation = activeResidue ? annotationForResidue(activeResidue, annotationByPosition) : null;
+  const activeAnnotation = activeResidue ? annotationForResidue(activeResidue, annotationByPosition, run?.requested_variants) : null;
   const activeMeasurement = measurementForMode(mode, activeAnnotation?.values)?.value ?? null;
   const fieldAvailable = presentationRows.some((row) => publishedModeValue(mode, row?.values) !== null);
   const rate4siteAvailable = analysis === 'conservation'
@@ -951,7 +983,7 @@ export default function ProteinViewer({ proteinId, analysis = 'topology' }) {
     let index = preferredPosition == null ? -1 : residues.findIndex((residue) => (residue.aaPosition ?? residue.canonicalPosition) === preferredPosition);
     if (index < 0) {
       index = residues.findIndex((residue) => {
-        return publishedModeValue(mode, annotationForResidue(residue, annotationByPosition)?.values) !== null;
+        return publishedModeValue(mode, annotationForResidue(residue, annotationByPosition, run?.requested_variants)?.values) !== null;
       });
     }
     if (index < 0) return;
@@ -980,13 +1012,13 @@ export default function ProteinViewer({ proteinId, analysis = 'topology' }) {
     const next = new Map();
     for (const chain of chains) {
       for (const residue of chain.residues) {
-        const color = residueDisplayColor(mode, residue, annotationForResidue(residue, annotationByPosition), domain);
+        const color = residueDisplayColor(mode, residue, annotationForResidue(residue, annotationByPosition, run?.requested_variants), domain);
         next.set(residueKey(residue), hexToColorInt(color));
       }
     }
     colorMapRef.current = next;
     applyTheme(mode);
-  }, [chains, mode, annotationByPosition, domain]);
+  }, [chains, mode, annotationByPosition, domain, run?.requested_variants]);
 
   useEffect(() => {
     const frame = requestAnimationFrame(() => {
@@ -999,6 +1031,7 @@ export default function ProteinViewer({ proteinId, analysis = 'topology' }) {
   useEffect(() => {
     if (!structureRequest || !hostRef.current) return undefined;
     let disposed = false;
+    const renderController = new AbortController();
     let subscription;
     const structureLease = acquireStructureUrl(structureRequest.id, structureRequest.loadUrl);
 
@@ -1087,6 +1120,8 @@ export default function ProteinViewer({ proteinId, analysis = 'topology' }) {
           themeNamesRef.current[themeMode] = name;
         }
         await applyTheme(mode);
+        await waitForCanvasDraw(viewer.plugin.canvas3d, { signal: renderController.signal });
+        if (disposed) return;
         subscription = viewer.subscribe(viewer.plugin.behaviors.interaction.click, (event) => {
           const loci = event?.current?.loci;
           if (!structureLib.StructureElement.Loci.is(loci)) return;
@@ -1122,6 +1157,7 @@ export default function ProteinViewer({ proteinId, analysis = 'topology' }) {
     loadViewer();
     return () => {
       disposed = true;
+      renderController.abort();
       if (molstarFrameRef.current !== null) cancelAnimationFrame(molstarFrameRef.current);
       if (molstarFocusFrameRef.current !== null) cancelAnimationFrame(molstarFocusFrameRef.current);
       subscription?.unsubscribe?.();
@@ -1315,7 +1351,7 @@ export default function ProteinViewer({ proteinId, analysis = 'topology' }) {
     return <section class="viewer-shell"><StatePanel kind="error" fill title="No se pudo cargar la proteína" description={error} /></section>;
   }
 
-  const categoricalMode = VISUALIZATION_MODES[mode].kind === 'categorical';
+  const categoricalMode = mode === 'frustration' || VISUALIZATION_MODES[mode].kind === 'categorical';
   const canvasHeadingLayout = analysis === 'scientific-evidence' || analysis === 'conservation';
   const chainPickerVisible = chains.length > 1 && analysis !== 'conservation';
   const selectedCategoryMissing = categoricalMode && activeResidue && !colorForValues(mode, activeAnnotation?.values, null);

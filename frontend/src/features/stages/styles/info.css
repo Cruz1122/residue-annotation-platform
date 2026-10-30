@@ -15,6 +15,35 @@
   line-height: 1.4;
 }
 
+.info-protein-summary {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 0 8px;
+  padding: 9px 12px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--panel);
+}
+
+.info-protein-summary h1 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: -.025em;
+  line-height: 1.25;
+}
+
+.info-protein-summary p {
+  margin: 3px 0 0;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
 .info-run-error {
   margin: 8px 0 0;
   border-color: rgba(214, 40, 40, .22);
@@ -247,6 +276,7 @@
 }
 
 @media (max-width: 680px) {
+  .info-protein-summary { align-items: flex-start; }
   .info-structure-head { align-items: flex-start; flex-direction: column; }
   .info-structure-head .frustration-method-select { max-width: 100%; width: 100%; }
   .info-structure-head .frustration-select-trigger { width: 100%; }

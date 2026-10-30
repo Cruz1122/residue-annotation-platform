@@ -344,6 +344,10 @@ class _FakeSFTPInspectorTransport:
         self.files = {f"{root}/docs.txt": b"evidence"}
         self.symlinks = {f"{root}/link.txt"}
         self.closed = False
+        self.channel = _FakeSFTPInspectorChannel()
+
+    def get_channel(self):
+        return self.channel
 
     def lstat(self, path: str):
         if path in self.symlinks:
@@ -369,6 +373,14 @@ class _FakeSFTPInspectorTransport:
 
     def close(self):
         self.closed = True
+
+
+class _FakeSFTPInspectorChannel:
+    def __init__(self):
+        self.timeout = None
+
+    def settimeout(self, timeout: float):
+        self.timeout = timeout
 
 
 class _FakeSSHInspectorTransport:
@@ -472,6 +484,123 @@ def test_sftp_read_only_inspector_uses_only_bounded_sftp_reads(tmp_path: Path, m
     assert ssh.connect_kwargs["hostname"] == "glogin4.bsc.es"
     assert ssh.connect_kwargs["allow_agent"] is False
     assert ssh.connect_kwargs["look_for_keys"] is False
+    assert transport.channel.timeout == settings.hpc_command_timeout_seconds
+    assert transport.closed is True
+    assert ssh.closed is True
+
+
+def test_sftp_preview_batch_isolates_an_individual_permission_error(tmp_path: Path, monkeypatch):
+    import app.infrastructure.hpc.readonly as readonly_module
+
+    settings, _password = _sftp_inspector_settings(tmp_path)
+    root = AUTHORIZED_MN5_ROOT
+    denied_path = f"{root}/denied.pdb"
+    transport = _FakeSFTPInspectorTransport(root)
+    transport.files.update(
+        {
+            f"{root}/first.pdb": b"first",
+            denied_path: b"denied",
+            f"{root}/last.pdb": b"last",
+        }
+    )
+    original_open = transport.open
+
+    def open_file(path: str, mode: str):
+        if path == denied_path:
+            raise PermissionError(errno.EACCES, "permission denied")
+        return original_open(path, mode)
+
+    transport.open = open_file
+    ssh = _FakeSSHInspectorTransport(transport)
+    monkeypatch.setattr(readonly_module.paramiko, "SSHClient", lambda: ssh)
+
+    inspector = SFTPReadOnlyInspector(settings)
+    results = inspector.read_many_previews(
+        ["first.pdb", "denied.pdb", "last.pdb"],
+        settings.mn5_max_preview_bytes,
+    )
+
+    assert results == {"first.pdb": b"first", "denied.pdb": None, "last.pdb": b"last"}
+    assert transport.closed is True
+    assert ssh.closed is True
+
+
+def test_sftp_artifact_batch_can_read_above_the_small_preview_cap_within_its_bound(
+    tmp_path: Path, monkeypatch
+):
+    import app.infrastructure.hpc.readonly as readonly_module
+
+    settings, _password = _sftp_inspector_settings(
+        tmp_path,
+        mn5_max_preview_bytes=4,
+        mn5_max_artifact_bytes=16,
+    )
+    root = AUTHORIZED_MN5_ROOT
+    payload = b"0123456789ab"
+    compressed_payload = b"gzip-data"
+    prediction_payload = b"TMbed pred\n"
+    span_payload = b"TMbed span\n"
+    transport = _FakeSFTPInspectorTransport(root)
+    transport.files.update(
+        {
+            f"{root}/arpeggio.json": payload,
+            f"{root}/contacts.tsv": b"residue\tcount\n",
+            f"{root}/contacts_long.tsv.gz": compressed_payload,
+            f"{root}/topology.pred": prediction_payload,
+            f"{root}/topology.span": span_payload,
+        }
+    )
+    ssh = _FakeSSHInspectorTransport(transport)
+    monkeypatch.setattr(readonly_module.paramiko, "SSHClient", lambda: ssh)
+
+    inspector = SFTPReadOnlyInspector(settings)
+
+    assert inspector.read_many_previews(
+        [
+            "arpeggio.json",
+            "contacts.tsv",
+            "contacts_long.tsv.gz",
+            "topology.pred",
+            "topology.span",
+        ],
+        16,
+    ) == {
+        "arpeggio.json": payload,
+        "contacts.tsv": b"residue\tcount\n",
+        "contacts_long.tsv.gz": compressed_payload,
+        "topology.pred": prediction_payload,
+        "topology.span": span_payload,
+    }
+    assert transport.closed is True
+    assert ssh.closed is True
+
+
+def test_sftp_preview_batch_propagates_a_transport_error(tmp_path: Path, monkeypatch):
+    import app.infrastructure.hpc.readonly as readonly_module
+
+    settings, _password = _sftp_inspector_settings(tmp_path)
+    root = AUTHORIZED_MN5_ROOT
+    broken_path = f"{root}/broken.pdb"
+    transport = _FakeSFTPInspectorTransport(root)
+    transport.files.update({broken_path: b"broken", f"{root}/next.pdb": b"next"})
+    original_open = transport.open
+
+    def open_file(path: str, mode: str):
+        if path == broken_path:
+            raise ConnectionResetError(errno.ECONNRESET, "connection reset")
+        return original_open(path, mode)
+
+    transport.open = open_file
+    ssh = _FakeSSHInspectorTransport(transport)
+    monkeypatch.setattr(readonly_module.paramiko, "SSHClient", lambda: ssh)
+
+    inspector = SFTPReadOnlyInspector(settings)
+    with pytest.raises(InspectionError, match="unavailable"):
+        inspector.read_many_previews(
+            ["broken.pdb", "next.pdb"],
+            settings.mn5_max_preview_bytes,
+        )
+
     assert transport.closed is True
     assert ssh.closed is True
 

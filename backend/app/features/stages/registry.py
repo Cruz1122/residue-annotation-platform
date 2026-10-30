@@ -441,8 +441,6 @@ STAGE_DEFINITIONS: tuple[StageDefinition, ...] = (
             "structural_contacts_n_contacts",
             "structural_contacts_n_partner_residues",
             "structural_contacts_contact_types",
-            "structural_contacts_status",
-            "structural_contacts_qc_reason",
         ),
         consumed_artifacts=(("protein_relaxation_energy", "selected_reference_pdb"),),
         produced_artifacts=(

@@ -2,16 +2,18 @@ import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { getArtifactObjectUrl } from '@shared/api/client';
 import { artifactDisplayName } from '@features/artifacts/artifact-display.js';
 import { acquireStructureUrl } from '@features/annotations/structure-url-cache.js';
-import { isStructureArtifact, structureFormat } from '@features/annotations/structure-format.js';
+import { structureFormat } from '@features/annotations/structure-format.js';
 import { getZoomOptimizedCanvas3dProps } from '@features/annotations/zoom-rendering.js';
 import {
   readProteinPreviewSnapshot,
   writeProteinPreviewSnapshot,
 } from '@features/proteins/protein-preview-snapshot-cache.js';
+import { preferredStructureArtifact } from '@features/proteins/protein-display.js';
 import 'molstar/build/viewer/molstar.css';
 
 const PREVIEW_CANVAS_MARGIN = 5;
 const PREVIEW_STRUCTURE_PADDING = 0.3;
+const PREVIEW_SNAPSHOT_VERSION = 2;
 
 function collectStructurePoints(viewer) {
   const structures = viewer?.plugin?.managers?.structure?.hierarchy?.current?.structures ?? [];
@@ -164,10 +166,12 @@ function prepareStructureFrame(coordinates, bounds) {
   };
 }
 
-function frameStructureWithMargin(canvas3d, frame) {
+function frameStructureWithMargin(canvas3d, frame, targetViewport) {
   const camera = canvas3d?.camera;
   const bounds = canvas3d?.boundingSphereVisible;
-  const viewport = camera?.viewport;
+  const viewport = targetViewport?.width > 0 && targetViewport?.height > 0
+    ? targetViewport
+    : camera?.viewport;
   const boundsMargin = PREVIEW_CANVAS_MARGIN;
   if (!camera || !bounds?.radius || !frame || !viewport || viewport.width <= boundsMargin * 2 || viewport.height <= boundsMargin * 2) return;
 
@@ -214,12 +218,12 @@ function waitForCanvasCommit(canvas3d) {
   });
 }
 
+function waitForNextFrame() {
+  return new Promise((resolve) => window.requestAnimationFrame(() => resolve()));
+}
+
 function publishedStructure(run) {
-  const artifacts = (run?.stages ?? []).flatMap((stage) => stage.artifacts ?? []);
-  const preferred = ['selected_reference_pdb', 'model_cif']
-    .map((artifactType) => artifacts.find((artifact) => artifact.artifact_type === artifactType))
-    .find(Boolean);
-  const artifact = preferred || artifacts.find(isStructureArtifact);
+  const artifact = preferredStructureArtifact(run);
   return artifact
     ? { id: artifact.id, format: structureFormat(artifact), label: artifactDisplayName(artifact) }
     : null;
@@ -238,12 +242,14 @@ function snapshotCacheKey(run, structure) {
   const ownerId = run?.configuration?.owner_id ?? run?.owner_id;
   if (!projectId && !ownerId) return '';
   const scope = [projectId, ownerId].filter(Boolean).join(':');
-  return `${scope}:${structure.id}`;
+  return `v${PREVIEW_SNAPSHOT_VERSION}:${scope}:${structure.id}`;
 }
 
-async function captureHighResolutionSnapshot(viewer, canvas3d) {
+async function captureHighResolutionSnapshot(viewer, canvas3d, targetViewport) {
   const screenshot = viewer?.plugin?.helpers?.viewportScreenshot;
-  const viewport = canvas3d?.camera?.viewport;
+  const viewport = targetViewport?.width > 0 && targetViewport?.height > 0
+    ? targetViewport
+    : canvas3d?.camera?.viewport;
   if (!screenshot || !viewport?.width || !viewport?.height) {
     throw new Error('Mol* no pudo preparar la captura de la estructura.');
   }
@@ -347,10 +353,18 @@ export default function ProteinStructurePreview({ run, label }) {
             if (!canvas3d?.boundingSphereVisible?.radius || canvas3d.commitQueueSize.value !== 0) {
               throw new Error('Mol* no terminó de preparar la estructura.');
             }
+            const previewBounds = previewElement?.getBoundingClientRect();
+            const previewViewport = {
+              width: previewBounds?.width ?? 0,
+              height: previewBounds?.height ?? 0,
+            };
             const coordinates = collectStructurePoints(viewer);
             const frame = prepareStructureFrame(coordinates, canvas3d?.boundingSphereVisible);
-            frameStructureWithMargin(canvas3d, frame);
-            return await captureHighResolutionSnapshot(viewer, canvas3d);
+            frameStructureWithMargin(canvas3d, frame, previewViewport);
+            canvas3d.requestDraw?.();
+            await waitForNextFrame();
+            await waitForNextFrame();
+            return await captureHighResolutionSnapshot(viewer, canvas3d, previewViewport);
           } finally {
             if (viewerRef.current === viewer) viewerRef.current = null;
             viewer?.dispose?.();

@@ -11,7 +11,7 @@ Los puertos de desarrollo definidos para este proyecto son deliberadamente:
 - frontend: `4742`
 - backend: `8742`
 
-`compose.yml` soporta dos perfiles de ejecución HPC; se debe activar uno según dónde corre el stack. `vpn` es el modo de workstation: levanta la VPN, espera el endpoint SSH de MareNostrum y usa SSH/SCP para transferir y enviar automáticamente las runs validadas a Slurm. `mn5` es el modo directo: se ejecuta dentro de MareNostrum, no levanta VPN ni usa SSH y llama al Slurm local sobre el GPFS montado. PostgreSQL, migraciones, API y frontend son comunes a ambos perfiles. El Compose no configura una política de reinicio automático: el stack sólo se inicia cuando ejecutas explícitamente `docker compose up`.
+`compose.yml` soporta dos perfiles de ejecución HPC; se debe activar uno según dónde corre el stack. `vpn` es el modo de workstation: levanta la VPN, espera el endpoint SSH de MareNostrum y usa SSH/SCP para transferir y enviar automáticamente las runs validadas a Slurm. `mn5` es el modo directo: se ejecuta dentro de MareNostrum, no levanta VPN ni usa SSH y llama al Slurm local sobre el GPFS montado. PostgreSQL, migraciones, API y frontend son comunes a ambos perfiles. Los workers usan `restart: unless-stopped`; los demás servicios requieren `docker compose up` y no tienen una política de reinicio configurada.
 
 ```text
 residue-annotation-platform/
@@ -90,7 +90,7 @@ HPC_KNOWN_HOSTS_FILE=/ruta/local/known_hosts \
 docker compose up --build -d
 ```
 
-El password de VPN puede vivir en un archivo de una sola línea con permisos `0600`, o en un archivo de configuración `openfortivpn` protegido. El servicio `vpn` es el único que recibe `NET_ADMIN`; `worker-vpn` ejecuta como el UID no root configurado en `HPC_WORKER_UID`, que debe ser propietario de los secretos protegidos, y usa el GID interno `HPC_APP_GID` para compartir artefactos privados con el backend. El backend, frontend y `worker-vpn` nunca reciben `NET_ADMIN`, no tienen red directa al host y sólo `worker-vpn` monta, en modo lectura, el password SSH y `known_hosts`; no se monta `.env` ni el filesystem del host.
+El password de VPN puede vivir en un archivo de una sola línea con permisos `0600`, o en un archivo de configuración `openfortivpn` protegido. El servicio `vpn` es el único que recibe `NET_ADMIN`; `worker-vpn`, `worker-vpn-snapshots` y `worker-vpn-executor` ejecutan como el UID no root configurado en `HPC_WORKER_UID`, que debe ser propietario de los secretos protegidos, y usan el GID interno `HPC_APP_GID` para compartir artefactos privados con el backend. `worker-vpn-snapshots` actualiza los estados de etapa desde `run_context.json`; `worker-vpn` publica manifiestos y artefactos verificados sin reenviar jobs; `worker-vpn-executor` procesa las corridas normales. El backend, frontend y los workers nunca reciben `NET_ADMIN`, no tienen red directa al host y sólo los workers montan, en modo lectura, el password SSH y `known_hosts`; no se monta `.env` ni el filesystem del host.
 
 ### Ejecución directa en MareNostrum
 
